@@ -1,0 +1,45 @@
+lib.callback.register('mz_core:server:getPlayerData', function(source)
+  local player = MZPlayerService.getPlayer(source)
+  if not player then
+    player = MZPlayerService.loadPlayer(source)
+  end
+
+  if player then
+    MZPlayerService.touchPlayer(source)
+    MZOrgService.loadPlayerOrgs(source)
+  end
+
+  return player
+end)
+
+lib.callback.register('mz_core:server:getPlayerSession', function(source)
+  MZPlayerService.touchPlayer(source)
+  return MZPlayerService.getPlayerSession(source)
+end)
+
+lib.callback.register('mz_core:server:getSpawnData', function(source)
+  local player = MZPlayerService.getPlayer(source)
+  if not player then
+    player = MZPlayerService.loadPlayer(source)
+  end
+
+  if not player then return nil end
+
+  local lastPosition = MZPlayerService.getLastPosition(source)
+  if lastPosition then
+    return {
+      x = lastPosition.x,
+      y = lastPosition.y,
+      z = lastPosition.z,
+      heading = lastPosition.heading or 0.0
+    }
+  end
+
+  return {
+  x = Config.DefaultSpawn.x,
+  y = Config.DefaultSpawn.y,
+  z = Config.DefaultSpawn.z,
+  heading = Config.DefaultSpawn.heading or 0.0,
+  model = 'mp_m_freemode_01'
+}
+end)

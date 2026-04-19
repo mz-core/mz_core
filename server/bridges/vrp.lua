@@ -1,0 +1,1 @@
+-- future compatibility layer for vrp-style resources

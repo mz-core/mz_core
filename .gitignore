@@ -1,0 +1,12 @@
+id="j4z84p"
+*.log
+*.tmp
+*.bak
+cache/
+node_modules/
+.env
+.env.*
+dist/
+build/
+*.zip
+.agent.md

@@ -1,0 +1,1 @@
+-- future compatibility layer for esx-style resources
