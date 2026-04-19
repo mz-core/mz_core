@@ -79,4 +79,7 @@ No estado atual, o spawn base tambem assume a presenca operacional do `spawnmana
 - `exports['mz_core']:GetCoreObject()` agora retorna uma camada inicial em estilo QB
 - escopo atual: `GetPlayer`, `GetPlayerData`, `GetPlayerByCitizenId`, `GetPlayers`, `GetQBPlayers`, `GetIdentifier`, `GetSource`, `GetItems`
 - wrapper de player com `PlayerData` e `Functions` para `AddMoney`, `RemoveMoney`, `SetMoney`, `GetMoney`, `AddItem`, `RemoveItem`, `HasItem`, `SetMetaData`, `GetMetaData`, `SetPlayerData`, `UpdatePlayerData`
+- `PlayerData` atual exposto pela bridge QB: `source`, `license`, `citizenid`, `charinfo`, `metadata`, `money`, `orgs`, `job`, `gang`, `items`, `state`, `session`
+- `PlayerData.items` agora tem shape mínimo estável para a bridge: `slot`, `name`, `item`, `amount`, `metadata`, `instance_uid`, `label`, `weight`, `unique`
+- ESX e vRP continuam como `placeholder/pending`; ainda não existe bridge real para esses contratos
 - isso ainda não substitui `qb-core` real, mas já define um contrato de compatibilidade inicial para resources externos
