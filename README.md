@@ -1,4 +1,10 @@
-# mz_core
+<p align="center">
+  <img src="./assets/logo.svg" alt="mz_core logo" width="260">
+</p>
+
+<p align="center">
+  Framework própria para FiveM, modular e focada em núcleo limpo.
+</p>
 
 `mz_core` e um core modular para FiveM focado no coracao server-side do projeto.
 
@@ -14,19 +20,19 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 
 ## Escopo real atual
 
-| Area | Status | Observacao |
-| --- | --- | --- |
-| Prepare / bootstrap / seed | Validado | Schema, migracoes defensivas, seed padrao e gate de readiness existem |
-| Player / identidade / sessao | Validado com ressalvas | Load, unload, cache, sessao e posicao existem; multichar nao existe |
-| Orgs / grades / permissoes | Validado | Dominio forte e funcional no escopo atual |
-| Accounts / org accounts / payroll | Validado com ressalvas | Core funciona; payroll ainda nao e atomico |
-| Inventory multi-contexto | Validado | Main, personal stash, org stash, trunk, glovebox e world drop existem |
-| Vehicles base | Validado com ressalvas | Ownership, acesso, estado e flow base existem; camada visual e externa |
-| Logs estruturados | Validado com ressalvas | Existe padrao util, mas ainda pode ser refinado |
-| Surface client minima | Parcial | Spawn base, cache client e exports simples existem; helpers de vehicles/inventory estao vazios |
-| Bridge QB | Parcial | Existe contrato inicial, mas nao e bridge fechada nem validada como compatibilidade total |
-| Bridge ESX / vRP | Placeholder | Arquivos existem, contrato real nao |
-| Comandos de debug e prova | Temporario | Utilitarios de validacao fazem parte do repositorio, nao do contrato do produto |
+| Area                              | Status                 | Observacao                                                                                     |
+| --------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------- |
+| Prepare / bootstrap / seed        | Validado               | Schema, migracoes defensivas, seed padrao e gate de readiness existem                          |
+| Player / identidade / sessao      | Validado com ressalvas | Load, unload, cache, sessao e posicao existem; multichar nao existe                            |
+| Orgs / grades / permissoes        | Validado               | Dominio forte e funcional no escopo atual                                                      |
+| Accounts / org accounts / payroll | Validado com ressalvas | Core funciona; payroll ainda nao e atomico                                                     |
+| Inventory multi-contexto          | Validado               | Main, personal stash, org stash, trunk, glovebox e world drop existem                          |
+| Vehicles base                     | Validado com ressalvas | Ownership, acesso, estado e flow base existem; camada visual e externa                         |
+| Logs estruturados                 | Validado com ressalvas | Existe padrao util, mas ainda pode ser refinado                                                |
+| Surface client minima             | Parcial                | Spawn base, cache client e exports simples existem; helpers de vehicles/inventory estao vazios |
+| Bridge QB                         | Parcial                | Existe contrato inicial, mas nao e bridge fechada nem validada como compatibilidade total      |
+| Bridge ESX / vRP                  | Placeholder            | Arquivos existem, contrato real nao                                                            |
+| Comandos de debug e prova         | Temporario             | Utilitarios de validacao fazem parte do repositorio, nao do contrato do produto                |
 
 ## Modulos existentes
 
