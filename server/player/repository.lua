@@ -92,6 +92,25 @@ function MZPlayerRepository.getActiveSession(citizenid)
   return MySQL.single.await([[SELECT * FROM mz_player_sessions WHERE citizenid = ? AND is_active = 1 ORDER BY id DESC LIMIT 1]], { citizenid })
 end
 
+function MZPlayerRepository.closeActiveSessionsByCitizenId(citizenid, reason)
+  citizenid = tostring(citizenid or '')
+  if citizenid == '' then return 0 end
+
+  return MySQL.update.await([[
+    UPDATE mz_player_sessions
+    SET
+      dropped_at = CURRENT_TIMESTAMP,
+      last_seen_at = CURRENT_TIMESTAMP,
+      disconnect_reason = ?,
+      session_seconds = TIMESTAMPDIFF(SECOND, joined_at, CURRENT_TIMESTAMP),
+      is_active = 0
+    WHERE citizenid = ? AND is_active = 1
+  ]], {
+    reason or 'replaced_by_new_load',
+    citizenid
+  }) or 0
+end
+
 function MZPlayerRepository.touchSession(sessionId, source)
   if not sessionId then return false end
 

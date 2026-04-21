@@ -26,3 +26,20 @@ end)
 AddEventHandler('playerDropped', function(reason)
   MZPlayerService.unloadPlayer(source, reason)
 end)
+
+AddEventHandler('onResourceStop', function(resourceName)
+  if resourceName ~= GetCurrentResourceName() then
+    return
+  end
+
+  local loadedSources = {}
+  for src, _ in pairs(MZCache.playersBySource or {}) do
+    loadedSources[#loadedSources + 1] = src
+  end
+
+  table.sort(loadedSources)
+
+  for _, src in ipairs(loadedSources) do
+    MZPlayerService.unloadPlayer(src, 'resource_stop')
+  end
+end)

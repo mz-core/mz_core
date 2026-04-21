@@ -1,5 +1,10 @@
 MZPlayerService = {}
 
+local CORE_READY_WAIT_STEP_MS = 50
+local CORE_READY_WAIT_TIMEOUT_MS = 15000
+local LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS = 15000
+local LoadInFlightBySource = {}
+
 local function getLicense(source)
   for _, identifier in ipairs(GetPlayerIdentifiers(source)) do
     if identifier:find('license:') == 1 then
@@ -67,6 +72,58 @@ local function refreshSessionState(player, sessionRow)
   player.session = buildSessionData(player.source, player, sessionRow)
 end
 
+local function waitForCoreReady(timeoutMs)
+  if not MZCoreState or MZCoreState.ready == true then
+    return true
+  end
+
+  local waited = 0
+  local maxWait = tonumber(timeoutMs) or CORE_READY_WAIT_TIMEOUT_MS
+
+  while true do
+    if MZCoreState and MZCoreState.ready == true then
+      return true
+    end
+
+    if MZCoreState and MZCoreState.prepareDone == true and MZCoreState.prepareOk ~= true then
+      return false, 'core_prepare_failed'
+    end
+
+    if MZCoreState and MZCoreState.seedDone == true and MZCoreState.seedOk ~= true then
+      return false, 'core_seed_failed'
+    end
+
+    if waited >= maxWait then
+      return false, 'core_not_ready'
+    end
+
+    Wait(CORE_READY_WAIT_STEP_MS)
+    waited = waited + CORE_READY_WAIT_STEP_MS
+  end
+end
+
+local function waitForLoadInFlight(source, timeoutMs)
+  local waited = 0
+  local maxWait = tonumber(timeoutMs) or LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS
+
+  while LoadInFlightBySource[source] == true do
+    if waited >= maxWait then
+      return false, 'load_player_timeout'
+    end
+
+    Wait(CORE_READY_WAIT_STEP_MS)
+    waited = waited + CORE_READY_WAIT_STEP_MS
+  end
+
+  local cached = MZCache.playersBySource[source]
+  if cached then
+    MZPlayerService.touchPlayer(source)
+    return true, cached
+  end
+
+  return false, 'load_player_failed'
+end
+
 function MZPlayerService.loadPlayer(source)
   local cached = MZCache.playersBySource[source]
   if cached then
@@ -74,61 +131,97 @@ function MZPlayerService.loadPlayer(source)
     return cached
   end
 
-  local license = getLicense(source)
-  if not license then
-    return nil, 'missing_license'
+  local readyOk, readyErr = waitForCoreReady(CORE_READY_WAIT_TIMEOUT_MS)
+  if not readyOk then
+    return nil, readyErr
   end
 
-  local row = MZPlayerRepository.getByLicense(license)
-  if not row then
-    local citizenid
-    repeat
-      citizenid = MZUtils.generateCitizenId()
-    until not MZPlayerRepository.getByCitizenId(citizenid)
+  cached = MZCache.playersBySource[source]
+  if cached then
+    MZPlayerService.touchPlayer(source)
+    return cached
+  end
 
-    row = MZPlayerRepository.create({
+  if LoadInFlightBySource[source] == true then
+    local waitOk, resultOrErr = waitForLoadInFlight(source, LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS)
+    if waitOk then
+      return resultOrErr
+    end
+
+    return nil, resultOrErr
+  end
+
+  LoadInFlightBySource[source] = true
+
+  local ok, playerData, err = xpcall(function()
+    local license = getLicense(source)
+    if not license then
+      return nil, 'missing_license'
+    end
+
+    local row = MZPlayerRepository.getByLicense(license)
+    if not row then
+      local citizenid
+      repeat
+        citizenid = MZUtils.generateCitizenId()
+      until not MZPlayerRepository.getByCitizenId(citizenid)
+
+      row = MZPlayerRepository.create({
+        license = license,
+        citizenid = citizenid,
+        metadata = Config.Player.defaultMetadata
+      })
+    end
+
+    MZPlayerRepository.ensureAccount(row.citizenid)
+    local account = MZPlayerRepository.getAccount(row.citizenid)
+    local playerData = buildPlayerData(source, row, account)
+
+    MZPlayerRepository.closeActiveSessionsByCitizenId(row.citizenid, 'replaced_by_new_load')
+
+    local sessionRow = MZPlayerRepository.createSession({
+      citizenid = row.citizenid,
       license = license,
-      citizenid = citizenid,
-      metadata = Config.Player.defaultMetadata
+      source = source
     })
+
+    refreshSessionState(playerData, sessionRow)
+
+    MZCache.playersBySource[source] = playerData
+    MZCache.playersByCitizenId[playerData.citizenid] = playerData
+
+    MZLogService.createDetailed('player', 'loaded', {
+      actor = MZLogService.makeActor('player', playerData.citizenid, {
+        source = source,
+        license = playerData.license
+      }),
+      target = MZLogService.makeTarget('session', sessionRow and sessionRow.id or 'unknown', {
+        citizenid = playerData.citizenid
+      }),
+      context = {
+        source = source,
+        license = playerData.license
+      },
+      after = {
+        state = playerData.state,
+        session = playerData.session
+      },
+      meta = {
+        event = 'load_player'
+      }
+    })
+
+    return playerData
+  end, debug.traceback)
+
+  LoadInFlightBySource[source] = nil
+
+  if not ok then
+    print(('[mz_core] loadPlayer failed for source %s: %s'):format(tostring(source), tostring(playerData)))
+    return nil, 'load_player_failed'
   end
 
-  MZPlayerRepository.ensureAccount(row.citizenid)
-  local account = MZPlayerRepository.getAccount(row.citizenid)
-  local playerData = buildPlayerData(source, row, account)
-  local sessionRow = MZPlayerRepository.createSession({
-    citizenid = row.citizenid,
-    license = license,
-    source = source
-  })
-
-  refreshSessionState(playerData, sessionRow)
-
-  MZCache.playersBySource[source] = playerData
-  MZCache.playersByCitizenId[playerData.citizenid] = playerData
-
-  MZLogService.createDetailed('player', 'loaded', {
-    actor = MZLogService.makeActor('player', playerData.citizenid, {
-      source = source,
-      license = playerData.license
-    }),
-    target = MZLogService.makeTarget('session', sessionRow and sessionRow.id or 'unknown', {
-      citizenid = playerData.citizenid
-    }),
-    context = {
-      source = source,
-      license = playerData.license
-    },
-    after = {
-      state = playerData.state,
-      session = playerData.session
-    },
-    meta = {
-      event = 'load_player'
-    }
-  })
-
-  return playerData
+  return playerData, err
 end
 
 function MZPlayerService.touchPlayer(source)

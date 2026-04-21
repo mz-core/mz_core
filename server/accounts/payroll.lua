@@ -13,7 +13,7 @@ end
 
 local function getOrgMembershipsForCitizen(citizenid)
   return MySQL.query.await([[
-    SELECT po.*, o.code AS org_code, o.name AS org_name, o.has_salary,
+    SELECT po.*, o.code AS org_code, o.name AS org_name, o.has_salary, o.has_shared_account,
            g.level AS grade_level, g.name AS grade_name, g.salary
     FROM mz_player_orgs po
     INNER JOIN mz_orgs o ON o.id = po.org_id
@@ -100,6 +100,7 @@ function MZPayrollService.payCitizen(citizenid, actor)
   end
 
   local paid = {}
+  local skipped = {}
   local requireDuty = true
   local bankBefore = nil
   local bankAfter = nil
@@ -113,7 +114,14 @@ function MZPayrollService.payCitizen(citizenid, actor)
 
     if asBool(membership.has_salary) and salary > 0 then
       if (not requireDuty) or asBool(membership.duty) then
-        local sourceType = 'unlimited'
+        if not asBool(membership.has_shared_account) then
+          skipped[#skipped + 1] = {
+            org = membership.org_code,
+            amount = salary,
+            reason = 'org_has_no_shared_account'
+          }
+          goto continue_membership
+        end
 
         local orgAccount = MySQL.single.await(
           'SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1',
@@ -121,7 +129,6 @@ function MZPayrollService.payCitizen(citizenid, actor)
         )
 
         if orgAccount then
-          sourceType = 'org_account'
           local balance = tonumber(orgAccount.balance) or 0
 
           if balance >= salary then
@@ -139,26 +146,39 @@ function MZPayrollService.payCitizen(citizenid, actor)
               paid[#paid + 1] = {
                 org = membership.org_code,
                 amount = salary,
-                source = sourceType
+                source = 'org_account'
               }
             end
           end
         else
-          if bankBefore == nil then
-            bankBefore = getPlayerBankBalance(citizenid)
-          end
-          local ok = addBankMoney(citizenid, salary)
-          if ok then
-            bankAfter = getPlayerBankBalance(citizenid)
-            paid[#paid + 1] = {
-              org = membership.org_code,
-              amount = salary,
-              source = sourceType
-            }
-          end
+          skipped[#skipped + 1] = {
+            org = membership.org_code,
+            amount = salary,
+            reason = 'org_account_missing'
+          }
         end
       end
     end
+
+    ::continue_membership::
+  end
+
+  if MZLogService and #skipped > 0 then
+    MZLogService.createDetailed('payroll', 'pay_citizen_inconsistency', {
+      actor = buildPayrollActor(actor),
+      target = {
+        type = 'player_account',
+        id = tostring(citizenid)
+      },
+      context = {
+        citizenid = tostring(citizenid),
+        require_duty = requireDuty == true,
+        membership_count = #memberships
+      },
+      meta = {
+        skipped = skipped
+      }
+    })
   end
 
   if #paid == 0 then
@@ -184,7 +204,8 @@ function MZPayrollService.payCitizen(citizenid, actor)
         bank = math.floor(tonumber(bankAfter ~= nil and bankAfter or bankBefore) or 0)
       },
       meta = {
-        payments = paid
+        payments = paid,
+        skipped = skipped
       }
     })
   end

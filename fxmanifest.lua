@@ -4,8 +4,8 @@ lua54 'yes'
 
 name 'mz_core'
 author 'Mazus'
-description 'Professional modular FiveM core framework skeleton'
-version '0.1.0'
+description 'Modular FiveM core framework base'
+version '1.0.0'
 
 shared_scripts {
   '@ox_lib/init.lua',

@@ -10,6 +10,14 @@ local function reply(message)
   print(('[mz_core] %s'):format(message))
 end
 
+local function joinArgs(args, startIndex)
+  local out = {}
+  for index = startIndex, #args do
+    out[#out + 1] = tostring(args[index])
+  end
+  return table.concat(out, ' ')
+end
+
 RegisterCommand('minv_give', function(source, args)
   if not canUseInventoryCommand(source) then
     return reply('Sem permissão.')
@@ -29,6 +37,42 @@ RegisterCommand('minv_give', function(source, args)
   end
 
   reply(('Item entregue: source=%s item=%s amount=%s'):format(targetSource, itemName, amount))
+end, true)
+
+RegisterCommand('minv_give_meta', function(source, args)
+  if not canUseInventoryCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
+  local targetSource = tonumber(args[1])
+  local itemName = args[2]
+  local amount = tonumber(args[3]) or 1
+  local metadataJson = joinArgs(args, 4)
+
+  if not targetSource or not itemName or metadataJson == '' then
+    return reply('Uso: minv_give_meta [source] [item] [amount] [json_metadata]')
+  end
+
+  local decodeOk, metadata = pcall(json.decode, metadataJson)
+  if not decodeOk then
+    return reply('Erro: json_metadata invÃ¡lido')
+  end
+
+  if type(metadata) ~= 'table' then
+    return reply('Erro: json_metadata deve decodificar para objeto/tabela')
+  end
+
+  local ok, err = exports['mz_core']:AddPlayerItem(targetSource, itemName, amount, metadata)
+  if not ok then
+    return reply(('Erro: %s'):format(err or 'unknown'))
+  end
+
+  reply(('Item entregue com metadata: source=%s item=%s amount=%s metadata=%s'):format(
+    targetSource,
+    itemName,
+    amount,
+    metadataJson
+  ))
 end, true)
 
 RegisterCommand('minv_take', function(source, args)

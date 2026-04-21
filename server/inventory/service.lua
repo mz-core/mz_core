@@ -465,8 +465,12 @@ local function getSlotInContext(ctx, slot)
   return MZInventoryRepository.getSlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, slot)
 end
 
-local function findStackableSlotInContext(ctx, itemName)
-  return MZInventoryRepository.findStackableSlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, itemName)
+local function metadataMatches(leftMetadata, rightMetadata)
+  return json.encode(leftMetadata or {}) == json.encode(rightMetadata or {})
+end
+
+local function findStackableSlotInContext(ctx, itemName, metadata)
+  return MZInventoryRepository.findStackableSlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, itemName, metadata)
 end
 
 local function canMergeRows(itemDef, fromRow, toRow)
@@ -485,7 +489,7 @@ local function canMergeRows(itemDef, fromRow, toRow)
   local fromMetadata = fromRow.metadata or {}
   local toMetadata = toRow.metadata or {}
 
-  return json.encode(fromMetadata) == json.encode(toMetadata)
+  return metadataMatches(fromMetadata, toMetadata)
 end
 
 local function moveBetweenContexts(actorPlayer, fromCtx, toCtx, fromSlot, toSlot, amount)
@@ -539,7 +543,7 @@ local function moveBetweenContexts(actorPlayer, fromCtx, toCtx, fromSlot, toSlot
   local toRow = getSlotInContext(toCtx, toSlot)
 
   if not toRow and itemDef.stack and amount < fromAmount then
-    local stackableSlot = findStackableSlotInContext(toCtx, fromRow.item)
+    local stackableSlot = findStackableSlotInContext(toCtx, fromRow.item, fromRow.metadata or {})
     if stackableSlot and tonumber(stackableSlot.slot) ~= toSlot then
       toSlot = tonumber(stackableSlot.slot)
       toRow = getSlotInContext(toCtx, toSlot)
@@ -1076,7 +1080,29 @@ function MZInventoryService.addPlayerItem(source, itemName, amount, metadata)
   end
 
   if itemDef.unique then
-    for _ = 1, amount do
+    local uniqueCount = math.floor(amount)
+    local usedSlots = {}
+    local rows = getInventoryRowsFromContext(ctx)
+
+    for _, row in ipairs(rows) do
+      local slotNumber = tonumber(row.slot)
+      if slotNumber then
+        usedSlots[slotNumber] = true
+      end
+    end
+
+    local freeSlots = 0
+    for slotNumber = 1, ctx.maxSlots do
+      if not usedSlots[slotNumber] then
+        freeSlots = freeSlots + 1
+      end
+    end
+
+    if freeSlots < uniqueCount then
+      return false, 'no_free_slot'
+    end
+
+    for _ = 1, uniqueCount do
       local slot = MZInventoryRepository.findFreeSlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, ctx.maxSlots)
       if not slot then
         return false, 'no_free_slot'
@@ -1110,7 +1136,13 @@ function MZInventoryService.addPlayerItem(source, itemName, amount, metadata)
     return true
   end
 
-  local stackSlot = itemDef.stack and MZInventoryRepository.findStackableSlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, itemName) or nil
+  local stackSlot = itemDef.stack and MZInventoryRepository.findStackableSlot(
+    ctx.ownerType,
+    ctx.ownerId,
+    ctx.inventoryType,
+    itemName,
+    metadata or {}
+  ) or nil
 
   if stackSlot then
     MZInventoryRepository.updateAmountBySlot(

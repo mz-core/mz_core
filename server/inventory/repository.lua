@@ -1,5 +1,9 @@
 MZInventoryRepository = {}
 
+local function metadataMatches(leftMetadata, rightMetadata)
+  return json.encode(leftMetadata or {}) == json.encode(rightMetadata or {})
+end
+
 local function decodeRows(rows)
   local out = {}
   for _, row in ipairs(rows or {}) do
@@ -52,20 +56,25 @@ function MZInventoryRepository.getByInstanceUid(instanceUid)
   return row
 end
 
-function MZInventoryRepository.findStackableSlot(ownerType, ownerId, inventoryType, itemName)
-  local row = MySQL.single.await([[
+function MZInventoryRepository.findStackableSlot(ownerType, ownerId, inventoryType, itemName, metadata)
+  local rows = MySQL.query.await([[
     SELECT *
     FROM mz_inventory_items
     WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND item = ? AND (instance_uid IS NULL OR instance_uid = '')
     ORDER BY slot ASC
-    LIMIT 1
-  ]], { ownerType, ownerId, inventoryType, itemName })
+  ]], { ownerType, ownerId, inventoryType, itemName }) or {}
 
-  if not row then return nil end
-  row.amount = tonumber(row.amount) or 0
-  row.slot = tonumber(row.slot) or 0
-  row.metadata = MZUtils.jsonDecode(row.metadata, {})
-  return row
+  for _, row in ipairs(rows) do
+    row.amount = tonumber(row.amount) or 0
+    row.slot = tonumber(row.slot) or 0
+    row.metadata = MZUtils.jsonDecode(row.metadata, {})
+
+    if metadataMatches(row.metadata, metadata) then
+      return row
+    end
+  end
+
+  return nil
 end
 
 function MZInventoryRepository.findItemRows(ownerType, ownerId, inventoryType, itemName)

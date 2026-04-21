@@ -1,6 +1,9 @@
-MZCoreState = MZCoreState or {
-  prepareOk = false
-}
+MZCoreState = MZCoreState or {}
+MZCoreState.prepareDone = false
+MZCoreState.prepareOk = false
+MZCoreState.seedDone = false
+MZCoreState.seedOk = false
+MZCoreState.ready = false
 
 local statements = {
   [[CREATE TABLE IF NOT EXISTS mz_players (
@@ -264,11 +267,14 @@ CreateThread(function()
   end)
 
   if not ok then
+    MZCoreState.prepareDone = true
     MZCoreState.prepareOk = false
+    MZCoreState.ready = false
     print(('[mz_core] prepare failed: %s'):format(err))
     return
   end
 
+  MZCoreState.prepareDone = true
   MZCoreState.prepareOk = true
   print('[mz_core] prepare completed')
 end)
