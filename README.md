@@ -6,8 +6,6 @@
   Framework própria para FiveM, modular e focada em núcleo limpo.
 </p>
 
-`mz_core` e um core modular para FiveM focado no coracao server-side do projeto.
-
 Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao significa framework completo, compatibilidade total com recursos externos ou ecossistema pronto. Significa que os modulos centrais do proprio `mz_core` ja sustentam uma base tecnica coerente para bootstrap, player, orgs, accounts, inventory, vehicles, logs e API publica do core.
 
 ## Filosofia do projeto
