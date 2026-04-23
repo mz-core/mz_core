@@ -137,3 +137,43 @@ end)
 exports('UsePlayerItem', function(source, slot)
   return MZInventoryService.usePlayerItem(source, slot)
 end)
+
+exports('OpenPlayerInventory', function(source)
+  return MZInventoryService.openPlayerInventory(source)
+end)
+
+exports('OpenInventoryContainer', function(source, descriptor)
+  return MZInventoryService.openInventoryContainer(source, descriptor)
+end)
+
+exports('GetInventorySnapshot', function(source, descriptor)
+  return MZInventoryService.getInventorySnapshot(source, descriptor)
+end)
+
+exports('GetInventoryViewSnapshot', function(source, request)
+  return MZInventoryService.getInventoryViewSnapshot(source, request)
+end)
+
+exports('MoveInventoryItem', function(source, request)
+  return MZInventoryService.moveInventoryItem(source, request)
+end)
+
+exports('SplitInventoryStack', function(source, request)
+  return MZInventoryService.splitInventoryStack(source, request)
+end)
+
+exports('MergeInventorySlots', function(source, request)
+  return MZInventoryService.mergeInventorySlots(source, request)
+end)
+
+exports('SwapInventorySlots', function(source, request)
+  return MZInventoryService.swapInventorySlots(source, request)
+end)
+
+exports('UseInventoryItemAction', function(source, request)
+  return MZInventoryService.useInventoryItemAction(source, request)
+end)
+
+exports('GetInventoryErrorCatalog', function()
+  return MZInventoryService.getPublicInventoryErrorCatalog()
+end)

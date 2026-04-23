@@ -4,6 +4,10 @@ local function metadataMatches(leftMetadata, rightMetadata)
   return json.encode(leftMetadata or {}) == json.encode(rightMetadata or {})
 end
 
+local function encodeMetadata(metadata)
+  return MZUtils.jsonEncode(metadata or {})
+end
+
 local function decodeRows(rows)
   local out = {}
   for _, row in ipairs(rows or {}) do
@@ -110,35 +114,110 @@ function MZInventoryRepository.findFreeSlot(ownerType, ownerId, inventoryType, m
   return nil
 end
 
+function MZInventoryRepository.buildSetSlotStatement(data)
+  return {
+    query = [[
+      INSERT INTO mz_inventory_items (
+        owner_type, owner_id, inventory_type, slot, item, amount, metadata, instance_uid
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON DUPLICATE KEY UPDATE
+        item = VALUES(item),
+        amount = VALUES(amount),
+        metadata = VALUES(metadata),
+        instance_uid = VALUES(instance_uid),
+        updated_at = CURRENT_TIMESTAMP
+    ]],
+    parameters = {
+      data.owner_type,
+      data.owner_id,
+      data.inventory_type,
+      data.slot,
+      data.item,
+      data.amount,
+      encodeMetadata(data.metadata),
+      data.instance_uid
+    }
+  }
+end
+
+function MZInventoryRepository.buildDeleteSlotStatement(ownerType, ownerId, inventoryType, slot)
+  return {
+    query = [[
+      DELETE FROM mz_inventory_items
+      WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
+    ]],
+    parameters = { ownerType, ownerId, inventoryType, slot }
+  }
+end
+
+function MZInventoryRepository.buildUpdateAmountBySlotStatement(ownerType, ownerId, inventoryType, slot, amount)
+  return {
+    query = [[
+      UPDATE mz_inventory_items
+      SET amount = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
+    ]],
+    parameters = { amount, ownerType, ownerId, inventoryType, slot }
+  }
+end
+
+function MZInventoryRepository.buildUpdateMetadataBySlotStatement(ownerType, ownerId, inventoryType, slot, metadata)
+  return {
+    query = [[
+      UPDATE mz_inventory_items
+      SET metadata = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
+    ]],
+    parameters = {
+      encodeMetadata(metadata),
+      ownerType,
+      ownerId,
+      inventoryType,
+      slot
+    }
+  }
+end
+
+function MZInventoryRepository.runTransaction(statements)
+  if type(statements) ~= 'table' or #statements == 0 then
+    return true
+  end
+
+  local transactionStatements = {}
+
+  for _, statement in ipairs(statements) do
+    if type(statement) == 'table' and type(statement.query) == 'string' and statement.query ~= '' then
+      transactionStatements[#transactionStatements + 1] = {
+        query = statement.query,
+        parameters = statement.parameters or statement.values or {}
+      }
+    end
+  end
+
+  if #transactionStatements == 0 then
+    return true
+  end
+
+  local ok, result = pcall(function()
+    return MySQL.transaction.await(transactionStatements)
+  end)
+
+  if not ok or result == false then
+    return false, ok and 'inventory_transaction_failed' or tostring(result)
+  end
+
+  return true
+end
+
 function MZInventoryRepository.setSlot(data)
-  MySQL.insert.await([[
-    INSERT INTO mz_inventory_items (
-      owner_type, owner_id, inventory_type, slot, item, amount, metadata, instance_uid
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE
-      item = VALUES(item),
-      amount = VALUES(amount),
-      metadata = VALUES(metadata),
-      instance_uid = VALUES(instance_uid),
-      updated_at = CURRENT_TIMESTAMP
-  ]], {
-    data.owner_type,
-    data.owner_id,
-    data.inventory_type,
-    data.slot,
-    data.item,
-    data.amount,
-    MZUtils.jsonEncode(data.metadata or {}),
-    data.instance_uid
-  })
+  local statement = MZInventoryRepository.buildSetSlotStatement(data)
+  MySQL.insert.await(statement.query, statement.parameters)
 end
 
 function MZInventoryRepository.deleteSlot(ownerType, ownerId, inventoryType, slot)
-  MySQL.query.await([[
-    DELETE FROM mz_inventory_items
-    WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
-  ]], { ownerType, ownerId, inventoryType, slot })
+  local statement = MZInventoryRepository.buildDeleteSlotStatement(ownerType, ownerId, inventoryType, slot)
+  MySQL.query.await(statement.query, statement.parameters)
 end
 
 function MZInventoryRepository.clearInventory(ownerType, ownerId, inventoryType)
@@ -153,20 +232,11 @@ function MZInventoryRepository.clearInventory(ownerType, ownerId, inventoryType)
 end
 
 function MZInventoryRepository.updateAmountBySlot(ownerType, ownerId, inventoryType, slot, amount)
-  MySQL.update.await([[
-    UPDATE mz_inventory_items
-    SET amount = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
-  ]], { amount, ownerType, ownerId, inventoryType, slot })
+  local statement = MZInventoryRepository.buildUpdateAmountBySlotStatement(ownerType, ownerId, inventoryType, slot, amount)
+  MySQL.update.await(statement.query, statement.parameters)
 end
 
 function MZInventoryRepository.updateMetadataBySlot(ownerType, ownerId, inventoryType, slot, metadata)
-  MySQL.update.await([[
-    UPDATE mz_inventory_items
-    SET metadata = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE owner_type = ? AND owner_id = ? AND inventory_type = ? AND slot = ?
-  ]], {
-    MZUtils.jsonEncode(metadata or {}),
-    ownerType, ownerId, inventoryType, slot
-  })
+  local statement = MZInventoryRepository.buildUpdateMetadataBySlotStatement(ownerType, ownerId, inventoryType, slot, metadata)
+  MySQL.update.await(statement.query, statement.parameters)
 end
