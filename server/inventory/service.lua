@@ -311,6 +311,13 @@ local function generateWorldDropUid()
   return MZUtils.generateInstanceUid('DROP')
 end
 
+local emitWorldDropUpserted
+local emitWorldDropRemoved
+
+local WORLD_DROP_DEFAULT_LABEL = 'Ground Bag'
+local WORLD_DROP_REUSE_RADIUS = 2.0
+local WORLD_DROP_MAX_DISTANCE_FROM_PLAYER = 5.0
+
 local function normalizeWorldCoords(coords)
   if type(coords) ~= 'table' then
     return {
@@ -356,8 +363,12 @@ end
 
 local function cleanupDropIfEmpty(dropUid)
   if isDropEmpty(dropUid) then
-    MZWorldDropRepository.deleteByUid(dropUid)
-    return true
+    local drop = MZWorldDropRepository.getByUid(dropUid)
+    if drop then
+      MZWorldDropRepository.deleteByUid(dropUid)
+      emitWorldDropRemoved(dropUid)
+      return true
+    end
   end
 
   return false
@@ -391,6 +402,44 @@ local function cloneTable(value)
     out[k] = cloneTable(v)
   end
   return out
+end
+
+local function buildWorldDropSyncPayload(drop)
+  if type(drop) ~= 'table' then
+    return nil
+  end
+
+  local dropUid = tostring(drop.drop_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if dropUid == '' then
+    return nil
+  end
+
+  return {
+    drop_uid = dropUid,
+    label = tostring(drop.label or 'Drop'),
+    x = tonumber(drop.x) or 0,
+    y = tonumber(drop.y) or 0,
+    z = tonumber(drop.z) or 0,
+    metadata = cloneTable(type(drop.metadata_json) == 'table' and drop.metadata_json or {})
+  }
+end
+
+emitWorldDropUpserted = function(drop)
+  local payload = buildWorldDropSyncPayload(drop)
+  if not payload then
+    return
+  end
+
+  TriggerEvent('mz_core:server:inventory:worldDropUpserted', payload)
+end
+
+emitWorldDropRemoved = function(dropUid)
+  dropUid = tostring(dropUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if dropUid == '' then
+    return
+  end
+
+  TriggerEvent('mz_core:server:inventory:worldDropRemoved', dropUid)
 end
 
 local function buildInventoryActor(player, source)
@@ -1919,6 +1968,8 @@ function MZInventoryService.createWorldDrop(coords, label, metadata)
     return false, 'drop_not_found'
   end
 
+  emitWorldDropUpserted(drop)
+
   return true, drop
 end
 
@@ -1928,8 +1979,13 @@ function MZInventoryService.deleteWorldDrop(dropUid)
     return false, 'invalid_drop_uid'
   end
 
+  local drop = MZWorldDropRepository.getByUid(dropUid)
   MZInventoryRepository.clearInventory('world', dropUid, 'drop')
   MZWorldDropRepository.deleteByUid(dropUid)
+
+  if drop then
+    emitWorldDropRemoved(dropUid)
+  end
 
   return true
 end
@@ -1993,6 +2049,130 @@ end
 
 function MZInventoryService.listWorldDrops()
   return true, MZWorldDropRepository.listAll()
+end
+
+local function getSourcePedCoords(source)
+  local ped = GetPlayerPed(source)
+  if not ped or ped == 0 then
+    return nil
+  end
+
+  local coords = GetEntityCoords(ped)
+  if not coords then
+    return nil
+  end
+
+  return {
+    x = tonumber(coords.x) or 0,
+    y = tonumber(coords.y) or 0,
+    z = tonumber(coords.z) or 0
+  }
+end
+
+local function getDistanceSquared(leftCoords, rightCoords)
+  if type(leftCoords) ~= 'table' or type(rightCoords) ~= 'table' then
+    return math.huge
+  end
+
+  local dx = (tonumber(leftCoords.x) or 0) - (tonumber(rightCoords.x) or 0)
+  local dy = (tonumber(leftCoords.y) or 0) - (tonumber(rightCoords.y) or 0)
+  local dz = (tonumber(leftCoords.z) or 0) - (tonumber(rightCoords.z) or 0)
+
+  return (dx * dx) + (dy * dy) + (dz * dz)
+end
+
+local function resolveGroundDropCoords(source, requestedCoords)
+  local fallbackCoords = getSourcePedCoords(source)
+  local normalizedCoords = normalizeWorldCoords(requestedCoords)
+
+  if type(requestedCoords) ~= 'table' then
+    return fallbackCoords or normalizedCoords
+  end
+
+  if not fallbackCoords then
+    return normalizedCoords
+  end
+
+  local maxDistanceSq = WORLD_DROP_MAX_DISTANCE_FROM_PLAYER * WORLD_DROP_MAX_DISTANCE_FROM_PLAYER
+  if getDistanceSquared(fallbackCoords, normalizedCoords) > maxDistanceSq then
+    return fallbackCoords
+  end
+
+  return normalizedCoords
+end
+
+local function findReusableWorldDropForPlayer(player, coords)
+  if type(player) ~= 'table' or tostring(player.citizenid or '') == '' then
+    return nil
+  end
+
+  local bestDrop = nil
+  local bestDistanceSq = nil
+  local maxDistanceSq = WORLD_DROP_REUSE_RADIUS * WORLD_DROP_REUSE_RADIUS
+
+  for _, drop in ipairs(MZWorldDropRepository.listAll() or {}) do
+    local metadata = type(drop.metadata_json) == 'table' and drop.metadata_json or {}
+    if tostring(metadata.created_by or '') == tostring(player.citizenid) then
+      local distanceSq = getDistanceSquared(coords, {
+        x = drop.x,
+        y = drop.y,
+        z = drop.z
+      })
+
+      if distanceSq <= maxDistanceSq and (bestDistanceSq == nil or distanceSq < bestDistanceSq) then
+        bestDrop = drop
+        bestDistanceSq = distanceSq
+      end
+    end
+  end
+
+  return bestDrop
+end
+
+local function chooseWorldDropSlot(ctx, itemName, metadata)
+  local rows = getInventoryRowsFromContext(ctx)
+  local stackRow = findStackableRowInRows(rows, itemName, metadata or {})
+  if stackRow then
+    return tonumber(stackRow.slot) or stackRow.slot
+  end
+
+  return findFreeSlotInRows(rows, ctx.maxSlots)
+end
+
+local function ensureWorldDropForTransfer(source, playerCtx, itemRow, coords)
+  local reusableDrop = findReusableWorldDropForPlayer(playerCtx.player, coords)
+  if reusableDrop then
+    local reusableCtx = getWorldDropContext(reusableDrop.drop_uid)
+    if reusableCtx then
+      local reusableSlot = chooseWorldDropSlot(reusableCtx, itemRow.item, itemRow.metadata or {})
+      if reusableSlot then
+        return true, reusableCtx, reusableDrop, reusableSlot, false
+      end
+    end
+  end
+
+  local ok, dropOrErr = MZInventoryService.createWorldDrop(coords, WORLD_DROP_DEFAULT_LABEL, {
+    source = 'inventory_drop',
+    created_by = tostring(playerCtx.player and playerCtx.player.citizenid or ''),
+    created_at = os.time()
+  })
+  if not ok then
+    return false, dropOrErr
+  end
+
+  local dropCtx, dropErr = getWorldDropContext(dropOrErr.drop_uid)
+  if not dropCtx then
+    MZInventoryService.deleteWorldDrop(dropOrErr.drop_uid)
+    return false, dropErr
+  end
+
+  local targetSlot = chooseWorldDropSlot(dropCtx, itemRow.item, itemRow.metadata or {})
+  if not targetSlot then
+    MZInventoryService.deleteWorldDrop(dropOrErr.drop_uid)
+    return false, 'no_free_slot'
+  end
+
+  return true, dropCtx, dropOrErr, targetSlot, true
 end
 
 function MZInventoryService.hasPlayerItem(source, itemName, amount)
@@ -2128,6 +2308,7 @@ local PublicInventoryErrors = {
   invalid_target = { code = 'invalid_target', message = 'Invalid inventory target.' },
   item_not_usable = { code = 'item_not_usable', message = 'Item is not usable.' },
   use_failed = { code = 'use_failed', message = 'Item use failed.' },
+  drop_create_failed = { code = 'drop_create_failed', message = 'Failed to create ground drop.' },
   player_not_loaded = { code = 'player_not_loaded', message = 'Player inventory is not available yet.' },
   unknown_error = { code = 'unknown_error', message = 'Unknown inventory error.' }
 }
@@ -2162,7 +2343,8 @@ local function mapPublicInventoryErrorCode(internalCode)
     not_in_org = 'container_access_denied',
     org_membership_required = 'container_access_denied',
     org_duty_required = 'container_access_denied',
-    use_handler_failed = 'use_failed'
+    use_handler_failed = 'use_failed',
+    drop_create_failed = 'drop_create_failed'
   }
 
   return mappings[internalCode] or internalCode
@@ -2300,6 +2482,7 @@ local function buildPublicSlotPayload(row, slot)
       occupied = false,
       item_id = nil,
       label = nil,
+      image = nil,
       amount = 0,
       weight = 0,
       total_weight = 0,
@@ -2320,6 +2503,7 @@ local function buildPublicSlotPayload(row, slot)
     occupied = true,
     item_id = tostring(row.item or ''),
     label = itemDef and tostring(itemDef.label or row.item or '') or tostring(row.item or ''),
+    image = itemDef and tostring(itemDef.image or ((row.item or '') .. '.png')) or (tostring(row.item or '') .. '.png'),
     amount = amount,
     weight = unitWeight,
     total_weight = unitWeight * amount,
@@ -2419,6 +2603,32 @@ local function buildPublicTouchedSnapshots(source, descriptors)
   return true, snapshots
 end
 
+local function collectTouchedWorldDropUids(...)
+  local collected = {}
+  local seen = {}
+
+  for index = 1, select('#', ...) do
+    local ctx = select(index, ...)
+    if type(ctx) == 'table'
+      and tostring(ctx.ownerType or '') == 'world'
+      and tostring(ctx.inventoryType or '') == 'drop' then
+      local dropUid = tostring((ctx.drop and ctx.drop.drop_uid) or ctx.ownerId or ''):gsub('^%s+', ''):gsub('%s+$', '')
+      if dropUid ~= '' and not seen[dropUid] then
+        seen[dropUid] = true
+        collected[#collected + 1] = dropUid
+      end
+    end
+  end
+
+  return collected
+end
+
+local function cleanupTouchedWorldDrops(dropUids)
+  for _, dropUid in ipairs(type(dropUids) == 'table' and dropUids or {}) do
+    cleanupDropIfEmpty(dropUid)
+  end
+end
+
 function MZInventoryService.openPlayerInventory(source)
   local ok, snapshotOrErr = getPublicInventorySnapshot(source, { type = 'player' })
   if not ok then
@@ -2483,6 +2693,94 @@ function MZInventoryService.getInventoryViewSnapshot(source, request)
   })
 end
 
+function MZInventoryService.dropInventoryItemAction(source, request)
+  request = type(request) == 'table' and request or {}
+
+  local descriptor = request.container or { type = 'player' }
+  local normalized, normalizeErr = normalizePublicContainerDescriptor(descriptor)
+  if not normalized then
+    return buildPublicInventoryError(normalizeErr)
+  end
+
+  if normalized.type ~= 'player' then
+    return buildPublicInventoryError('invalid_target', {
+      container = normalized
+    })
+  end
+
+  local playerCtx, ctxErr = resolvePublicContainerContext(source, normalized)
+  if not playerCtx then
+    return buildPublicInventoryError(ctxErr, {
+      container = normalized
+    })
+  end
+
+  local fromSlot = tonumber(request.slot or request.from_slot)
+  if not isValidSlotNumber(fromSlot, playerCtx.maxSlots) then
+    return buildPublicInventoryError('invalid_slot', {
+      container = normalized,
+      slot = tonumber(request.slot) or request.slot
+    })
+  end
+
+  local sourceRow = findRowBySlot(getInventoryRowsFromContext(playerCtx), fromSlot)
+  if not sourceRow then
+    return buildPublicInventoryError('source_slot_empty', {
+      container = normalized,
+      slot = fromSlot
+    })
+  end
+
+  local dropCoords = resolveGroundDropCoords(source, request.coords)
+  local dropOk, dropCtxOrErr, dropData, targetSlot, createdDrop = ensureWorldDropForTransfer(source, playerCtx, sourceRow, dropCoords)
+  if not dropOk then
+    return buildPublicInventoryError(dropCtxOrErr, {
+      container = normalized,
+      slot = fromSlot
+    })
+  end
+
+  local moveOk, resultOrErr = moveBetweenContexts(
+    playerCtx.player,
+    playerCtx,
+    dropCtxOrErr,
+    fromSlot,
+    targetSlot,
+    request.amount
+  )
+  if not moveOk then
+    if createdDrop == true and type(dropData) == 'table' and tostring(dropData.drop_uid or '') ~= '' then
+      cleanupDropIfEmpty(dropData.drop_uid)
+    end
+
+    return buildPublicInventoryError(resultOrErr, {
+      container = normalized,
+      slot = fromSlot
+    })
+  end
+
+  local snapshotsOk, snapshotsOrErr = buildPublicTouchedSnapshots(source, {
+    player = normalized,
+    drop = {
+      type = 'drop',
+      drop_uid = tostring(dropData and dropData.drop_uid or '')
+    }
+  })
+  if not snapshotsOk then
+    return buildPublicInventoryError(snapshotsOrErr)
+  end
+
+  return buildPublicInventorySuccess({
+    operation = type(resultOrErr) == 'table' and resultOrErr.operation or 'move',
+    drop_uid = tostring(dropData and dropData.drop_uid or ''),
+    created_drop = createdDrop == true,
+    snapshots = {
+      player = snapshotsOrErr.player,
+      drop = snapshotsOrErr.drop
+    }
+  })
+end
+
 function MZInventoryService.moveInventoryItem(source, request)
   request = type(request) == 'table' and request or {}
 
@@ -2521,10 +2819,12 @@ function MZInventoryService.moveInventoryItem(source, request)
     })
   end
 
+  local touchedDropUids = collectTouchedWorldDropUids(fromCtx, toCtx)
   local snapshotsOk, snapshotsOrErr = buildPublicTouchedSnapshots(source, {
     from = fromDescriptor,
     to = toDescriptor
   })
+  cleanupTouchedWorldDrops(touchedDropUids)
   if not snapshotsOk then
     return buildPublicInventoryError(snapshotsOrErr)
   end

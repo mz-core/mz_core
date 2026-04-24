@@ -34,6 +34,10 @@ lib.callback.register('mz_core:server:inventory:use', function(source, request)
   return MZInventoryService.useInventoryItemAction(source, request)
 end)
 
+lib.callback.register('mz_core:server:inventory:drop', function(source, request)
+  return MZInventoryService.dropInventoryItemAction(source, request)
+end)
+
 lib.callback.register('mz_core:server:inventory:errors', function()
   return MZInventoryService.getPublicInventoryErrorCatalog()
 end)

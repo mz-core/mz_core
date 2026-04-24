@@ -1,5 +1,6 @@
 MZItems = {
   water = {
+    image = 'water.png',
     label = 'Água',
     weight = 500,
     stack = true,
@@ -11,6 +12,7 @@ MZItems = {
   },
 
   bread = {
+    image = 'bread.png',
     label = 'Pão',
     weight = 300,
     stack = true,
@@ -22,6 +24,7 @@ MZItems = {
   },
 
   bandage = {
+    image = 'bandage.png',
     label = 'Bandagem',
     weight = 250,
     stack = true,
@@ -33,6 +36,7 @@ MZItems = {
   },
 
   cellphone = {
+    image = 'cellphone.png',
     label = 'Celular',
     weight = 800,
     stack = false,
@@ -44,6 +48,7 @@ MZItems = {
   },
 
   id_card = {
+    image = 'id_card.png',
     label = 'Documento',
     weight = 100,
     stack = false,
@@ -55,6 +60,7 @@ MZItems = {
   },
 
   weapon_pistol = {
+    image = 'weapon_pistol.png',
     label = 'Pistola',
     weight = 2500,
     stack = false,
@@ -67,6 +73,7 @@ MZItems = {
   },
 
   radio = {
+    image = 'radio.png',
     label = 'Rádio',
     weight = 700,
     stack = false,
