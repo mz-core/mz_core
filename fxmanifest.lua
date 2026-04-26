@@ -37,6 +37,7 @@ server_scripts {
 client_scripts {
   'client/main.lua',
   'client/player.lua',
+  'client/hud.lua',
   'client/spawn.lua',
   'client/orgs.lua',
   'client/vehicles.lua',

@@ -29,3 +29,7 @@ end)
 exports('IsPlayerLoaded', function(source)
   return MZPlayerService.isPlayerLoaded(source)
 end)
+
+exports('GetHUDState', function(source)
+  return MZPlayerHUDService.getStateForSource(source)
+end)

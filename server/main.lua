@@ -17,6 +17,11 @@ lib.callback.register('mz_core:server:getPlayerSession', function(source)
   return MZPlayerService.getPlayerSession(source)
 end)
 
+lib.callback.register('mz_core:server:getHUDState', function(source)
+  MZPlayerService.touchPlayer(source)
+  return MZPlayerHUDService.getStateForSource(source)
+end)
+
 lib.callback.register('mz_core:server:getSpawnData', function(source)
   local player = MZPlayerService.getPlayer(source)
   if not player then

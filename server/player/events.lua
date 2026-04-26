@@ -9,6 +9,7 @@ AddEventHandler('playerJoining', function()
 
     MZOrgService.loadPlayerOrgs(src)
     TriggerClientEvent('mz_core:client:playerLoaded', src, playerData)
+    MZPlayerHUDService.syncToClient(src)
   end)
 end)
 

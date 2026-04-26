@@ -271,6 +271,11 @@ function MZPlayerService.setMetadataValue(source, key, value)
   player.metadata[key] = value
   MZPlayerRepository.updateMetadata(player.citizenid, player.metadata)
   MZPlayerService.touchPlayer(source)
+
+  if MZPlayerHUDService then
+    MZPlayerHUDService.syncToClient(source)
+  end
+
   return true, player.metadata
 end
 
