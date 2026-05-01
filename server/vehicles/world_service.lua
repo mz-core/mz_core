@@ -886,6 +886,7 @@ local function setSpawnedVehicleState(entity, row)
     end
     state:set('mz_locked', row.locked == true, true)
     state:set('mz_lock_state', row.locked == true and 2 or 1, true)
+    state:set('mz_destroyed', row.destroyed == true, true)
     state:set('mz_world_props', row.props_json or {}, true)
     state:set('mz_world_condition', {
       fuel = row.fuel,

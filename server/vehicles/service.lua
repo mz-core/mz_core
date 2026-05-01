@@ -16,7 +16,7 @@ local function normalizeVehicleState(state)
 end
 
 local function debugVehicleWorld(message)
-  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == true then
+  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == false then
     print(('[mz_vehicle_world] %s'):format(tostring(message)))
   end
 end
@@ -1222,18 +1222,32 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
   local nextEngine = clampNumber(engine, 0, 1000, tonumber(vehicle.engine) or 1000)
   local nextBody = clampNumber(body, 0, 1000, tonumber(vehicle.body) or 1000)
   local nextProps = type(props) == 'table' and props or (vehicle.props_json or {})
+  local currentMetadata = type(vehicle.metadata_json) == 'table' and vehicle.metadata_json or {}
+  local currentWorld = type(currentMetadata.world) == 'table' and currentMetadata.world or {}
+  local currentCondition = type(currentMetadata.condition) == 'table' and currentMetadata.condition or {}
+  local destroyed = currentWorld.destroyed == true
+    or currentCondition.destroyed == true
+    or nextEngine <= 50.0
+    or nextBody <= 100.0
   local nextMetadata = mergeTable(vehicle.metadata_json or {}, buildFlowMetadataPatch('store', source, {
     last_known_garage = garage,
     last_store_garage = garage,
     world = mergeTable(
-      type(vehicle.metadata_json) == 'table' and type(vehicle.metadata_json.world) == 'table' and vehicle.metadata_json.world or {},
+      currentWorld,
       {
         persistent = false,
         net_id = 0,
+        destroyed = destroyed,
         stored_at = os.time(),
         updated_at = os.time()
       }
-    )
+    ),
+    condition = mergeTable(currentCondition, {
+      destroyed = destroyed,
+      fuel = nextFuel,
+      engine = nextEngine,
+      body = nextBody
+    })
   }))
   local nextImpoundData = vehicle.impound_data or {}
 

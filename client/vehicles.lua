@@ -1,5 +1,7 @@
 local AppliedWorldProps = {}
 local DestroyedSentByPlate = {}
+local DestroyedEnforcedAt = {}
+local DestroyedVisualApplied = {}
 local LastPersistentVehicle = nil
 local LastPersistentPlate = ''
 
@@ -160,6 +162,75 @@ local function getVehicleDestroyedState(vehicle)
   }
 end
 
+local function applyDestroyedVisualOnce(vehicle, plate)
+  plate = NormalizePlate(plate)
+  if plate == '' or DestroyedVisualApplied[plate] == true then
+    return false
+  end
+
+  DestroyedVisualApplied[plate] = true
+  print(('[mz_vehicle_world] apply destroyed visual once %s'):format(plate))
+
+  if type(SetVehicleTyreBurst) ~= 'function' then
+    return true
+  end
+
+  for tyre = 0, 7 do
+    local alreadyBurst = false
+    if type(IsVehicleTyreBurst) == 'function' then
+      local ok, result = pcall(IsVehicleTyreBurst, vehicle, tyre, false)
+      alreadyBurst = ok and result == true
+    end
+
+    if alreadyBurst ~= true then
+      pcall(SetVehicleTyreBurst, vehicle, tyre, true, 1000.0)
+    end
+  end
+
+  return true
+end
+
+local function enforceDestroyedUndriveable(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return false
+  end
+
+  requestControl(vehicle, 500)
+  pcall(SetVehicleEngineHealth, vehicle, -4000.0)
+  pcall(SetVehicleBodyHealth, vehicle, 50.0)
+  if type(SetVehiclePetrolTankHealth) == 'function' then
+    pcall(SetVehiclePetrolTankHealth, vehicle, 0.0)
+  end
+  pcall(SetVehicleEngineOn, vehicle, false, true, true)
+  pcall(SetVehicleUndriveable, vehicle, true)
+
+  return true
+end
+
+local function applyDestroyedUndriveable(vehicle, plate, logPrefix)
+  plate = NormalizePlate(plate)
+  if plate == '' or not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return false
+  end
+
+  print(('[mz_vehicle_world] %s destroyed undriveable %s'):format(tostring(logPrefix or 'apply'), plate))
+  if tostring(logPrefix or 'apply') == 'apply' then
+    applyDestroyedVisualOnce(vehicle, plate)
+  end
+
+  enforceDestroyedUndriveable(vehicle)
+
+  CreateThread(function()
+    Wait(500)
+    enforceDestroyedUndriveable(vehicle)
+    Wait(1000)
+    enforceDestroyedUndriveable(vehicle)
+  end)
+
+  DestroyedEnforcedAt[plate] = GetGameTimer()
+  return true
+end
+
 local function finalizeWorldVehicle(vehicle, data)
   if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
     return false, 'entity_not_found'
@@ -188,6 +259,7 @@ local function finalizeWorldVehicle(vehicle, data)
   SetVehicleDoorsLocked(vehicle, locked and 2 or 1)
   SetVehicleDoorsLockedForAllPlayers(vehicle, locked)
   SetVehicleOnGroundProperly(vehicle)
+  local destroyed = world.destroyed == true or data.destroyed == true
 
   local state = Entity(vehicle).state
   if state then
@@ -204,14 +276,19 @@ local function finalizeWorldVehicle(vehicle, data)
     end
     state:set('mz_locked', locked, true)
     state:set('mz_lock_state', locked and 2 or 1, true)
+    state:set('mz_destroyed', destroyed, true)
     state:set('mz_world_props', type(data.props) == 'table' and data.props or {}, true)
     state:set('mz_world_condition', {
       fuel = tonumber(data.fuel) or 100,
       engine = tonumber(data.engine) or 1000,
       body = tonumber(data.body) or 1000,
       locked = locked,
-      destroyed = world.destroyed == true or data.destroyed == true
+      destroyed = destroyed
     }, true)
+  end
+
+  if destroyed == true then
+    applyDestroyedUndriveable(vehicle, plate, 'apply')
   end
 
   return true
@@ -313,6 +390,7 @@ local function applyWorldVehicleState(vehicle)
   local plate = tostring(state.mz_plate or '')
   local props = type(state.mz_world_props) == 'table' and state.mz_world_props or nil
   local condition = type(state.mz_world_condition) == 'table' and state.mz_world_condition or {}
+  local destroyed = state.mz_destroyed == true or condition.destroyed == true
   local locked = condition.locked
   if locked == nil then
     locked = state.mz_locked == true
@@ -338,6 +416,10 @@ local function applyWorldVehicleState(vehicle)
   SetVehicleDoorsLocked(vehicle, locked and 2 or 1)
   SetVehicleDoorsLockedForAllPlayers(vehicle, locked)
   SetVehicleOnGroundProperly(vehicle)
+
+  if destroyed == true then
+    applyDestroyedUndriveable(vehicle, plate, 'apply')
+  end
 
   AppliedWorldProps[vehicle] = GetGameTimer()
   return true
@@ -509,6 +591,17 @@ CreateThread(function()
           if plate ~= '' then
             LastPersistentVehicle = vehicle
             LastPersistentPlate = plate
+          end
+
+          local stateDestroyed = state.mz_destroyed == true
+            or (type(state.mz_world_condition) == 'table' and state.mz_world_condition.destroyed == true)
+          if stateDestroyed == true and plate ~= '' then
+            local lastEnforced = tonumber(DestroyedEnforcedAt[plate]) or 0
+            if GetGameTimer() - lastEnforced > 2500 then
+              applyDestroyedUndriveable(vehicle, plate, 'enforce')
+            else
+              enforceDestroyedUndriveable(vehicle)
+            end
           end
 
           local destroyed = checkPersistentVehicleDestroyed(vehicle)
