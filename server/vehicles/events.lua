@@ -65,6 +65,37 @@ RegisterNetEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', function(
   end
 end)
 
+RegisterNetEvent('mz_core:vehicles:server:worldSnapshot', function(snapshot)
+  local src = source
+  if type(snapshot) ~= 'table' then
+    return
+  end
+
+  local plate = tostring(snapshot.plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+  if plate == '' then
+    return
+  end
+
+  snapshot.plate = plate
+
+  if snapshot.destroyed == true or tonumber(snapshot.destroyed) == 1 then
+    print(('[mz_vehicle_world] server destroyed snapshot received %s'):format(plate))
+
+    if MZVehicleService and MZVehicleService.markOutVehicleDestroyed then
+      local ok, err = MZVehicleService.markOutVehicleDestroyed(src, plate, snapshot)
+      if ok ~= true then
+        print(('[mz_vehicle_world] destroyed not saved %s reason=%s'):format(plate, tostring(err or 'mark_failed')))
+      end
+    end
+
+    return
+  end
+
+  if MZVehicleService and MZVehicleService.updateOutVehicleSnapshot then
+    MZVehicleService.updateOutVehicleSnapshot(src, plate, snapshot)
+  end
+end)
+
 RegisterNetEvent('mz_core:vehicles:server:playerWorldReady', function()
   local src = source
   if not MZPlayerService or not MZPlayerService.isPlayerLoaded or not MZPlayerService.isPlayerLoaded(src) then

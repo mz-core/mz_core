@@ -179,6 +179,51 @@ local function hasValidWorldCoords(row)
   return not (x == 0.0 and y == 0.0 and z == 0.0)
 end
 
+local function getSnapshotNumber(snapshot, fallback, ...)
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+
+  for i = 1, select('#', ...) do
+    local key = select(i, ...)
+    local value = tonumber(snapshot[key])
+    if value ~= nil then
+      return value + 0.0
+    end
+  end
+
+  return fallback
+end
+
+local function isTruthyDestroyed(value)
+  return value == true or value == 1 or value == '1'
+end
+
+local function computeDestroyed(snapshot, existing, plate)
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  existing = type(existing) == 'table' and existing or {}
+
+  local engine = tonumber(snapshot.engine_health or snapshot.engine)
+    or tonumber(existing.engine_health or existing.engine)
+    or 1000.0
+  local body = tonumber(snapshot.body_health or snapshot.body)
+    or tonumber(existing.body_health or existing.body)
+    or 1000.0
+  local wasDestroyed = isTruthyDestroyed(existing.destroyed)
+  local destroyed = wasDestroyed
+    or isTruthyDestroyed(snapshot.destroyed)
+    or engine <= 50.0
+    or body <= 100.0
+
+  logWorld(('destroyed compute %s engine=%.3f body=%.3f result=%s previous=%s'):format(
+    normalizePlate(plate or snapshot.plate or existing.plate),
+    engine,
+    body,
+    tostring(destroyed == true),
+    tostring(wasDestroyed == true)
+  ))
+
+  return destroyed == true, engine, body, wasDestroyed
+end
+
 local function getEntityFromNetId(netId)
   netId = tonumber(netId) or 0
   if netId <= 0 then
@@ -443,9 +488,14 @@ local function buildSnapshot(vehicle, snapshot, previous)
     locked = snapshot.locked == true or tonumber(snapshot.locked) == 2
   end
 
-  local destroyed = previous.destroyed == true
-  if snapshot.destroyed ~= nil then
-    destroyed = snapshot.destroyed == true
+  local destroyed, engineHealth, bodyHealth = computeDestroyed(snapshot, previous, vehicle.plate)
+
+  if destroyed == true then
+    logWorld(('destroyed detected %s engine=%.3f body=%.3f'):format(
+      normalizePlate(vehicle.plate),
+      tonumber(engineHealth) or 0.0,
+      tonumber(bodyHealth) or 0.0
+    ))
   end
 
   return {
@@ -459,8 +509,8 @@ local function buildSnapshot(vehicle, snapshot, previous)
     z = coords.z,
     heading = normalizeNumber(snapshot.heading or snapshot.last_heading, normalizeNumber(previous.heading, 0.0)),
     fuel = normalizeNumber(snapshot.fuel, normalizeNumber(previous.fuel, normalizeNumber(vehicle.fuel, 100.0))),
-    engine_health = normalizeNumber(snapshot.engine, normalizeNumber(previous.engine_health, normalizeNumber(vehicle.engine, 1000.0))),
-    body_health = normalizeNumber(snapshot.body, normalizeNumber(previous.body_health, normalizeNumber(vehicle.body, 1000.0))),
+    engine_health = engineHealth,
+    body_health = bodyHealth,
     locked = locked,
     destroyed = destroyed,
     props_json = props,
@@ -519,6 +569,21 @@ local function upsertWorldState(data)
     tonumber(data.net_id) or 0,
     tonumber(data.entity_handle) or 0
   })
+
+  if data.destroyed == true then
+    local affected = MySQL.update.await([[
+      UPDATE mz_vehicle_world_state
+      SET destroyed = 1,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE UPPER(TRIM(plate)) = ?
+    ]], { data.plate })
+
+    if affected and affected > 0 then
+      logWorld(('destroyed saved %s destroyed=1'):format(normalizePlate(data.plate)))
+    else
+      logWorld(('destroyed not saved %s reason=row_not_found'):format(normalizePlate(data.plate)))
+    end
+  end
 
   return getWorldRow(data.plate)
 end
@@ -673,6 +738,10 @@ function MZVehicleWorldService.saveSnapshot(vehicle, actorSource, snapshot)
   logWorldAction('vehicle_world_snapshot', vehicle, actorSource, previous, row, {
     has_coords = type(row and row.extra_json) == 'table' and row.extra_json.has_coords == true
   })
+
+  if row and row.destroyed ~= true and data.destroyed == true then
+    logWorld(('destroyed not saved %s reason=verify_failed'):format(normalizePlate(data.plate)))
+  end
 
   return true, row
 end

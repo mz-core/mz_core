@@ -200,8 +200,9 @@ local function normalizeCoords(coords)
   }
 end
 
-local function normalizeWorldSnapshot(snapshot)
+local function normalizeWorldSnapshot(snapshot, existing)
   snapshot = type(snapshot) == 'table' and snapshot or {}
+  existing = type(existing) == 'table' and existing or {}
   local coords = normalizeCoords(snapshot.coords or snapshot.last_coords)
 
   local world = {
@@ -227,17 +228,56 @@ local function normalizeWorldSnapshot(snapshot)
     world.locked = snapshot.locked == true or tonumber(snapshot.locked) == 2
   end
 
-  if snapshot.destroyed ~= nil then
-    world.destroyed = snapshot.destroyed == true
+  local engineHealth = tonumber(snapshot.engine_health or snapshot.engine)
+  local bodyHealth = tonumber(snapshot.body_health or snapshot.body)
+  local wasDestroyed = existing.destroyed == true
+    or existing.destroyed == 1
+    or existing.destroyed == '1'
+  local destroyed = wasDestroyed
+    or snapshot.destroyed == true
+    or snapshot.destroyed == 1
+    or snapshot.destroyed == '1'
+    or (engineHealth ~= nil and engineHealth <= 50.0)
+    or (bodyHealth ~= nil and bodyHealth <= 100.0)
+
+  if wasDestroyed == true or snapshot.destroyed ~= nil or engineHealth ~= nil or bodyHealth ~= nil then
+    world.destroyed = destroyed == true
   end
 
   return world
 end
 
+local function computeDestroyed(snapshot, existing)
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  existing = type(existing) == 'table' and existing or {}
+
+  local engine = tonumber(snapshot.engine_health or snapshot.engine)
+    or tonumber(existing.engine_health or existing.engine)
+    or 1000.0
+  local body = tonumber(snapshot.body_health or snapshot.body)
+    or tonumber(existing.body_health or existing.body)
+    or 1000.0
+  local metadata = type(existing.metadata_json) == 'table' and existing.metadata_json or {}
+  local world = type(metadata.world) == 'table' and metadata.world or {}
+  local wasDestroyed = existing.destroyed == true
+    or existing.destroyed == 1
+    or existing.destroyed == '1'
+    or world.destroyed == true
+    or world.destroyed == 1
+    or world.destroyed == '1'
+
+  return wasDestroyed
+    or snapshot.destroyed == true
+    or snapshot.destroyed == 1
+    or snapshot.destroyed == '1'
+    or engine <= 50.0
+    or body <= 100.0
+end
+
 local function buildOutVehicleMetadata(vehicle, source, action, snapshot)
   local currentMetadata = normalizeVehicleMetadata(vehicle and vehicle.metadata_json or {})
   local previousWorld = type(currentMetadata.world) == 'table' and currentMetadata.world or {}
-  local nextWorld = mergeTable(previousWorld, normalizeWorldSnapshot(snapshot))
+  local nextWorld = mergeTable(previousWorld, normalizeWorldSnapshot(snapshot, previousWorld))
 
   return mergeTable(currentMetadata, buildFlowMetadataPatch(action, source, {
     world = nextWorld,
@@ -1040,12 +1080,13 @@ function MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
 
   snapshot = type(snapshot) == 'table' and snapshot or {}
   plate = normalizePlate(vehicle.plate)
+  snapshot.destroyed = computeDestroyed(snapshot, vehicle)
 
   local netId = tonumber(snapshot.net_id or snapshot.netId)
   local beforeState = buildVehicleSnapshot(vehicle)
   local nextFuel = clampConditionSnapshotValue(snapshot.fuel, 0, 100, tonumber(vehicle.fuel) or 100)
-  local nextEngine = clampConditionSnapshotValue(snapshot.engine, 0, 1000, tonumber(vehicle.engine) or 1000)
-  local nextBody = clampConditionSnapshotValue(snapshot.body, 0, 1000, tonumber(vehicle.body) or 1000)
+  local nextEngine = clampConditionSnapshotValue(snapshot.engine_health or snapshot.engine, 0, 1000, tonumber(vehicle.engine) or 1000)
+  local nextBody = clampConditionSnapshotValue(snapshot.body_health or snapshot.body, 0, 1000, tonumber(vehicle.body) or 1000)
   local nextProps = type(snapshot.props) == 'table' and snapshot.props or (vehicle.props_json or {})
   local nextMetadata = buildOutVehicleMetadata(vehicle, source, 'out_snapshot', snapshot)
 

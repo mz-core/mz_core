@@ -1,4 +1,7 @@
 local AppliedWorldProps = {}
+local DestroyedSentByPlate = {}
+local LastPersistentVehicle = nil
+local LastPersistentPlate = ''
 
 local function NormalizePlate(plate)
   return tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
@@ -87,6 +90,76 @@ local function findVehicleByPlate(plate)
   return 0
 end
 
+local function getPersistentPlate(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return ''
+  end
+
+  local state = Entity(vehicle).state
+  if not state or state.mz_persistent ~= true then
+    return ''
+  end
+
+  local plate = NormalizePlate(state.mz_plate)
+  if plate ~= '' then
+    return plate
+  end
+
+  return NormalizePlate(GetVehicleNumberPlateText(vehicle))
+end
+
+local function getVehicleDestroyedState(vehicle)
+  if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return {
+      destroyed = false,
+      dead = false,
+      driveable = true,
+      engine = 1000.0,
+      body = 1000.0,
+      health = 1000,
+      onFire = false
+    }
+  end
+
+  local engineHealth = GetVehicleEngineHealth(vehicle)
+  local bodyHealth = GetVehicleBodyHealth(vehicle)
+  local entityHealth = GetEntityHealth(vehicle)
+  local dead = IsEntityDead(vehicle) == true
+  local driveable = true
+  local onFire = false
+
+  if type(IsVehicleDriveable) == 'function' then
+    local ok, result = pcall(IsVehicleDriveable, vehicle, false)
+    if ok then
+      driveable = result == true
+    end
+  end
+
+  if type(IsEntityOnFire) == 'function' then
+    local ok, result = pcall(IsEntityOnFire, vehicle)
+    if ok then
+      onFire = result == true
+    end
+  end
+
+  local destroyed = dead
+    or driveable == false
+    or (tonumber(engineHealth) or 1000.0) <= 50.0
+    or (tonumber(bodyHealth) or 1000.0) <= 100.0
+    or (tonumber(entityHealth) or 1000) <= 0
+    or onFire == true
+
+  return {
+    destroyed = destroyed,
+    dead = dead,
+    driveable = driveable,
+    engine = engineHealth,
+    body = bodyHealth,
+    health = entityHealth,
+    onFire = onFire
+  }
+end
+
 local function finalizeWorldVehicle(vehicle, data)
   if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
     return false, 'entity_not_found'
@@ -150,8 +223,14 @@ local function captureWorldSnapshot(vehicle)
   end
 
   local coords = GetEntityCoords(vehicle)
+  local destroyedState = getVehicleDestroyedState(vehicle)
+  local plate = getPersistentPlate(vehicle)
+  if plate == '' then
+    plate = NormalizePlate(GetVehicleNumberPlateText(vehicle))
+  end
+
   return {
-    plate = NormalizePlate(GetVehicleNumberPlateText(vehicle)),
+    plate = plate,
     coords = {
       x = tonumber(coords.x) or 0.0,
       y = tonumber(coords.y) or 0.0,
@@ -159,15 +238,70 @@ local function captureWorldSnapshot(vehicle)
     },
     heading = GetEntityHeading(vehicle),
     fuel = GetVehicleFuelLevel(vehicle),
-    engine = GetVehicleEngineHealth(vehicle),
-    body = GetVehicleBodyHealth(vehicle),
+    engine = destroyedState.engine,
+    engine_health = destroyedState.engine,
+    body = destroyedState.body,
+    body_health = destroyedState.body,
+    destroyed = destroyedState.destroyed,
     locked = GetVehicleDoorLockStatus(vehicle),
     net_id = NetworkGetNetworkIdFromEntity(vehicle)
   }
 end
 
+local function sendDestroyedSnapshot(vehicle, plate, destroyedState)
+  plate = NormalizePlate(plate)
+  if plate == '' or DestroyedSentByPlate[plate] == true then
+    return false
+  end
+
+  local snapshot = captureWorldSnapshot(vehicle)
+  if not snapshot then
+    return false
+  end
+
+  snapshot.plate = plate
+  snapshot.destroyed = true
+  snapshot.engine_health = destroyedState.engine
+  snapshot.engine = destroyedState.engine
+  snapshot.body_health = destroyedState.body
+  snapshot.body = destroyedState.body
+
+  print(('[mz_vehicle_world] client destroyed detected %s dead=%s driveable=%s engine=%.3f body=%.3f'):format(
+    plate,
+    tostring(destroyedState.dead == true),
+    tostring(destroyedState.driveable == true),
+    tonumber(destroyedState.engine) or 0.0,
+    tonumber(destroyedState.body) or 0.0
+  ))
+
+  TriggerServerEvent('mz_core:vehicles:server:worldSnapshot', snapshot)
+  DestroyedSentByPlate[plate] = true
+  print(('[mz_vehicle_world] client destroyed snapshot sent %s'):format(plate))
+  return true
+end
+
+local function checkPersistentVehicleDestroyed(vehicle)
+  local plate = getPersistentPlate(vehicle)
+  if plate == '' then
+    return false
+  end
+
+  local destroyedState = getVehicleDestroyedState(vehicle)
+  if destroyedState.destroyed == true then
+    sendDestroyedSnapshot(vehicle, plate, destroyedState)
+    return true
+  end
+
+  DestroyedSentByPlate[plate] = nil
+  return false
+end
+
 local function applyWorldVehicleState(vehicle)
   if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
+    return false
+  end
+
+  if checkPersistentVehicleDestroyed(vehicle) == true then
     return false
   end
 
@@ -371,14 +505,39 @@ CreateThread(function()
       if DoesEntityExist(vehicle) then
         local state = Entity(vehicle).state
         if state and state.mz_persistent == true then
+          local plate = getPersistentPlate(vehicle)
+          if plate ~= '' then
+            LastPersistentVehicle = vehicle
+            LastPersistentPlate = plate
+          end
+
+          local destroyed = checkPersistentVehicleDestroyed(vehicle)
           local lastApplied = tonumber(AppliedWorldProps[vehicle]) or 0
-          if GetGameTimer() - lastApplied > 30000 then
+          if destroyed ~= true and GetGameTimer() - lastApplied > 30000 then
             applyWorldVehicleState(vehicle)
           end
         end
       end
     end
 
-    Wait(5000)
+    local ped = PlayerPedId()
+    local currentVehicle = ped and ped ~= 0 and GetVehiclePedIsIn(ped, false) or 0
+    if currentVehicle ~= 0 and DoesEntityExist(currentVehicle) then
+      local plate = getPersistentPlate(currentVehicle)
+      if plate ~= '' then
+        LastPersistentVehicle = currentVehicle
+        LastPersistentPlate = plate
+      end
+    elseif LastPersistentVehicle and LastPersistentVehicle ~= 0 and DoesEntityExist(LastPersistentVehicle) then
+      checkPersistentVehicleDestroyed(LastPersistentVehicle)
+    elseif LastPersistentPlate ~= '' then
+      local vehicle = findVehicleByPlate(LastPersistentPlate)
+      if vehicle ~= 0 then
+        LastPersistentVehicle = vehicle
+        checkPersistentVehicleDestroyed(vehicle)
+      end
+    end
+
+    Wait(2000)
   end
 end)
