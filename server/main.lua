@@ -7,6 +7,13 @@ lib.callback.register('mz_core:server:getPlayerData', function(source)
   if player then
     MZPlayerService.touchPlayer(source)
     MZOrgService.loadPlayerOrgs(source)
+
+    CreateThread(function()
+      Wait(5000)
+      if GetPlayerName(source) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
+        MZVehicleService.restoreWorldVehiclesForPlayer(source, 'get_player_data')
+      end
+    end)
   end
 
   return player

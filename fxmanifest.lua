@@ -20,6 +20,7 @@ server_scripts {
   'server/player/*.lua',
   'server/orgs/*.lua',
   'server/vehicles/repository.lua',
+  'server/vehicles/world_service.lua',
   'server/vehicles/service.lua',
   'server/vehicles/events.lua',
   'server/vehicles/exports.lua',

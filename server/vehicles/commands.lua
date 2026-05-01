@@ -160,6 +160,26 @@ RegisterCommand('mveh_info_id', function(source, args)
   reply(('impound=%s'):format(impoundText))
 end, true)
 
+RegisterCommand('mveh_restore_world', function(source)
+  if source == 0 then
+    return reply('Use este comando dentro do jogo para restaurar os veiculos out do seu personagem.')
+  end
+
+  if not MZVehicleService or not MZVehicleService.restoreWorldVehiclesForPlayer then
+    return reply('Restore world indisponivel.')
+  end
+
+  local ok, result = MZVehicleService.restoreWorldVehiclesForPlayer(source, 'command')
+  if not ok then
+    return reply(('Restore world falhou: %s'):format(tostring(result or 'unknown_error')))
+  end
+
+  reply(('Restore world solicitado: restored=%s failed=%s'):format(
+    tostring(type(result) == 'table' and result.restored or 0),
+    tostring(type(result) == 'table' and result.failed or 0)
+  ))
+end, false)
+
 RegisterCommand('mveh_list_player', function(source, args)
   if not canUseVehicleCommand(source) then
     return reply('Sem permissão.')

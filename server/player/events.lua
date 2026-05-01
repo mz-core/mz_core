@@ -10,6 +10,13 @@ AddEventHandler('playerJoining', function()
     MZOrgService.loadPlayerOrgs(src)
     TriggerClientEvent('mz_core:client:playerLoaded', src, playerData)
     MZPlayerHUDService.syncToClient(src)
+
+    CreateThread(function()
+      Wait(5000)
+      if GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
+        MZVehicleService.restoreWorldVehiclesForPlayer(src, 'player_loaded')
+      end
+    end)
   end)
 end)
 

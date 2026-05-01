@@ -87,10 +87,11 @@ function MZVehicleRepository.getById(id)
 end
 
 function MZVehicleRepository.getByPlate(plate)
+  plate = tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
   local row = MySQL.single.await([[
     SELECT *
     FROM mz_player_vehicles
-    WHERE plate = ?
+    WHERE UPPER(TRIM(plate)) = ?
     LIMIT 1
   ]], { plate })
 

@@ -89,6 +89,7 @@ local function doSpawn(spawnData)
     ShutdownLoadingScreenNui()
 
     TriggerEvent('playerSpawned', spawn)
+    TriggerServerEvent('mz_core:vehicles:server:playerWorldReady')
 
     didFirstSpawn = true
     isSpawning = false

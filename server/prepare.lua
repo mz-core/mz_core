@@ -150,6 +150,32 @@ local statements = {
     KEY idx_mz_player_vehicles_owner (owner_type, owner_id)
   )]],
 
+  [[CREATE TABLE IF NOT EXISTS mz_vehicle_world_state (
+    plate VARCHAR(16) NOT NULL PRIMARY KEY,
+    vehicle_id INT NULL,
+    state VARCHAR(16) NOT NULL DEFAULT 'out',
+    model VARCHAR(64) NOT NULL,
+    garage VARCHAR(64) NOT NULL DEFAULT 'default',
+    x DOUBLE NOT NULL DEFAULT 0,
+    y DOUBLE NOT NULL DEFAULT 0,
+    z DOUBLE NOT NULL DEFAULT 0,
+    heading FLOAT NOT NULL DEFAULT 0,
+    fuel FLOAT NOT NULL DEFAULT 100,
+    engine_health FLOAT NOT NULL DEFAULT 1000,
+    body_health FLOAT NOT NULL DEFAULT 1000,
+    locked TINYINT(1) NOT NULL DEFAULT 0,
+    destroyed TINYINT(1) NOT NULL DEFAULT 0,
+    props_json LONGTEXT NULL,
+    extra_json LONGTEXT NULL,
+    net_id INT NOT NULL DEFAULT 0,
+    entity_handle INT NOT NULL DEFAULT 0,
+    last_seen_at TIMESTAMP NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_mz_vehicle_world_vehicle_id (vehicle_id),
+    KEY idx_mz_vehicle_world_state (state),
+    KEY idx_mz_vehicle_world_last_seen (last_seen_at)
+  )]],
+
   [[CREATE TABLE IF NOT EXISTS mz_inventory_items (
     id INT AUTO_INCREMENT PRIMARY KEY,
     owner_type VARCHAR(16) NOT NULL DEFAULT 'player',
@@ -225,6 +251,34 @@ CreateThread(function()
     MySQL.query.await([[
       ALTER TABLE mz_player_vehicles
       ADD COLUMN IF NOT EXISTS metadata_json LONGTEXT NULL
+    ]])
+
+    MySQL.query.await([[
+      CREATE TABLE IF NOT EXISTS mz_vehicle_world_state (
+        plate VARCHAR(16) NOT NULL PRIMARY KEY,
+        vehicle_id INT NULL,
+        state VARCHAR(16) NOT NULL DEFAULT 'out',
+        model VARCHAR(64) NOT NULL,
+        garage VARCHAR(64) NOT NULL DEFAULT 'default',
+        x DOUBLE NOT NULL DEFAULT 0,
+        y DOUBLE NOT NULL DEFAULT 0,
+        z DOUBLE NOT NULL DEFAULT 0,
+        heading FLOAT NOT NULL DEFAULT 0,
+        fuel FLOAT NOT NULL DEFAULT 100,
+        engine_health FLOAT NOT NULL DEFAULT 1000,
+        body_health FLOAT NOT NULL DEFAULT 1000,
+        locked TINYINT(1) NOT NULL DEFAULT 0,
+        destroyed TINYINT(1) NOT NULL DEFAULT 0,
+        props_json LONGTEXT NULL,
+        extra_json LONGTEXT NULL,
+        net_id INT NOT NULL DEFAULT 0,
+        entity_handle INT NOT NULL DEFAULT 0,
+        last_seen_at TIMESTAMP NULL,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        KEY idx_mz_vehicle_world_vehicle_id (vehicle_id),
+        KEY idx_mz_vehicle_world_state (state),
+        KEY idx_mz_vehicle_world_last_seen (last_seen_at)
+      )
     ]])
     
     MySQL.query.await([[

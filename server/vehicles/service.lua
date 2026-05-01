@@ -15,6 +15,12 @@ local function normalizeVehicleState(state)
   return state
 end
 
+local function debugVehicleWorld(message)
+  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == true then
+    print(('[mz_vehicle_world] %s'):format(tostring(message)))
+  end
+end
+
 local function isImpoundedState(state)
   return normalizeVehicleState(state) == STATE_IMPOUNDED
 end
@@ -171,6 +177,76 @@ local function mergeTable(base, extra)
   end
 
   return out
+end
+
+local buildFlowMetadataPatch
+
+local function normalizeCoords(coords)
+  if type(coords) ~= 'table' then
+    return nil
+  end
+
+  local x = tonumber(coords.x)
+  local y = tonumber(coords.y)
+  local z = tonumber(coords.z)
+  if not x or not y or not z then
+    return nil
+  end
+
+  return {
+    x = x + 0.0,
+    y = y + 0.0,
+    z = z + 0.0
+  }
+end
+
+local function normalizeWorldSnapshot(snapshot)
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  local coords = normalizeCoords(snapshot.coords or snapshot.last_coords)
+
+  local world = {
+    persistent = true,
+    updated_at = os.time()
+  }
+
+  if coords then
+    world.last_coords = coords
+  end
+
+  local heading = tonumber(snapshot.heading or snapshot.last_heading)
+  if heading then
+    world.last_heading = heading + 0.0
+  end
+
+  local netId = tonumber(snapshot.net_id or snapshot.netId)
+  if netId and netId > 0 then
+    world.net_id = math.floor(netId)
+  end
+
+  if snapshot.locked ~= nil then
+    world.locked = snapshot.locked == true or tonumber(snapshot.locked) == 2
+  end
+
+  if snapshot.destroyed ~= nil then
+    world.destroyed = snapshot.destroyed == true
+  end
+
+  return world
+end
+
+local function buildOutVehicleMetadata(vehicle, source, action, snapshot)
+  local currentMetadata = normalizeVehicleMetadata(vehicle and vehicle.metadata_json or {})
+  local previousWorld = type(currentMetadata.world) == 'table' and currentMetadata.world or {}
+  local nextWorld = mergeTable(previousWorld, normalizeWorldSnapshot(snapshot))
+
+  return mergeTable(currentMetadata, buildFlowMetadataPatch(action, source, {
+    world = nextWorld,
+    last_known_garage = tostring(vehicle and vehicle.garage or '')
+  }))
+end
+
+local function clampConditionSnapshotValue(value, minValue, maxValue, fallback)
+  return clampNumber(value, minValue, maxValue, fallback)
 end
 
 local function buildVehicleSnapshot(vehicle)
@@ -346,7 +422,7 @@ function MZVehicleService.getAccessibleVehicles(source, filters)
   return true, rows
 end
 
-local function buildFlowMetadataPatch(action, actorSource, extra)
+buildFlowMetadataPatch = function(action, actorSource, extra)
   local patch = {
     last_flow_action = tostring(action or 'unknown'),
     last_flow_at = os.time()
@@ -614,6 +690,57 @@ function MZVehicleService.canAccessVehicle(source, plate)
   return false, 'vehicle_access_denied'
 end
 
+function MZVehicleService.ensureVehicleAccessForPlayer(source, plate, data, reason)
+  reason = tostring(reason or 'restore')
+  plate = normalizePlate(plate)
+  if plate == '' then
+    return false, 'invalid_plate'
+  end
+
+  local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
+  if not ok then
+    print(('[mz_vehicle_world] access denied %s %s %s'):format(plate, tostring(source), reason))
+    return false, vehicleOrErr
+  end
+
+  if GetResourceState('mz_vehicles') ~= 'started' then
+    return false, 'mz_vehicles_not_started'
+  end
+
+  local vehicle = vehicleOrErr
+  data = type(data) == 'table' and data or {}
+  local metadataJson = type(vehicle.metadata_json) == 'table' and vehicle.metadata_json or {}
+  local worldMetadata = type(metadataJson.world) == 'table' and metadataJson.world or {}
+  local locked = data.locked
+  if locked == nil then
+    locked = worldMetadata.locked
+  end
+
+  local metadata = {
+    kind = tostring(data.kind or vehicle.owner_type or 'persistent'),
+    garage_id = tostring(data.garage_id or data.garage or vehicle.garage or ''),
+    owner_type = tostring(data.owner_type or vehicle.owner_type or ''),
+    owner_id = tostring(data.owner_id or vehicle.owner_id or ''),
+    vehicle_id = tonumber(data.vehicle_id or data.id or vehicle.id),
+    model = tostring(data.model or vehicle.model or ''),
+    locked = locked,
+    persistent = true,
+    reason = reason
+  }
+
+  local grantOk, grantResult, grantErr = pcall(function()
+    return exports['mz_vehicles']:GrantVehicleAccess(source, plate, metadata)
+  end)
+
+  if not grantOk or grantResult ~= true then
+    print(('[mz_vehicle_world] access denied %s %s %s'):format(plate, tostring(source), tostring(grantErr or grantResult or 'grant_failed')))
+    return false, grantErr or grantResult or 'grant_failed'
+  end
+
+  print(('[mz_vehicle_world] access granted %s %s %s'):format(plate, tostring(source), reason))
+  return true, metadata
+end
+
 function MZVehicleService.setVehicleStored(plate, stored, actorSource)
   plate = normalizePlate(plate)
   if plate == '' then
@@ -627,6 +754,10 @@ function MZVehicleService.setVehicleStored(plate, stored, actorSource)
 
   local beforeState = buildVehicleSnapshot(vehicle)
   local state = stored and STATE_STORED or STATE_OUT
+
+  if stored == true and MZVehicleWorldService then
+    MZVehicleWorldService.clearWorldState(plate, actorSource)
+  end
 
   MZVehicleRepository.updateStateById(vehicle.id, state)
 
@@ -784,6 +915,185 @@ function MZVehicleService.setVehicleCondition(plate, fuel, engine, body, actorSo
   return true
 end
 
+function MZVehicleService.getOutVehiclesForRespawn(source)
+  local player = MZPlayerService and MZPlayerService.getPlayer and MZPlayerService.getPlayer(source) or nil
+  debugVehicleWorld(('loading out vehicles for player %s %s'):format(
+    tostring(source),
+    tostring(player and player.citizenid or 'unknown')
+  ))
+
+  local ok, vehiclesOrErr = MZVehicleService.getAccessibleVehicles(source, {
+    state = STATE_OUT,
+    include_out = true,
+    include_impounded = false
+  })
+
+  if not ok then
+    return false, vehiclesOrErr
+  end
+
+  if not MZVehicleWorldService then
+    return false, 'world_service_unavailable'
+  end
+
+  local respawnOk, outVehicles = MZVehicleWorldService.getOutVehiclesForRespawn(vehiclesOrErr)
+  if respawnOk == true then
+    for _, vehicle in ipairs(vehiclesOrErr or {}) do
+      if normalizeVehicleState(vehicle.state) == STATE_OUT then
+        MZVehicleService.ensureVehicleAccessForPlayer(source, vehicle.plate, vehicle, 'get_out_respawn')
+      end
+    end
+  end
+  debugVehicleWorld(('out vehicles found %s'):format(respawnOk and #(outVehicles or {}) or 0))
+  return respawnOk, outVehicles
+end
+
+function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
+  reason = tostring(reason or 'restore')
+  local player = MZPlayerService and MZPlayerService.getPlayer and MZPlayerService.getPlayer(source) or nil
+  if not player then
+    return false, 'player_not_loaded'
+  end
+
+  print(('[mz_vehicle_world] restore start %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
+  print(('[mz_vehicle_world] player loaded restore %s %s'):format(tostring(source), tostring(player.citizenid or 'unknown')))
+
+  local ok, vehiclesOrErr = MZVehicleService.getAccessibleVehicles(source, {
+    state = STATE_OUT,
+    include_out = true,
+    include_impounded = false
+  })
+
+  if not ok then
+    print(('[mz_vehicle_world] out vehicles found 0'))
+    return false, vehiclesOrErr
+  end
+
+  print(('[mz_vehicle_world] out vehicles found %s'):format(#(vehiclesOrErr or {})))
+
+  if not MZVehicleWorldService or not MZVehicleWorldService.RestoreOutVehiclesForPlayer then
+    return false, 'world_service_unavailable'
+  end
+
+  for _, vehicle in ipairs(vehiclesOrErr or {}) do
+    if normalizeVehicleState(vehicle.state) == STATE_OUT then
+      MZVehicleService.ensureVehicleAccessForPlayer(source, vehicle.plate, vehicle, reason)
+    end
+  end
+
+  return MZVehicleWorldService.RestoreOutVehiclesForPlayer(source, vehiclesOrErr, reason)
+end
+
+function MZVehicleService.registerOutVehicleEntity(source, plate, netId, snapshot)
+  local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
+  if not ok then
+    return false, vehicleOrErr
+  end
+
+  local vehicle = vehicleOrErr
+  plate = normalizePlate(vehicle.plate)
+
+  if normalizeVehicleState(vehicle.state) ~= STATE_OUT then
+    return false, 'vehicle_not_out'
+  end
+
+  if not MZVehicleWorldService then
+    return false, 'world_service_unavailable'
+  end
+
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  netId = tonumber(netId) or tonumber(snapshot.net_id or snapshot.netId) or 0
+
+  if netId > 0 then
+    local isSpawned, _, reason = MZVehicleWorldService.isSpawned(plate, netId)
+    if isSpawned and reason == 'different_net_id' then
+      debugVehicleWorld(('skip duplicate %s'):format(plate))
+      return false, 'vehicle_already_spawned'
+    end
+
+    local registered, registerErr = MZVehicleWorldService.registerEntity(vehicle, source, netId)
+    if registered ~= true then
+      debugVehicleWorld(('register entity failed, saving snapshot anyway %s %s'):format(plate, tostring(registerErr or 'entity_not_found')))
+    end
+  else
+    debugVehicleWorld(('invalid net id, saving snapshot anyway %s'):format(plate))
+  end
+
+  local updateOk, updateResult = MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+  if updateOk == true then
+    MZVehicleService.ensureVehicleAccessForPlayer(source, plate, updateResult or vehicle, 'register_entity')
+  end
+
+  return updateOk, updateResult
+end
+
+function MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+  local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
+  if not ok then
+    return false, vehicleOrErr
+  end
+
+  local vehicle = vehicleOrErr
+  if normalizeVehicleState(vehicle.state) ~= STATE_OUT then
+    return false, 'vehicle_not_out'
+  end
+
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  plate = normalizePlate(vehicle.plate)
+
+  local netId = tonumber(snapshot.net_id or snapshot.netId)
+  local beforeState = buildVehicleSnapshot(vehicle)
+  local nextFuel = clampConditionSnapshotValue(snapshot.fuel, 0, 100, tonumber(vehicle.fuel) or 100)
+  local nextEngine = clampConditionSnapshotValue(snapshot.engine, 0, 1000, tonumber(vehicle.engine) or 1000)
+  local nextBody = clampConditionSnapshotValue(snapshot.body, 0, 1000, tonumber(vehicle.body) or 1000)
+  local nextProps = type(snapshot.props) == 'table' and snapshot.props or (vehicle.props_json or {})
+  local nextMetadata = buildOutVehicleMetadata(vehicle, source, 'out_snapshot', snapshot)
+
+  if MZVehicleWorldService then
+    MZVehicleWorldService.saveSnapshot(vehicle, source, snapshot)
+  end
+
+  MZVehicleRepository.updateVehicleFlowById(vehicle.id, {
+    garage = vehicle.garage or 'default',
+    state = STATE_OUT,
+    fuel = nextFuel,
+    engine = nextEngine,
+    body = nextBody,
+    props_json = nextProps,
+    impound_data = vehicle.impound_data or {},
+    metadata_json = nextMetadata
+  })
+
+  local updatedVehicle = MZVehicleRepository.getById(vehicle.id) or vehicle
+  logVehicleAction('out_vehicle_snapshot', updatedVehicle, source, beforeState, buildVehicleSnapshot(updatedVehicle), {
+    net_id = netId,
+    has_coords = normalizeCoords(snapshot.coords or snapshot.last_coords) ~= nil
+  })
+
+  return true, updatedVehicle
+end
+
+function MZVehicleService.markOutVehicleDestroyed(source, plate, snapshot)
+  local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
+  if not ok then
+    return false, vehicleOrErr
+  end
+
+  local vehicle = vehicleOrErr
+  if normalizeVehicleState(vehicle.state) ~= STATE_OUT then
+    return false, 'vehicle_not_out'
+  end
+
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  snapshot.destroyed = true
+
+  if MZVehicleWorldService then
+    MZVehicleWorldService.markDestroyed(vehicle, source, snapshot)
+  end
+
+  return MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+end
+
 function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
   local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
   if not ok then
@@ -809,7 +1119,14 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
 
   local nextMetadata = mergeTable(vehicle.metadata_json or {}, buildFlowMetadataPatch('take_out', source, {
     last_known_garage = tostring(vehicle.garage or ''),
-    last_take_out_garage = expectedGarage ~= '' and expectedGarage or tostring(vehicle.garage or '')
+    last_take_out_garage = expectedGarage ~= '' and expectedGarage or tostring(vehicle.garage or ''),
+    world = mergeTable(
+      type(vehicle.metadata_json) == 'table' and type(vehicle.metadata_json.world) == 'table' and vehicle.metadata_json.world or {},
+      {
+        persistent = true,
+        updated_at = os.time()
+      }
+    )
   }))
 
   MZVehicleRepository.updateVehicleFlowById(vehicle.id, {
@@ -824,6 +1141,15 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
   })
 
   local updatedVehicle = MZVehicleRepository.getById(vehicle.id) or vehicle
+
+  if MZVehicleWorldService then
+    MZVehicleWorldService.registerOutVehicle(updatedVehicle, source, {
+      fuel = updatedVehicle.fuel,
+      engine = updatedVehicle.engine,
+      body = updatedVehicle.body,
+      props = updatedVehicle.props_json or {}
+    })
+  end
 
   logVehicleAction('take_out_vehicle', updatedVehicle, source, beforeState, buildVehicleSnapshot(updatedVehicle), {
     expected_garage = expectedGarage ~= '' and expectedGarage or nil
@@ -857,7 +1183,16 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
   local nextProps = type(props) == 'table' and props or (vehicle.props_json or {})
   local nextMetadata = mergeTable(vehicle.metadata_json or {}, buildFlowMetadataPatch('store', source, {
     last_known_garage = garage,
-    last_store_garage = garage
+    last_store_garage = garage,
+    world = mergeTable(
+      type(vehicle.metadata_json) == 'table' and type(vehicle.metadata_json.world) == 'table' and vehicle.metadata_json.world or {},
+      {
+        persistent = false,
+        net_id = 0,
+        stored_at = os.time(),
+        updated_at = os.time()
+      }
+    )
   }))
   local nextImpoundData = vehicle.impound_data or {}
 
@@ -871,6 +1206,10 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
     impound_data = nextImpoundData,
     metadata_json = nextMetadata
   })
+
+  if MZVehicleWorldService then
+    MZVehicleWorldService.clearWorldState(plate, source)
+  end
 
   local updatedVehicle = MZVehicleRepository.getById(vehicle.id) or vehicle
 

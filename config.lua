@@ -70,3 +70,12 @@ Config.Payroll = {
   intervalMinutes = 30,
   requireDuty = true
 }
+
+Config.VehicleWorld = {
+  enableProximityRespawn = false,
+  proximityRadius = 200.0,
+  checkIntervalMs = 15000,
+  maxRespawnsPerTick = 3,
+  respawnDestroyed = true,
+  debug = true
+}

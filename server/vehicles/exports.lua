@@ -42,6 +42,10 @@ exports('CanAccessVehicle', function(source, plate)
   return MZVehicleService.canAccessVehicle(source, plate)
 end)
 
+exports('EnsureVehicleAccessForPlayer', function(source, plate, data, reason)
+  return MZVehicleService.ensureVehicleAccessForPlayer(source, plate, data, reason)
+end)
+
 exports('SetVehicleStored', function(plate, stored)
   return MZVehicleService.setVehicleStored(plate, stored)
 end)
@@ -64,6 +68,47 @@ end)
 
 exports('SetVehicleCondition', function(plate, fuel, engine, body)
   return MZVehicleService.setVehicleCondition(plate, fuel, engine, body)
+end)
+
+exports('GetOutVehiclesForRespawn', function(source)
+  return MZVehicleService.getOutVehiclesForRespawn(source)
+end)
+
+exports('RestoreWorldVehiclesForPlayer', function(source, reason)
+  return MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
+end)
+
+exports('GetOutVehiclesNearCoords', function(coords, radius)
+  return MZVehicleWorldService.GetOutVehiclesNearCoords(coords, radius)
+end)
+
+exports('EnsureWorldVehiclesNearPlayer', function(source, coords)
+  return MZVehicleWorldService.EnsureWorldVehiclesNearPlayer(source, coords)
+end)
+
+exports('IsPlateSpawned', function(plate)
+  return MZVehicleWorldService.IsPlateSpawned(plate)
+end)
+
+exports('RegisterOutVehicleEntity', function(source, plate, netId, snapshot)
+  local ok, resultOrErr, extra = xpcall(function()
+    return MZVehicleService.registerOutVehicleEntity(source, plate, netId, snapshot)
+  end, debug.traceback)
+
+  if not ok then
+    print(('[mz_vehicle_world] RegisterOutVehicleEntity failed %s'):format(tostring(resultOrErr)))
+    return false, 'entity_not_found'
+  end
+
+  return resultOrErr, extra
+end)
+
+exports('UpdateOutVehicleSnapshot', function(source, plate, snapshot)
+  return MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+end)
+
+exports('MarkOutVehicleDestroyed', function(source, plate, snapshot)
+  return MZVehicleService.markOutVehicleDestroyed(source, plate, snapshot)
 end)
 
 exports('TakeOutVehicle', function(source, plate, garage)
