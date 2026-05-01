@@ -1,3 +1,9 @@
+local function debugVehicleWorld(message)
+  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == true then
+    print(('[mz_vehicle_world] %s'):format(tostring(message)))
+  end
+end
+
 exports('GetVehicleById', function(id)
   return MZVehicleService.getVehicleById(id)
 end)
@@ -96,7 +102,7 @@ exports('RegisterOutVehicleEntity', function(source, plate, netId, snapshot)
   end, debug.traceback)
 
   if not ok then
-    print(('[mz_vehicle_world] RegisterOutVehicleEntity failed %s'):format(tostring(resultOrErr)))
+    debugVehicleWorld(('RegisterOutVehicleEntity failed %s'):format(tostring(resultOrErr)))
     return false, 'entity_not_found'
   end
 
@@ -104,11 +110,29 @@ exports('RegisterOutVehicleEntity', function(source, plate, netId, snapshot)
 end)
 
 exports('UpdateOutVehicleSnapshot', function(source, plate, snapshot)
-  return MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+  local ok, resultOrErr, extra = xpcall(function()
+    return MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
+  end, debug.traceback)
+
+  if not ok then
+    debugVehicleWorld(('UpdateOutVehicleSnapshot failed %s'):format(tostring(resultOrErr)))
+    return false, 'snapshot_update_failed'
+  end
+
+  return resultOrErr, extra
 end)
 
 exports('MarkOutVehicleDestroyed', function(source, plate, snapshot)
-  return MZVehicleService.markOutVehicleDestroyed(source, plate, snapshot)
+  local ok, resultOrErr, extra = xpcall(function()
+    return MZVehicleService.markOutVehicleDestroyed(source, plate, snapshot)
+  end, debug.traceback)
+
+  if not ok then
+    debugVehicleWorld(('MarkOutVehicleDestroyed failed %s'):format(tostring(resultOrErr)))
+    return false, 'destroyed_update_failed'
+  end
+
+  return resultOrErr, extra
 end)
 
 exports('TakeOutVehicle', function(source, plate, garage)

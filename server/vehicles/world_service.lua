@@ -25,7 +25,7 @@ local function debugWorld(message)
 end
 
 local function logWorld(message)
-  print(('[mz_vehicle_world] %s'):format(tostring(message)))
+  debugWorld(message)
 end
 
 local function normalizePlate(plate)

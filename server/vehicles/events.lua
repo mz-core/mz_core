@@ -1,3 +1,13 @@
+local function debugVehicleWorld(message)
+  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == true then
+    print(('[mz_vehicle_world] %s'):format(tostring(message)))
+  end
+end
+
+local function normalizePlate(plate)
+  return tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+end
+
 RegisterNetEvent('mz_core:server:vehicle:takeOut', function(plate, garage)
   local source = source
   local ok, result = MZVehicleService.takeOutVehicle(source, plate, garage)
@@ -47,11 +57,11 @@ RegisterNetEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', function(
 
   snapshot.net_id = tonumber(netId or snapshot.net_id or snapshot.netId) or 0
 
-  local normalizedPlate = tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+  local normalizedPlate = normalizePlate(plate)
   if MZVehicleWorldService and MZVehicleWorldService.isSpawned then
     local spawned, _, reason = MZVehicleWorldService.isSpawned(normalizedPlate, snapshot.net_id)
     if spawned == true and reason == 'different_net_id' then
-      print(('[mz_vehicle_world] skip duplicate client_fallback %s'):format(normalizedPlate))
+      debugVehicleWorld(('skip duplicate client_fallback %s'):format(normalizedPlate))
       TriggerClientEvent('mz_core:vehicles:client:deleteWorldVehicleNet', src, snapshot.net_id)
       return
     end
@@ -60,7 +70,7 @@ RegisterNetEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', function(
   if MZVehicleService and MZVehicleService.registerOutVehicleEntity then
     local ok, err = MZVehicleService.registerOutVehicleEntity(src, normalizedPlate, snapshot.net_id, snapshot)
     if ok ~= true then
-      print(('[mz_vehicle_world] spawn failed client_fallback %s %s'):format(normalizedPlate, tostring(err or 'register_failed')))
+      debugVehicleWorld(('spawn failed client_fallback %s %s'):format(normalizedPlate, tostring(err or 'register_failed')))
     end
   end
 end)
@@ -71,7 +81,7 @@ RegisterNetEvent('mz_core:vehicles:server:worldSnapshot', function(snapshot)
     return
   end
 
-  local plate = tostring(snapshot.plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+  local plate = normalizePlate(snapshot.plate)
   if plate == '' then
     return
   end
@@ -79,12 +89,12 @@ RegisterNetEvent('mz_core:vehicles:server:worldSnapshot', function(snapshot)
   snapshot.plate = plate
 
   if snapshot.destroyed == true or tonumber(snapshot.destroyed) == 1 then
-    print(('[mz_vehicle_world] server destroyed snapshot received %s'):format(plate))
+    debugVehicleWorld(('server destroyed snapshot received %s'):format(plate))
 
     if MZVehicleService and MZVehicleService.markOutVehicleDestroyed then
       local ok, err = MZVehicleService.markOutVehicleDestroyed(src, plate, snapshot)
       if ok ~= true then
-        print(('[mz_vehicle_world] destroyed not saved %s reason=%s'):format(plate, tostring(err or 'mark_failed')))
+        debugVehicleWorld(('destroyed not saved %s reason=%s'):format(plate, tostring(err or 'mark_failed')))
       end
     end
 

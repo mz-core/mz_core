@@ -4,6 +4,8 @@ local VehicleStates = (MZConstants and MZConstants.VehicleStates) or {}
 local STATE_STORED = VehicleStates.STORED or 'stored'
 local STATE_OUT = VehicleStates.OUT or 'out'
 local STATE_IMPOUNDED = VehicleStates.IMPOUNDED or VehicleStates.IMPOUND or 'impounded'
+local SnapshotRateLimit = {}
+local RestoreDebounce = {}
 
 local function normalizeVehicleState(state)
   state = tostring(state or ''):lower()
@@ -16,7 +18,7 @@ local function normalizeVehicleState(state)
 end
 
 local function debugVehicleWorld(message)
-  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == false then
+  if Config and Config.VehicleWorld and Config.VehicleWorld.debug == true then
     print(('[mz_vehicle_world] %s'):format(tostring(message)))
   end
 end
@@ -198,6 +200,155 @@ local function normalizeCoords(coords)
     y = y + 0.0,
     z = z + 0.0
   }
+end
+
+local function getVehicleWorldConfig()
+  return Config and Config.VehicleWorld or {}
+end
+
+local function getGameTimerSafe()
+  if type(GetGameTimer) == 'function' then
+    return GetGameTimer()
+  end
+
+  return os.time() * 1000
+end
+
+local function snapshotHasMutableWorldData(snapshot)
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  return snapshot.coords ~= nil
+    or snapshot.last_coords ~= nil
+    or snapshot.heading ~= nil
+    or snapshot.last_heading ~= nil
+    or snapshot.fuel ~= nil
+    or snapshot.engine ~= nil
+    or snapshot.engine_health ~= nil
+    or snapshot.body ~= nil
+    or snapshot.body_health ~= nil
+    or snapshot.destroyed ~= nil
+    or snapshot.net_id ~= nil
+    or snapshot.netId ~= nil
+end
+
+local function isSnapshotRateLimited(source, plate, snapshot)
+  if snapshot and (snapshot.destroyed == true or snapshot.destroyed == 1 or snapshot.destroyed == '1') then
+    return false
+  end
+
+  if not snapshotHasMutableWorldData(snapshot) then
+    return false
+  end
+
+  source = tonumber(source) or 0
+  if source <= 0 then
+    return false
+  end
+
+  local cfg = getVehicleWorldConfig()
+  local interval = tonumber(cfg.snapshotRateLimitMs) or 5000
+  if interval <= 0 then
+    return false
+  end
+
+  local key = ('%s:%s'):format(source, normalizePlate(plate))
+  local now = getGameTimerSafe()
+  local last = tonumber(SnapshotRateLimit[key]) or 0
+  if now - last < interval then
+    return true
+  end
+
+  SnapshotRateLimit[key] = now
+  return false
+end
+
+local function distanceBetween(a, b)
+  if not a or not b then
+    return nil
+  end
+
+  local dx = (tonumber(a.x) or 0.0) - (tonumber(b.x) or 0.0)
+  local dy = (tonumber(a.y) or 0.0) - (tonumber(b.y) or 0.0)
+  local dz = (tonumber(a.z) or 0.0) - (tonumber(b.z) or 0.0)
+  return math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+end
+
+local function getEntityFromNetIdSafe(netId)
+  netId = tonumber(netId) or 0
+  if netId <= 0 or type(NetworkGetEntityFromNetworkId) ~= 'function' then
+    return 0
+  end
+
+  local ok, entity = pcall(NetworkGetEntityFromNetworkId, netId)
+  if not ok or not entity or entity == 0 then
+    return 0
+  end
+
+  if type(DoesEntityExist) == 'function' then
+    local existsOk, exists = pcall(DoesEntityExist, entity)
+    if not existsOk or exists ~= true then
+      return 0
+    end
+  end
+
+  return entity
+end
+
+local function validateSnapshotSource(source, vehicle, plate, snapshot, options)
+  options = type(options) == 'table' and options or {}
+  snapshot = type(snapshot) == 'table' and snapshot or {}
+  plate = normalizePlate(plate)
+
+  if tonumber(source) == nil or tonumber(source) <= 0 then
+    return false, 'invalid_source'
+  end
+
+  if plate == '' or not vehicle then
+    return false, 'vehicle_not_found'
+  end
+
+  local coords = normalizeCoords(snapshot.coords or snapshot.last_coords)
+  if coords and options.distance ~= false then
+    local ped = GetPlayerPed(source)
+    if not ped or ped == 0 then
+      return false, 'player_not_found'
+    end
+
+    local pedCoords = GetEntityCoords(ped)
+    local maxDistance = tonumber(getVehicleWorldConfig().snapshotMaxDistance) or 250.0
+    local distance = distanceBetween(pedCoords, coords)
+    if distance and distance > maxDistance then
+      return false, 'snapshot_too_far'
+    end
+  end
+
+  local netId = tonumber(snapshot.net_id or snapshot.netId) or 0
+  if netId > 0 then
+    local entity = getEntityFromNetIdSafe(netId)
+    if entity ~= 0 then
+      local entityPlate = ''
+      local state = Entity(entity).state
+      if state and state.mz_plate then
+        entityPlate = normalizePlate(state.mz_plate)
+      end
+
+      if entityPlate == '' and type(GetVehicleNumberPlateText) == 'function' then
+        local ok, result = pcall(GetVehicleNumberPlateText, entity)
+        if ok then
+          entityPlate = normalizePlate(result)
+        end
+      end
+
+      if entityPlate ~= '' and entityPlate ~= plate then
+      return false, 'snapshot_plate_mismatch'
+      end
+    end
+  end
+
+  if options.rateLimit ~= false and isSnapshotRateLimited(source, plate, snapshot) then
+    return false, 'snapshot_rate_limited'
+  end
+
+  return true
 end
 
 local function normalizeWorldSnapshot(snapshot, existing)
@@ -739,7 +890,7 @@ function MZVehicleService.ensureVehicleAccessForPlayer(source, plate, data, reas
 
   local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
   if not ok then
-    print(('[mz_vehicle_world] access denied %s %s %s'):format(plate, tostring(source), reason))
+    debugVehicleWorld(('access denied %s %s %s'):format(plate, tostring(source), reason))
     return false, vehicleOrErr
   end
 
@@ -773,11 +924,11 @@ function MZVehicleService.ensureVehicleAccessForPlayer(source, plate, data, reas
   end)
 
   if not grantOk or grantResult ~= true then
-    print(('[mz_vehicle_world] access denied %s %s %s'):format(plate, tostring(source), tostring(grantErr or grantResult or 'grant_failed')))
+    debugVehicleWorld(('access denied %s %s %s'):format(plate, tostring(source), tostring(grantErr or grantResult or 'grant_failed')))
     return false, grantErr or grantResult or 'grant_failed'
   end
 
-  print(('[mz_vehicle_world] access granted %s %s %s'):format(plate, tostring(source), reason))
+  debugVehicleWorld(('access granted %s %s %s'):format(plate, tostring(source), reason))
   return true, metadata
 end
 
@@ -995,8 +1146,24 @@ function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
     return false, 'player_not_loaded'
   end
 
-  print(('[mz_vehicle_world] restore start %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
-  print(('[mz_vehicle_world] player loaded restore %s %s'):format(tostring(source), tostring(player.citizenid or 'unknown')))
+  local debounceMs = tonumber(getVehicleWorldConfig().restoreDebounceMs) or 5000
+  local restoreDebounceNow = nil
+  if reason ~= 'command' and tonumber(source) and tonumber(source) > 0 and debounceMs > 0 then
+    local now = getGameTimerSafe()
+    local last = tonumber(RestoreDebounce[source]) or 0
+    if now - last < debounceMs then
+      debugVehicleWorld(('restore skipped debounce %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
+      return true, {
+        restored = 0,
+        failed = 0,
+        debounced = true
+      }
+    end
+    restoreDebounceNow = now
+  end
+
+  debugVehicleWorld(('restore start %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
+  debugVehicleWorld(('player loaded restore %s %s'):format(tostring(source), tostring(player.citizenid or 'unknown')))
 
   local ok, vehiclesOrErr = MZVehicleService.getAccessibleVehicles(source, {
     state = STATE_OUT,
@@ -1005,14 +1172,18 @@ function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
   })
 
   if not ok then
-    print(('[mz_vehicle_world] out vehicles found 0'))
+    debugVehicleWorld('out vehicles found 0')
     return false, vehiclesOrErr
   end
 
-  print(('[mz_vehicle_world] out vehicles found %s'):format(#(vehiclesOrErr or {})))
+  debugVehicleWorld(('out vehicles found %s'):format(#(vehiclesOrErr or {})))
 
   if not MZVehicleWorldService or not MZVehicleWorldService.RestoreOutVehiclesForPlayer then
     return false, 'world_service_unavailable'
+  end
+
+  if restoreDebounceNow then
+    RestoreDebounce[source] = restoreDebounceNow
   end
 
   for _, vehicle in ipairs(vehiclesOrErr or {}) do
@@ -1035,6 +1206,14 @@ function MZVehicleService.registerOutVehicleEntity(source, plate, netId, snapsho
 
   if normalizeVehicleState(vehicle.state) ~= STATE_OUT then
     return false, 'vehicle_not_out'
+  end
+
+  local validSnapshot, snapshotErr = validateSnapshotSource(source, vehicle, plate, snapshot, {
+    rateLimit = false,
+    distance = false
+  })
+  if not validSnapshot then
+    return false, snapshotErr
   end
 
   if not MZVehicleWorldService then
@@ -1080,6 +1259,11 @@ function MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
 
   snapshot = type(snapshot) == 'table' and snapshot or {}
   plate = normalizePlate(vehicle.plate)
+  local validSnapshot, snapshotErr = validateSnapshotSource(source, vehicle, plate, snapshot)
+  if not validSnapshot then
+    return false, snapshotErr
+  end
+
   snapshot.destroyed = computeDestroyed(snapshot, vehicle)
 
   local netId = tonumber(snapshot.net_id or snapshot.netId)

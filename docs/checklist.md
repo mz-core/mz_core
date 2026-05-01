@@ -68,6 +68,10 @@ Esta checklist foi revisada contra o codigo real do repositorio. Ela nao e histo
 - registro, busca, listagem e mutacoes de veiculo
 - `garage`, `state`, `metadata`, `props`, `fuel`, `engine`, `body`
 - flow base `takeOut`, `store`, `impound`, `release`
+- persistencia de veiculos fora da garagem em `mz_vehicle_world_state`
+- restore de veiculos `out` sem depender de `net_id` antigo
+- lock/unlock revalida acesso no server e reidrata cache local quando necessario
+- `metadata_json.condition` preserva dano/destruicao quando o veiculo volta para a garagem
 - integracao suficiente para trunk e glovebox
 - exports, eventos e comandos administrativos
 
@@ -82,6 +86,7 @@ Esta checklist foi revisada contra o codigo real do repositorio. Ela nao e histo
 - cache client de `PlayerData` e `PlayerSession`
 - spawn base via `spawnmanager`
 - exports client de player e orgs
+- `client/vehicles.lua` atua como runtime client dos veiculos persistentes: aplica state bags, fallback de restore, snapshot e condicao destroyed
 
 ## PARCIAL
 
@@ -105,9 +110,9 @@ Esta checklist foi revisada contra o codigo real do repositorio. Ela nao e histo
 
 ### Vehicles
 
-- surface client de vehicles ainda nao existe
 - flow visual de garagem e spawn/store final esta fora do recurso
 - modulo esta forte como base persistente, mas depende de consumer externo para UX final
+- proximity respawn existe, mas deve continuar desligado por padrao ate validacao maior
 
 ### Logs
 
@@ -141,5 +146,22 @@ Esta checklist foi revisada contra o codigo real do repositorio. Ela nao e histo
 - bridge QB deve continuar documentada como parcial
 - ESX e vRP devem continuar documentados como placeholders
 - payroll nao atomico deve continuar explicitado como divida tecnica aceita
-- `client/vehicles.lua` e `client/inventory.lua` devem continuar marcados como placeholders
+- `client/vehicles.lua` deve ser documentado como runtime client de veiculos persistentes, nao placeholder
+- `client/inventory.lua` deve continuar marcado como placeholder
 - comandos de debug, probes e utilitarios administrativos nao devem ser tratados como contrato oficial do produto
+
+## CHECKLIST v1.0.0-rc1
+
+- iniciar sem erro no console
+- `Config.Debug = false`
+- `Config.VehicleWorld.debug = false`
+- `Config.VehicleWorld.enableProximityRespawn = false`
+- comandos debug protegidos por console, ACE/admin ou modo debug
+- veiculo `out` reaparece apos relog
+- lock/unlock funciona apos relog
+- destroyed persiste apos relog
+- guardar veiculo destroyed nao repara gratis
+- veiculo destroyed volta inutilizavel ao sair da garagem
+- garagem nao duplica veiculo `out`
+- appearance/clothing persiste
+- HUD/cinto funciona por classe de veiculo

@@ -3,7 +3,15 @@ local function reply(msg)
 end
 
 local function canUseVehicleCommand(source)
-  return source == 0
+  if source == 0 then
+    return true
+  end
+
+  if Config and Config.Debug == true then
+    return true
+  end
+
+  return IsPlayerAceAllowed(source, 'mzcore.vehicles') or IsPlayerAceAllowed(source, 'mzcore.debug')
 end
 
 RegisterCommand('mveh_add_player', function(source, args)
@@ -161,6 +169,10 @@ RegisterCommand('mveh_info_id', function(source, args)
 end, true)
 
 RegisterCommand('mveh_restore_world', function(source)
+  if not canUseVehicleCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
   if source == 0 then
     return reply('Use este comando dentro do jogo para restaurar os veiculos out do seu personagem.')
   end

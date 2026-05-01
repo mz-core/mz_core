@@ -11,6 +11,10 @@ local function isDebugAllowed(source)
     return DEBUG_ALLOW_CONSOLE
   end
 
+  if Config and Config.Debug == true then
+    return true
+  end
+
   return IsPlayerAceAllowed(source, DEBUG_ACE)
 end
 

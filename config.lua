@@ -1,7 +1,7 @@
 Config = {}
 
 Config.Framework = 'mz_core'
-Config.Debug = true
+Config.Debug = false
 
 Config.DefaultSpawn = {
   x = -1037.71,
@@ -77,5 +77,8 @@ Config.VehicleWorld = {
   checkIntervalMs = 15000,
   maxRespawnsPerTick = 3,
   respawnDestroyed = true,
-  debug = true
+  debug = false,
+  snapshotRateLimitMs = 5000,
+  snapshotMaxDistance = 250.0,
+  restoreDebounceMs = 5000
 }

@@ -23,6 +23,7 @@ Neste repositorio, `v1.0` significa:
 - payroll no escopo atual, com bloqueio de inconsistencias de shared account
 - inventory multi-contexto base
 - vehicles base persistentes
+- persistencia de veiculos fora da garagem com `mz_vehicle_world_state`
 - logs estruturados por dominio
 - exports, callbacks e eventos suficientes para consumir o core nativo
 - spawn base minimo com `spawnmanager`
@@ -58,6 +59,19 @@ Se `v1.0` fosse entendida como framework completa, estes pontos ainda seriam blo
 - lifecycle de restart ainda nao tem rehydrate explicito em `onResourceStart`
 - parte da validacao do projeto ainda depende de runtime manual
 - o repositorio ainda carrega comandos de debug e probes que sao uteis para manutencao, mas nao fazem parte da promessa do produto
+- proximity respawn de veiculos existe, mas fica desligado por padrao ate validacao maior
+
+## Checklist curta para rc1
+
+- debug geral e debug de vehicle world desligados
+- comandos debug protegidos por console, ACE/admin ou modo debug
+- veiculo `out` reloga sem duplicar
+- lock/unlock funciona apos relog
+- destroyed persiste apos relog
+- guardar destroyed nao repara gratis
+- veiculo destroyed volta inutilizavel
+- appearance/clothing persiste
+- HUD/cinto funciona por classe de veiculo
 
 ## Definicao honesta da release
 

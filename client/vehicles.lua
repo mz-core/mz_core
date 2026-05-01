@@ -13,6 +13,12 @@ local function getVehicleWorldConfig()
   return Config.VehicleWorld or {}
 end
 
+local function debugVehicleWorld(message)
+  if getVehicleWorldConfig().debug == true then
+    print(('[mz_vehicle_world] %s'):format(tostring(message or '')))
+  end
+end
+
 local function getEntityFromBagName(bagName)
   if type(GetEntityFromStateBagName) ~= 'function' then
     return 0
@@ -169,7 +175,7 @@ local function applyDestroyedVisualOnce(vehicle, plate)
   end
 
   DestroyedVisualApplied[plate] = true
-  print(('[mz_vehicle_world] apply destroyed visual once %s'):format(plate))
+  debugVehicleWorld(('apply destroyed visual once %s'):format(plate))
 
   if type(SetVehicleTyreBurst) ~= 'function' then
     return true
@@ -213,7 +219,7 @@ local function applyDestroyedUndriveable(vehicle, plate, logPrefix)
     return false
   end
 
-  print(('[mz_vehicle_world] %s destroyed undriveable %s'):format(tostring(logPrefix or 'apply'), plate))
+  debugVehicleWorld(('%s destroyed undriveable %s'):format(tostring(logPrefix or 'apply'), plate))
   if tostring(logPrefix or 'apply') == 'apply' then
     applyDestroyedVisualOnce(vehicle, plate)
   end
@@ -343,7 +349,7 @@ local function sendDestroyedSnapshot(vehicle, plate, destroyedState)
   snapshot.body_health = destroyedState.body
   snapshot.body = destroyedState.body
 
-  print(('[mz_vehicle_world] client destroyed detected %s dead=%s driveable=%s engine=%.3f body=%.3f'):format(
+  debugVehicleWorld(('client destroyed detected %s dead=%s driveable=%s engine=%.3f body=%.3f'):format(
     plate,
     tostring(destroyedState.dead == true),
     tostring(destroyedState.driveable == true),
@@ -353,7 +359,7 @@ local function sendDestroyedSnapshot(vehicle, plate, destroyedState)
 
   TriggerServerEvent('mz_core:vehicles:server:worldSnapshot', snapshot)
   DestroyedSentByPlate[plate] = true
-  print(('[mz_vehicle_world] client destroyed snapshot sent %s'):format(plate))
+  debugVehicleWorld(('client destroyed snapshot sent %s'):format(plate))
   return true
 end
 
@@ -432,7 +438,7 @@ RegisterNetEvent('mz_core:vehicles:client:restoreWorldVehicle', function(data)
 
   local plate = NormalizePlate(data.plate)
   if plate == '' then
-    print('[mz_vehicle_world] respawn failed  invalid_plate')
+    debugVehicleWorld('respawn failed invalid_plate')
     return
   end
 
@@ -441,18 +447,18 @@ RegisterNetEvent('mz_core:vehicles:client:restoreWorldVehicle', function(data)
     finalizeWorldVehicle(existing, data)
     local snapshot = captureWorldSnapshot(existing)
     TriggerServerEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', plate, snapshot and snapshot.net_id or 0, snapshot or {})
-    print(('[mz_vehicle_world] respawn success %s %s'):format(plate, tostring(snapshot and snapshot.net_id or 0)))
+    debugVehicleWorld(('respawn success %s %s'):format(plate, tostring(snapshot and snapshot.net_id or 0)))
     return
   end
 
   local world = type(data.world) == 'table' and data.world or {}
   local coords = type(world.last_coords) == 'table' and world.last_coords or nil
   if not coords or coords.x == nil or coords.y == nil or coords.z == nil then
-    print(('[mz_vehicle_world] respawn failed %s missing_coords'):format(plate))
+    debugVehicleWorld(('respawn failed %s missing_coords'):format(plate))
     return
   end
 
-  print(('[mz_vehicle_world] respawn attempt %s %s %.3f %.3f %.3f'):format(
+  debugVehicleWorld(('respawn attempt %s %s %.3f %.3f %.3f'):format(
     plate,
     tostring(data.model or ''),
     tonumber(coords.x) or 0.0,
@@ -462,7 +468,7 @@ RegisterNetEvent('mz_core:vehicles:client:restoreWorldVehicle', function(data)
 
   local modelHash, modelErr = loadVehicleModel(data.model)
   if not modelHash then
-    print(('[mz_vehicle_world] respawn failed %s %s'):format(plate, tostring(modelErr or 'invalid_model')))
+    debugVehicleWorld(('respawn failed %s %s'):format(plate, tostring(modelErr or 'invalid_model')))
     return
   end
 
@@ -506,7 +512,7 @@ RegisterNetEvent('mz_core:vehicles:client:restoreWorldVehicle', function(data)
   end
 
   if not vehicle or vehicle == 0 or not DoesEntityExist(vehicle) then
-    print(('[mz_vehicle_world] respawn failed %s spawn_failed'):format(plate))
+    debugVehicleWorld(('respawn failed %s spawn_failed'):format(plate))
     return
   end
 
@@ -515,7 +521,7 @@ RegisterNetEvent('mz_core:vehicles:client:restoreWorldVehicle', function(data)
 
   local snapshot = captureWorldSnapshot(vehicle) or {}
   TriggerServerEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', plate, snapshot.net_id or 0, snapshot)
-  print(('[mz_vehicle_world] respawn success %s %s'):format(plate, tostring(snapshot.net_id or 0)))
+  debugVehicleWorld(('respawn success %s %s'):format(plate, tostring(snapshot.net_id or 0)))
 end)
 
 RegisterNetEvent('mz_core:vehicles:client:deleteWorldVehicleNet', function(netId)

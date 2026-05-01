@@ -25,9 +25,9 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 | Orgs / grades / permissoes        | Validado               | Dominio forte e funcional no escopo atual                                                      |
 | Accounts / org accounts / payroll | Validado com ressalvas | Core funciona; payroll ainda nao e atomico                                                     |
 | Inventory multi-contexto          | Validado               | Main, personal stash, org stash, trunk, glovebox e world drop existem                          |
-| Vehicles base                     | Validado com ressalvas | Ownership, acesso, estado e flow base existem; camada visual e externa                         |
+| Vehicles base                     | Validado com ressalvas | Ownership, acesso, estado, flow base e persistencia de veiculos fora da garagem existem         |
 | Logs estruturados                 | Validado com ressalvas | Existe padrao util, mas ainda pode ser refinado                                                |
-| Surface client minima             | Parcial                | Spawn base, cache client e exports simples existem; helpers de vehicles/inventory estao vazios |
+| Surface client minima             | Parcial                | Spawn base, cache client e runtime client de veiculos persistentes existem                     |
 | Bridge QB                         | Parcial                | Existe contrato inicial, mas nao e bridge fechada nem validada como compatibilidade total      |
 | Bridge ESX / vRP                  | Placeholder            | Arquivos existem, contrato real nao                                                            |
 | Comandos de debug e prova         | Temporario             | Utilitarios de validacao fazem parte do repositorio, nao do contrato do produto                |
@@ -40,7 +40,8 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 - `server/orgs`: orgs, grades, permissoes, memberships e overrides
 - `server/accounts`: dinheiro do player, org accounts e payroll
 - `server/inventory`: persistencia e regra multi-contexto
-- `server/vehicles`: ownership, acesso, estado, metadata e flow base
+- `server/vehicles`: ownership, acesso, estado, metadata, flow base e `mz_vehicle_world_state`
+- `client/vehicles.lua`: runtime client de veiculos persistentes; aplica state bags, fallback de restore e condicao destroyed
 - `server/logs`: log estruturado por dominio
 - `server/bridges`: adapters de compatibilidade
 - `client/main.lua`, `client/spawn.lua`, `client/player.lua`, `client/orgs.lua`: camada client minima do core
@@ -52,13 +53,20 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 - `ox_lib`
 - `spawnmanager` para o spawn base atual
 
-## Ordem minima de start
+## Ordem recomendada de start
 
 ```cfg
-ensure spawnmanager
 ensure oxmysql
 ensure ox_lib
+ensure spawnmanager
+ensure mapmanager
+ensure sessionmanager
 ensure mz_core
+ensure mz_vehicles
+ensure mz_garagem
+ensure mz_hud
+ensure mz_creator
+ensure mz_clothing
 ```
 
 ## O que a v1.0 cobre
@@ -70,7 +78,7 @@ ensure mz_core
 - orgs, grades, permissoes, memberships, duty, primary, promote e demote
 - dinheiro do player, org accounts e payroll com bloqueio de inconsistencias de shared account
 - inventory multi-contexto com regras de stack, metadata, peso e uso de item
-- vehicles base com ownership, acesso, garage, state, impound e release
+- vehicles base com ownership, acesso, garage, state, impound, release e persistencia de veiculos `out`
 - logs estruturados por dominio
 - exports, callbacks e eventos suficientes para consumir o core nativo
 
@@ -80,7 +88,7 @@ ensure mz_core
 - qualquer compatibilidade real com ESX ou vRP
 - multichar ou character selector
 - HUD, phone, NUI, target ou camada visual de gameplay
-- garagem visual ou flow de spawn/store final de veiculo fora do escopo base
+- garagem visual e layout de garagem
 - handlers completos para todos os itens do inventario
 - suite automatizada de testes ou pipeline de CI
 
@@ -90,7 +98,11 @@ ensure mz_core
 - `server/bridges/esx.lua` e `server/bridges/vrp.lua` continuam placeholders.
 - `server/accounts/payroll.lua` ainda nao faz debito da org e credito do player de forma atomica.
 - `server/inventory/events.lua` continua reservado para evolucao futura e nao representa uma surface publica fechada.
-- `client/vehicles.lua` e `client/inventory.lua` continuam placeholders.
+- `client/vehicles.lua` nao e placeholder: ele e o runtime client dos veiculos persistentes.
+- `client/inventory.lua` continua placeholder.
+- `mz_vehicle_world_state` e a fonte de verdade para veiculos fora da garagem.
+- `metadata_json.condition` guarda condicao persistente quando um veiculo danificado/destruido volta para a garagem.
+- Proximity respawn existe como capacidade experimental, mas deve ficar desligado por padrao em release candidate.
 - Os comandos administrativos e probes do repositorio existem para validacao e operacao tecnica. Eles nao definem o contrato oficial do produto.
 
 ## Status atual do core

@@ -12,6 +12,7 @@ O foco da arquitetura atual e:
 - accounts e org accounts
 - inventory multi-contexto
 - vehicles base persistentes
+- persistencia de veiculos fora da garagem
 - logs estruturados
 - surface publica minima via exports, callbacks e eventos
 
@@ -71,7 +72,7 @@ Concentra estado autoritativo, regras de negocio, persistencia e APIs publicas d
 
 ### `client/`
 
-Mantem a camada minima de estado do player, spawn base e exports client simples. Nao existe arquitetura visual de gameplay aqui.
+Mantem a camada minima de estado do player, spawn base, exports client simples e runtime client necessario para veiculos persistentes. Nao existe arquitetura visual de gameplay aqui.
 
 ### `shared/`
 
@@ -140,6 +141,18 @@ Nem todo dominio usa todos os arquivos. Onde algum arquivo existe mas nao carreg
 - garage e state
 - props, metadata e condition
 - `takeOut`, `store`, `impound`, `release`
+- `mz_vehicle_world_state` como fonte de verdade para veiculos fora da garagem
+- restore de veiculos `out` por placa normalizada, sem confiar em `net_id` antigo
+- state bags para placa, lock, owner, condition e destroyed
+- `metadata_json.condition` para preservar condicao quando um veiculo danificado/destruido e guardado
+
+### Runtime client de vehicles
+
+- [client/vehicles.lua](../client/vehicles.lua) aplica state bags de veiculos persistentes
+- executa fallback de restore quando o server nao consegue criar entidade diretamente
+- envia snapshots de veiculos persistentes com validacao server-side
+- reforca veiculo destroyed como inutilizavel, sem controlar UI ou garagem visual
+- proximity respawn existe como caminho experimental, mas fica desligado por padrao em release candidate
 
 ### Logs
 
@@ -166,6 +179,7 @@ Nem todo dominio usa todos os arquivos. Onde algum arquivo existe mas nao carreg
 - comandos administrativos em `server/*/commands.lua`
 - probes e arquivos de debug como `server/bridges/qb_probe.lua` e `server/vehicles/debug.lua`
 - placeholders de `events.lua` ou `client/*.lua` que nao sustentam contrato real
+- comandos de restore/debug de veiculos sao operacionais e devem ficar protegidos por console, ACE/admin ou `Config.Debug`
 
 ### Implementacao interna
 
@@ -189,10 +203,27 @@ Nem todo dominio usa todos os arquivos. Onde algum arquivo existe mas nao carreg
 - bridge QB ainda parcial, com limitacao real no wrapper publico
 - ESX e vRP ainda sao placeholders
 - payroll ainda nao e atomico
-- `client/vehicles.lua` e `client/inventory.lua` ainda sao placeholders
+- `client/vehicles.lua` e runtime real de veiculos persistentes
+- `client/inventory.lua` ainda e placeholder
 - `server/inventory/events.lua` ainda e placeholder
 - nao existe suite automatizada de testes nem CI
 - o recurso depende de `spawnmanager` para o spawn base atual
+
+## Ordem recomendada de ensure
+
+```cfg
+ensure oxmysql
+ensure ox_lib
+ensure spawnmanager
+ensure mapmanager
+ensure sessionmanager
+ensure mz_core
+ensure mz_vehicles
+ensure mz_garagem
+ensure mz_hud
+ensure mz_creator
+ensure mz_clothing
+```
 
 ## Diretrizes para expansao futura
 
