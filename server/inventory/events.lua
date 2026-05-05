@@ -41,3 +41,11 @@ end)
 lib.callback.register('mz_core:server:inventory:errors', function()
   return MZInventoryService.getPublicInventoryErrorCatalog()
 end)
+
+RegisterNetEvent('mz_core:server:inventory:updateWeaponAmmo', function(payload)
+  MZInventoryService.updateEquippedWeaponAmmo(source, payload)
+end)
+
+RegisterNetEvent('mz_core:server:inventory:unauthorizedWeaponDetected', function(payload)
+  MZInventoryService.logUnauthorizedWeapon(source, payload)
+end)

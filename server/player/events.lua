@@ -32,6 +32,10 @@ RegisterNetEvent('mz_core:server:savePosition', function(coords)
 end)
 
 AddEventHandler('playerDropped', function(reason)
+  if MZInventoryService and MZInventoryService.handlePlayerDropped then
+    MZInventoryService.handlePlayerDropped(source, reason)
+  end
+
   MZPlayerService.unloadPlayer(source, reason)
 end)
 
@@ -48,6 +52,10 @@ AddEventHandler('onResourceStop', function(resourceName)
   table.sort(loadedSources)
 
   for _, src in ipairs(loadedSources) do
+    if MZInventoryService and MZInventoryService.handlePlayerDropped then
+      MZInventoryService.handlePlayerDropped(src, 'resource_stop')
+    end
+
     MZPlayerService.unloadPlayer(src, 'resource_stop')
   end
 end)

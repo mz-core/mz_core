@@ -423,6 +423,29 @@ RegisterCommand('mveh_set_meta', function(source, args)
   ))
 end, true)
 
+local function normalizeVehicleHealth(value)
+  local numericValue = tonumber(value)
+
+  if numericValue == nil then
+    return 1000.0
+  end
+
+  if numericValue < 0 then
+    return 0.0
+  end
+
+  -- Valor humano em porcentagem: 0-100
+  if numericValue <= 100 then
+    numericValue = numericValue * 10.0
+  end
+
+  if numericValue > 1000 then
+    return 1000.0
+  end
+
+  return numericValue + 0.0
+end
+
 RegisterCommand('mveh_set_condition', function(source, args)
   if not canUseVehicleCommand(source) then
     return reply('Sem permissão.')
@@ -430,22 +453,32 @@ RegisterCommand('mveh_set_condition', function(source, args)
 
   local plate = tostring(args[1] or '')
   local fuel = tonumber(args[2])
-  local engine = tonumber(args[3])
-  local body = tonumber(args[4])
+  local rawEngine = tonumber(args[3])
+  local rawBody = tonumber(args[4])
+  local rawTank = tonumber(args[5])
 
-  if plate == '' or not fuel or not engine or not body then
-    return reply('Uso: mveh_set_condition [plate] [fuel] [engine] [body]')
+  if plate == '' or not fuel or not rawEngine or not rawBody then
+    return reply('Uso: mveh_set_condition [plate] [fuel] [engine] [body] [tank opcional]')
   end
 
-  local ok, err = exports['mz_core']:SetVehicleCondition(plate, fuel, engine, body)
+  -- Fuel continua 0-100
+  if fuel < 0 then fuel = 0 end
+  if fuel > 100 then fuel = 100 end
+
+  local engine = normalizeVehicleHealth(rawEngine)
+  local body = normalizeVehicleHealth(rawBody)
+  local tank = normalizeVehicleHealth(rawTank or rawBody)
+
+  local ok, err = exports['mz_core']:SetVehicleCondition(plate, fuel, engine, body, tank)
   if not ok then
     return reply(('Erro: %s'):format(err or 'unknown'))
   end
 
-  reply(('Condition atualizada: plate=%s fuel=%s engine=%s body=%s'):format(
+  reply(('Condition atualizada: plate=%s fuel=%s engine=%s body=%s tank=%s'):format(
     plate,
     fuel,
     engine,
-    body
+    body,
+    tank
   ))
 end, true)

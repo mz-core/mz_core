@@ -1,6 +1,15 @@
 MZInventoryService = {}
 
 local ItemUseHandlers = {}
+local EquippedWeaponsBySource = {}
+local EquippedWeaponSourceByCitizenId = {}
+local PendingWeaponAmmoUpdatesBySource = {}
+local WeaponAmmoUpdateRateLimits = {}
+local UnauthorizedWeaponLogRateLimits = {}
+local PendingWeaponAmmoUpdateTtlMs = 10000
+
+local enforceEquippedWeaponStillOwned
+local applyEquippedAmmoToMovingWeapon
 
 local function getItemDefinition(itemName)
   return MZItems and MZItems[itemName] or nil
@@ -680,6 +689,10 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
     )
   end
 
+  if actorPlayer and enforceEquippedWeaponStillOwned then
+    enforceEquippedWeaponStillOwned(actorPlayer.source, mutationName or 'inventory_mutation')
+  end
+
   if plan.result ~= nil then
     return true, plan.result
   end
@@ -1083,6 +1096,10 @@ local function planSlotTransferMutation(fromCtx, toCtx, fromSlot, toSlot, amount
     return false, 'item_not_found'
   end
 
+  if applyEquippedAmmoToMovingWeapon then
+    applyEquippedAmmoToMovingWeapon(fromCtx, fromRow, itemDef)
+  end
+
   local fromAmount = tonumber(fromRow.amount) or 0
   if fromAmount <= 0 then
     return false, 'invalid_source_amount'
@@ -1288,6 +1305,611 @@ local function normalizeUseResult(result)
     error = result.error,
     data = result.data
   }
+end
+
+local function getWeaponConfig()
+  return type(Config.Weapons) == 'table' and Config.Weapons or {}
+end
+
+local function getWeaponConfigNumber(key, fallback)
+  local value = tonumber(getWeaponConfig()[key])
+  if value == nil then
+    return fallback
+  end
+
+  return value
+end
+
+local function generateWeaponEquipNonce(source, instanceUid)
+  return MZUtils.generateInstanceUid(('WPN%s%s'):format(tostring(source or ''), tostring(instanceUid or '')))
+end
+
+local function weaponNonceMatches(state, equipNonce)
+  if type(state) ~= 'table' then
+    return false
+  end
+
+  local expected = tostring(state.equip_nonce or '')
+  return expected ~= '' and expected == tostring(equipNonce or '')
+end
+
+local function isWeaponAmmoUpdateRateLimited(source, instanceUid)
+  source = tonumber(source)
+  instanceUid = tostring(instanceUid or '')
+  if not source or instanceUid == '' then
+    return true
+  end
+
+  local interval = math.max(0, math.floor(getWeaponConfigNumber('ammoUpdateMinIntervalMs', 750)))
+  if interval <= 0 then
+    return false
+  end
+
+  local key = ('%s:%s'):format(source, instanceUid)
+  local now = GetGameTimer()
+  local last = tonumber(WeaponAmmoUpdateRateLimits[key]) or 0
+  if last > 0 and now - last < interval then
+    return true
+  end
+
+  WeaponAmmoUpdateRateLimits[key] = now
+  return false
+end
+
+local function isUnauthorizedWeaponLogRateLimited(source)
+  source = tonumber(source)
+  if not source then
+    return true
+  end
+
+  local interval = math.max(0, math.floor(getWeaponConfigNumber('unauthorizedLogIntervalMs', 5000)))
+  if interval <= 0 then
+    return false
+  end
+
+  local now = GetGameTimer()
+  local last = tonumber(UnauthorizedWeaponLogRateLimits[source]) or 0
+  if last > 0 and now - last < interval then
+    return true
+  end
+
+  UnauthorizedWeaponLogRateLimits[source] = now
+  return false
+end
+
+local function clearWeaponRuntimeLimitsForSource(source)
+  source = tonumber(source)
+  if not source then
+    return
+  end
+
+  PendingWeaponAmmoUpdatesBySource[source] = nil
+  UnauthorizedWeaponLogRateLimits[source] = nil
+
+  local prefix = tostring(source) .. ':'
+  for key in pairs(WeaponAmmoUpdateRateLimits) do
+    if tostring(key):sub(1, #prefix) == prefix then
+      WeaponAmmoUpdateRateLimits[key] = nil
+    end
+  end
+end
+
+local function isWeaponItemDefinition(itemDef)
+  return type(itemDef) == 'table'
+    and (tostring(itemDef.type or '') == 'weapon' or tostring(itemDef.weapon or '') ~= '')
+end
+
+local function getWeaponNameFromDefinition(itemDef)
+  if type(itemDef) ~= 'table' then
+    return nil
+  end
+
+  local weaponName = tostring(itemDef.weapon or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+  if weaponName == '' then
+    return nil
+  end
+
+  if weaponName:sub(1, 7) ~= 'WEAPON_' then
+    weaponName = 'WEAPON_' .. weaponName
+  end
+
+  return weaponName
+end
+
+local function getWeaponHashValue(weaponName)
+  local ok, result = pcall(function()
+    return joaat(weaponName)
+  end)
+
+  if ok and result then
+    return result
+  end
+
+  ok, result = pcall(function()
+    return GetHashKey(weaponName)
+  end)
+
+  if ok and result then
+    return result
+  end
+
+  return nil
+end
+
+local function clampWeaponAmmo(itemDef, ammo)
+  ammo = tonumber(ammo) or 0
+  ammo = math.floor(ammo)
+  if ammo < 0 then
+    ammo = 0
+  end
+
+  local maxAmmo = tonumber(type(itemDef) == 'table' and itemDef.maxAmmo or nil)
+  if maxAmmo and maxAmmo >= 0 and ammo > maxAmmo then
+    ammo = math.floor(maxAmmo)
+  end
+
+  return ammo
+end
+
+local function getWeaponInstanceUid(row)
+  if type(row) ~= 'table' then
+    return ''
+  end
+
+  local instanceUid = tostring(row.instance_uid or '')
+  if instanceUid ~= '' then
+    return instanceUid
+  end
+
+  local metadata = type(row.metadata) == 'table' and row.metadata or {}
+  return tostring(metadata.uid or '')
+end
+
+local function findPlayerWeaponRowByInstance(ctx, instanceUid)
+  instanceUid = tostring(instanceUid or '')
+  if instanceUid == '' then
+    return nil
+  end
+
+  for _, row in ipairs(getInventoryRowsFromContext(ctx)) do
+    if getWeaponInstanceUid(row) == instanceUid then
+      return row
+    end
+  end
+
+  return nil
+end
+
+local function buildWeaponClientPayload(row, itemDef, source, action)
+  local metadata = normalizeMetadataTable(row.metadata)
+  local weaponName = getWeaponNameFromDefinition(itemDef)
+  local ammo = clampWeaponAmmo(itemDef, metadata.ammo or itemDef.defaultAmmo or 0)
+  local instanceUid = getWeaponInstanceUid(row)
+  local weaponHash = getWeaponHashValue(weaponName)
+  local equipNonce = generateWeaponEquipNonce(source, instanceUid)
+
+  return {
+    action = action or 'equip',
+    source = tonumber(source) or source,
+    item = tostring(row.item or ''),
+    slot = tonumber(row.slot) or row.slot,
+    instance_uid = instanceUid,
+    weapon = weaponName,
+    weapon_hash = weaponHash and tostring(weaponHash) or nil,
+    equip_nonce = equipNonce,
+    ammo = ammo,
+    durability = tonumber(metadata.durability) or 100,
+    serial = metadata.serial and tostring(metadata.serial) or nil
+  }
+end
+
+local function logWeaponInventoryAction(action, source, player, row, extra)
+  extra = type(extra) == 'table' and extra or {}
+
+  local context = {
+    inventory_label = 'player_main',
+    owner_type = 'player',
+    owner_id = tostring((player and player.citizenid) or extra.citizenid or ''),
+    inventory_type = MZConstants.InventoryTypes.MAIN,
+    slot = row and (tonumber(row.slot) or row.slot) or extra.slot,
+    ammo = extra.ammo,
+    known_ammo = extra.known_ammo,
+    reason = tostring(extra.reason or '')
+  }
+
+  local itemName = row and tostring(row.item or '') or tostring(extra.item or '')
+  local itemDef = getItemDefinition(itemName)
+  local instanceUid = row and getWeaponInstanceUid(row) or tostring(extra.instance_uid or '')
+
+  logInventoryAction(action, source, player, nil, {
+    actor = buildInventoryActor(player, source),
+    target = {
+      type = 'weapon',
+      id = instanceUid ~= '' and instanceUid or 'unknown'
+    },
+    context = context,
+    meta = {
+      item = itemName,
+      instance_uid = instanceUid,
+      weapon = itemDef and getWeaponNameFromDefinition(itemDef) or tostring(extra.weapon or ''),
+      reason = tostring(extra.reason or '')
+    }
+  })
+end
+
+local function queuePendingWeaponAmmoUpdate(source, equipped)
+  source = tonumber(source)
+  if not source or type(equipped) ~= 'table' or tostring(equipped.instance_uid or '') == '' then
+    return
+  end
+
+  PendingWeaponAmmoUpdatesBySource[source] = {
+    instance_uid = tostring(equipped.instance_uid),
+    slot = tonumber(equipped.slot) or equipped.slot,
+    item = tostring(equipped.item or ''),
+    equip_nonce = tostring(equipped.equip_nonce or ''),
+    ammo = math.max(0, math.floor(tonumber(equipped.ammo) or 0)),
+    expires_at = GetGameTimer() + PendingWeaponAmmoUpdateTtlMs
+  }
+end
+
+local function clearPendingWeaponAmmoUpdate(source, instanceUid)
+  source = tonumber(source)
+  if not source then
+    return
+  end
+
+  local pending = PendingWeaponAmmoUpdatesBySource[source]
+  if not pending then
+    return
+  end
+
+  if not instanceUid or tostring(pending.instance_uid or '') == tostring(instanceUid or '') then
+    PendingWeaponAmmoUpdatesBySource[source] = nil
+  end
+end
+
+local function getAllowedWeaponAmmoUpdate(source, instanceUid, equipNonce)
+  source = tonumber(source)
+  instanceUid = tostring(instanceUid or '')
+  if not source or instanceUid == '' then
+    return nil
+  end
+
+  local equipped = EquippedWeaponsBySource[source]
+  if equipped and tostring(equipped.instance_uid or '') == instanceUid and weaponNonceMatches(equipped, equipNonce) then
+    return 'equipped', equipped
+  end
+
+  local pending = PendingWeaponAmmoUpdatesBySource[source]
+  if pending and tostring(pending.instance_uid or '') == instanceUid and weaponNonceMatches(pending, equipNonce) then
+    if GetGameTimer() <= (tonumber(pending.expires_at) or 0) then
+      return 'pending', pending
+    end
+
+    PendingWeaponAmmoUpdatesBySource[source] = nil
+  end
+
+  return nil
+end
+
+local function setEquippedWeaponState(source, player, row, payload)
+  source = tonumber(source)
+  if not source or type(player) ~= 'table' or type(row) ~= 'table' or type(payload) ~= 'table' then
+    return
+  end
+
+  local state = {
+    source = source,
+    citizenid = tostring(player.citizenid or ''),
+    item = tostring(row.item or ''),
+    slot = tonumber(row.slot) or row.slot,
+    instance_uid = tostring(payload.instance_uid or ''),
+    weapon = tostring(payload.weapon or ''),
+    equip_nonce = tostring(payload.equip_nonce or ''),
+    ammo = math.max(0, math.floor(tonumber(payload.ammo) or 0)),
+    serial = payload.serial,
+    durability = payload.durability
+  }
+
+  EquippedWeaponsBySource[source] = state
+  if state.citizenid ~= '' then
+    EquippedWeaponSourceByCitizenId[state.citizenid] = source
+  end
+end
+
+local function clearEquippedWeaponState(source, reason, options)
+  source = tonumber(source)
+  if not source then
+    return false, 'invalid_source'
+  end
+
+  options = type(options) == 'table' and options or {}
+  local equipped = EquippedWeaponsBySource[source]
+  if not equipped then
+    return true
+  end
+
+  if options.queuePending ~= false then
+    queuePendingWeaponAmmoUpdate(source, equipped)
+  end
+
+  local player = MZPlayerService.getPlayer(source)
+  EquippedWeaponsBySource[source] = nil
+  if equipped.citizenid and EquippedWeaponSourceByCitizenId[equipped.citizenid] == source then
+    EquippedWeaponSourceByCitizenId[equipped.citizenid] = nil
+  end
+
+  logWeaponInventoryAction('weapon_unequip', source, player or { source = source, citizenid = equipped.citizenid }, {
+    item = equipped.item,
+    slot = equipped.slot,
+    instance_uid = equipped.instance_uid,
+    metadata = {
+      serial = equipped.serial,
+      durability = equipped.durability
+    }
+  }, {
+    reason = tostring(reason or 'unequip'),
+    weapon = equipped.weapon
+  })
+
+  if options.notifyClient ~= false then
+    TriggerClientEvent('mz_core:client:inventory:unequipWeapon', source, {
+      reason = tostring(reason or 'unequip'),
+      item = equipped.item,
+      slot = equipped.slot,
+      instance_uid = equipped.instance_uid,
+      weapon = equipped.weapon,
+      equip_nonce = equipped.equip_nonce
+    })
+  end
+
+  return true
+end
+
+local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equipNonce)
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr
+  end
+
+  local requestedAmmo = tonumber(ammo)
+  if requestedAmmo == nil then
+    return false, 'invalid_ammo'
+  end
+  requestedAmmo = math.floor(requestedAmmo)
+  if requestedAmmo < 0 then
+    requestedAmmo = 0
+  end
+
+  local ctx, ctxErr = getPlayerInventoryContext(source)
+  if not ctx then
+    return false, ctxErr
+  end
+
+  local allowedMode, allowedState = getAllowedWeaponAmmoUpdate(source, instanceUid, equipNonce)
+  if not allowedMode then
+    return false, 'weapon_not_equipped'
+  end
+
+  if allowedMode ~= 'pending' and isWeaponAmmoUpdateRateLimited(source, instanceUid) then
+    return false, 'weapon_ammo_rate_limited'
+  end
+
+  local lockHandle, lockErr = acquireContainerLocks({ ctx })
+  if not lockHandle then
+    return false, lockErr
+  end
+
+  local row = findPlayerWeaponRowByInstance(ctx, instanceUid)
+  if not row then
+    releaseContainerLocks(lockHandle)
+    return false, 'weapon_not_owned'
+  end
+
+  local itemDef = getItemDefinition(row.item)
+  if not isWeaponItemDefinition(itemDef) then
+    releaseContainerLocks(lockHandle)
+    return false, 'item_not_weapon'
+  end
+
+  local nextAmmo = clampWeaponAmmo(itemDef, requestedAmmo)
+  local currentMetadata = type(row.metadata) == 'table' and row.metadata or {}
+  local knownAmmo = clampWeaponAmmo(itemDef, allowedState and allowedState.ammo or currentMetadata.ammo or itemDef.defaultAmmo or 0)
+
+  -- Client ammo updates only confirm shots/decreases. Future ammo increases must come from a server-side reload flow.
+  if nextAmmo > knownAmmo then
+    releaseContainerLocks(lockHandle)
+    logWeaponInventoryAction('weapon_ammo_increase_blocked', source, player, row, {
+      reason = tostring(reason or 'client_update'),
+      ammo = nextAmmo,
+      known_ammo = knownAmmo
+    })
+    return false, 'weapon_ammo_increase_blocked'
+  end
+
+  local metadata = cloneTable(type(row.metadata) == 'table' and row.metadata or {})
+  metadata.ammo = nextAmmo
+
+  MZInventoryRepository.updateMetadataBySlot(ctx.ownerType, ctx.ownerId, ctx.inventoryType, row.slot, metadata)
+  releaseContainerLocks(lockHandle)
+
+  local equipped = EquippedWeaponsBySource[tonumber(source)]
+  if equipped and tostring(equipped.instance_uid or '') == tostring(instanceUid or '') then
+    equipped.ammo = nextAmmo
+    equipped.slot = tonumber(row.slot) or row.slot
+  end
+
+  clearPendingWeaponAmmoUpdate(source, instanceUid)
+
+  logWeaponInventoryAction('weapon_ammo_update', source, player, row, {
+    reason = tostring(reason or 'client_update'),
+    ammo = nextAmmo
+  })
+
+  return true, {
+    ammo = nextAmmo,
+    slot = tonumber(row.slot) or row.slot,
+    instance_uid = tostring(instanceUid or '')
+  }
+end
+
+local function handleWeaponItemUse(payload)
+  payload = type(payload) == 'table' and payload or {}
+
+  local source = tonumber(payload.source)
+  if not source then
+    return {
+      ok = false,
+      error = 'invalid_source'
+    }
+  end
+
+  local ctx, ctxErr = getPlayerInventoryContext(source)
+  if not ctx then
+    return {
+      ok = false,
+      error = ctxErr
+    }
+  end
+
+  local slot = tonumber(payload.slot)
+  local row = findRowBySlot(getInventoryRowsFromContext(ctx), slot)
+  if not row or tostring(row.item or '') ~= tostring(payload.item or '') then
+    return {
+      ok = false,
+      error = 'slot_empty'
+    }
+  end
+
+  local itemDef = getItemDefinition(row.item)
+  if not isWeaponItemDefinition(itemDef) then
+    return {
+      ok = false,
+      error = 'item_not_weapon'
+    }
+  end
+
+  local instanceUid = getWeaponInstanceUid(row)
+  if instanceUid == '' then
+    return {
+      ok = false,
+      error = 'missing_weapon_uid'
+    }
+  end
+
+  local current = EquippedWeaponsBySource[source]
+  if current and tostring(current.instance_uid or '') == instanceUid then
+    clearEquippedWeaponState(source, 'toggle_unequip', { notifyClient = true })
+    return {
+      ok = true,
+      consume = false,
+      data = {
+        weapon = {
+          equipped = false,
+          instance_uid = instanceUid
+        }
+      }
+    }
+  end
+
+  if current then
+    logWeaponInventoryAction('weapon_unequip', source, ctx.player, {
+      item = current.item,
+      slot = current.slot,
+      instance_uid = current.instance_uid,
+      metadata = {
+        serial = current.serial,
+        durability = current.durability
+      }
+    }, {
+      reason = 'switch_weapon',
+      weapon = current.weapon
+    })
+    queuePendingWeaponAmmoUpdate(source, current)
+  end
+
+  local clientPayload = buildWeaponClientPayload(row, itemDef, source, 'equip')
+  setEquippedWeaponState(source, ctx.player, row, clientPayload)
+
+  logWeaponInventoryAction('weapon_equip', source, ctx.player, row, {
+    weapon = clientPayload.weapon,
+    ammo = clientPayload.ammo,
+    reason = current and 'switch_weapon' or 'use_item'
+  })
+
+  TriggerClientEvent('mz_core:client:inventory:equipWeapon', source, clientPayload)
+
+  return {
+    ok = true,
+    consume = false,
+    data = {
+      weapon = {
+        equipped = true,
+        item = clientPayload.item,
+        slot = clientPayload.slot,
+        instance_uid = clientPayload.instance_uid,
+        weapon = clientPayload.weapon,
+        equip_nonce = clientPayload.equip_nonce,
+        ammo = clientPayload.ammo,
+        durability = clientPayload.durability,
+        serial = clientPayload.serial
+      }
+    }
+  }
+end
+
+applyEquippedAmmoToMovingWeapon = function(fromCtx, fromRow, itemDef)
+  if not isWeaponItemDefinition(itemDef) then
+    return
+  end
+
+  if type(fromCtx) ~= 'table' or tostring(fromCtx.ownerType or '') ~= 'player' then
+    return
+  end
+
+  local source = tonumber(fromCtx.player and fromCtx.player.source)
+  local equipped = source and EquippedWeaponsBySource[source] or nil
+  if not equipped then
+    return
+  end
+
+  if tostring(equipped.instance_uid or '') ~= getWeaponInstanceUid(fromRow) then
+    return
+  end
+
+  fromRow.metadata = cloneTable(type(fromRow.metadata) == 'table' and fromRow.metadata or {})
+  fromRow.metadata.ammo = clampWeaponAmmo(itemDef, equipped.ammo or fromRow.metadata.ammo or itemDef.defaultAmmo or 0)
+end
+
+enforceEquippedWeaponStillOwned = function(source, reason)
+  source = tonumber(source)
+  if not source then
+    return true
+  end
+
+  if getWeaponConfig().enforceInventoryWeapons == false then
+    return true
+  end
+
+  local equipped = EquippedWeaponsBySource[source]
+  if not equipped then
+    return true
+  end
+
+  local ctx = getPlayerInventoryContext(source)
+  if not ctx then
+    return clearEquippedWeaponState(source, reason or 'player_inventory_missing', { notifyClient = true })
+  end
+
+  local row = findPlayerWeaponRowByInstance(ctx, equipped.instance_uid)
+  local itemDef = row and getItemDefinition(row.item) or nil
+  if not row or not isWeaponItemDefinition(itemDef) then
+    return clearEquippedWeaponState(source, reason or 'weapon_not_owned', { notifyClient = true })
+  end
+
+  equipped.slot = tonumber(row.slot) or row.slot
+  return true
 end
 
 local function buildAddItemMutationPlan(ctx, itemName, amount, metadata)
@@ -2293,6 +2915,57 @@ function MZInventoryService.usePlayerItem(source, slot)
   end)
 end
 
+function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
+  payload = type(payload) == 'table' and payload or {}
+  local instanceUid = tostring(payload.instance_uid or payload.instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if instanceUid == '' then
+    return false, 'invalid_weapon_uid'
+  end
+
+  local equipNonce = tostring(payload.equip_nonce or payload.equipNonce or payload.nonce or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if equipNonce == '' then
+    return false, 'invalid_weapon_nonce'
+  end
+
+  return updateWeaponAmmoMetadata(source, instanceUid, payload.ammo, payload.reason or 'client_update', equipNonce)
+end
+
+function MZInventoryService.clearPlayerEquippedWeapon(source, reason)
+  return clearEquippedWeaponState(source, reason or 'clear_equipped_weapon', { notifyClient = true })
+end
+
+function MZInventoryService.handlePlayerDropped(source, reason)
+  local ok, err = clearEquippedWeaponState(source, reason or 'player_dropped', { notifyClient = false, queuePending = false })
+  clearWeaponRuntimeLimitsForSource(source)
+  return ok, err
+end
+
+function MZInventoryService.logUnauthorizedWeapon(source, payload)
+  payload = type(payload) == 'table' and payload or {}
+  if isUnauthorizedWeaponLogRateLimited(source) then
+    return false, 'weapon_unauthorized_rate_limited'
+  end
+
+  local player = MZPlayerService.getPlayer(source)
+  logInventoryAction('weapon_unauthorized_detected', source, player, nil, {
+    actor = buildInventoryActor(player, source),
+    target = {
+      type = 'ped_weapon',
+      id = tostring(payload.weapon or payload.weapon_hash or 'unknown')
+    },
+    context = {
+      selected_weapon = tostring(payload.weapon or ''),
+      selected_hash = tostring(payload.weapon_hash or ''),
+      authorized_instance_uid = tostring(payload.authorized_instance_uid or ''),
+      reason = tostring(payload.reason or 'unauthorized_weapon')
+    },
+    meta = {
+      event = 'client_weapon_enforcement'
+    }
+  })
+  return true
+end
+
 local PublicInventoryErrors = {
   inventory_busy = { code = 'inventory_busy', message = 'Inventory is busy.' },
   invalid_container = { code = 'invalid_container', message = 'Invalid inventory container.' },
@@ -2344,6 +3017,16 @@ local function mapPublicInventoryErrorCode(internalCode)
     org_membership_required = 'container_access_denied',
     org_duty_required = 'container_access_denied',
     use_handler_failed = 'use_failed',
+    invalid_source = 'use_failed',
+    invalid_ammo = 'use_failed',
+    missing_weapon_uid = 'use_failed',
+    invalid_weapon_uid = 'use_failed',
+    invalid_weapon_nonce = 'use_failed',
+    item_not_weapon = 'item_not_usable',
+    weapon_not_equipped = 'use_failed',
+    weapon_not_owned = 'use_failed',
+    weapon_ammo_rate_limited = 'use_failed',
+    weapon_ammo_increase_blocked = 'use_failed',
     drop_create_failed = 'drop_create_failed'
   }
 
@@ -2992,4 +3675,8 @@ MZInventoryService.registerItemUseHandler('radio', function(payload)
       channel = payload.metadata.channel
     }
   }
+end)
+
+MZInventoryService.registerItemUseHandler('weapon_pistol', function(payload)
+  return handleWeaponItemUse(payload)
 end)

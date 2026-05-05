@@ -55,6 +55,14 @@ Config.Inventory = {
 
 }
 
+Config.Weapons = {
+  blockWeaponWheel = true,
+  enforceInventoryWeapons = true,
+  ammoSaveIntervalMs = 5000,
+  ammoUpdateMinIntervalMs = 750,
+  unauthorizedLogIntervalMs = 5000
+}
+
 Config.SeedOrgTypes = {
   { code = 'job', name = 'Job' },
   { code = 'gang', name = 'Gang' },
