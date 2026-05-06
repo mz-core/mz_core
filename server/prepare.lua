@@ -194,6 +194,18 @@ local statements = {
     KEY idx_mz_inventory_item (item)
   )]],
 
+  [[CREATE TABLE IF NOT EXISTS mz_player_hotbar (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    citizenid VARCHAR(32) NOT NULL,
+    hotbar_slot INT NOT NULL,
+    instance_uid VARCHAR(64) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_player_hotbar_slot (citizenid, hotbar_slot),
+    UNIQUE KEY uq_mz_player_hotbar_instance (citizenid, instance_uid),
+    KEY idx_mz_player_hotbar_instance_uid (instance_uid)
+  )]],
+
   [[CREATE TABLE IF NOT EXISTS mz_org_accounts (
     id INT AUTO_INCREMENT PRIMARY KEY,
     org_id INT NOT NULL,

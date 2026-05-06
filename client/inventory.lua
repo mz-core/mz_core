@@ -11,6 +11,31 @@ local function getWeaponConfig()
   return type(Config.Weapons) == 'table' and Config.Weapons or {}
 end
 
+local function getInventoryConfig()
+  return type(Config.Inventory) == 'table' and Config.Inventory or {}
+end
+
+local function getHotbarSlotCount()
+  local count = tonumber(getInventoryConfig().hotbarSlots) or 5
+  count = math.floor(count)
+  if count < 1 then
+    count = 1
+  end
+
+  return count
+end
+
+local function useHotbarSlot(hotbarSlot)
+  hotbarSlot = tonumber(hotbarSlot)
+  if not hotbarSlot then
+    return
+  end
+
+  TriggerServerEvent('mz_core:server:inventory:useHotbarSlot', {
+    hotbar_slot = math.floor(hotbarSlot)
+  })
+end
+
 local function getWeaponHash(weaponName)
   weaponName = tostring(weaponName or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
   if weaponName == '' then
@@ -191,6 +216,23 @@ end)
 RegisterNetEvent('mz_core:client:inventory:unequipWeapon', function(payload)
   unequipAuthorizedWeapon(payload)
 end)
+
+for slot = 1, getHotbarSlotCount() do
+  local hotbarSlot = slot
+  local commandName = ('mz_hotbar_%s'):format(hotbarSlot)
+  RegisterCommand(commandName, function()
+    useHotbarSlot(hotbarSlot)
+  end, false)
+
+  local hotbarKeys = getInventoryConfig().hotbarKeys
+  local defaultKey = type(hotbarKeys) == 'table' and hotbarKeys[hotbarSlot] or tostring(hotbarSlot)
+  RegisterKeyMapping(
+    commandName,
+    ('Usar hotbar %s'):format(hotbarSlot),
+    'keyboard',
+    tostring(defaultKey or hotbarSlot)
+  )
+end
 
 CreateThread(function()
   while true do

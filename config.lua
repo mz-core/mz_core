@@ -31,6 +31,14 @@ Config.Player = {
 Config.Inventory = {
   defaultSlots = 40,
   defaultWeight = 50000,
+  hotbarSlots = 5,
+  hotbarKeys = {
+    [1] = '1',
+    [2] = '2',
+    [3] = '3',
+    [4] = '4',
+    [5] = '5'
+  },
 
   personalStash = {
     slots = 40,

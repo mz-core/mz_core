@@ -221,6 +221,111 @@ RegisterCommand('minv_use', function(source, args)
   reply(('Item usado: source=%s slot=%s'):format(targetSource, slot))
 end, true)
 
+RegisterCommand('minv_hotbar_bind', function(source, args)
+  if not canUseInventoryCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
+  local targetSource = tonumber(args[1])
+  local hotbarSlot = tonumber(args[2])
+  local inventorySlot = tonumber(args[3])
+
+  if not targetSource or not hotbarSlot or not inventorySlot then
+    return reply('Uso: minv_hotbar_bind [source] [hotbarSlot] [inventorySlot]')
+  end
+
+  local ok, resultOrErr = exports['mz_core']:BindHotbarSlot(targetSource, hotbarSlot, inventorySlot)
+  if not ok then
+    return reply(('Erro: %s'):format(resultOrErr or 'unknown'))
+  end
+
+  reply(('Hotbar vinculada: source=%s hotbar=%s inventory_slot=%s uid=%s item=%s'):format(
+    targetSource,
+    tostring(resultOrErr.hotbar_slot),
+    tostring(resultOrErr.inventory_slot),
+    tostring(resultOrErr.instance_uid),
+    tostring(resultOrErr.item)
+  ))
+end, true)
+
+RegisterCommand('minv_hotbar_clear', function(source, args)
+  if not canUseInventoryCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
+  local targetSource = tonumber(args[1])
+  local hotbarSlot = tonumber(args[2])
+
+  if not targetSource or not hotbarSlot then
+    return reply('Uso: minv_hotbar_clear [source] [hotbarSlot]')
+  end
+
+  local ok, resultOrErr = exports['mz_core']:ClearHotbarSlot(targetSource, hotbarSlot)
+  if not ok then
+    return reply(('Erro: %s'):format(resultOrErr or 'unknown'))
+  end
+
+  reply(('Hotbar limpa: source=%s hotbar=%s removed=%s'):format(
+    targetSource,
+    tostring(resultOrErr.hotbar_slot),
+    tostring(resultOrErr.removed)
+  ))
+end, true)
+
+RegisterCommand('minv_hotbar_show', function(source, args)
+  if not canUseInventoryCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
+  local targetSource = tonumber(args[1])
+  if not targetSource then
+    return reply('Uso: minv_hotbar_show [source]')
+  end
+
+  local ok, resultOrErr = exports['mz_core']:GetPlayerHotbar(targetSource)
+  if not ok then
+    return reply(('Erro: %s'):format(resultOrErr or 'unknown'))
+  end
+
+  reply(('Hotbar do source %s:'):format(targetSource))
+  for _, slot in ipairs(type(resultOrErr.slots) == 'table' and resultOrErr.slots or {}) do
+    reply(('- hotbar %s | uid=%s | valid=%s | inv_slot=%s | item=%s | label=%s'):format(
+      tostring(slot.hotbar_slot),
+      tostring(slot.instance_uid or ''),
+      tostring(slot.valid == true),
+      tostring(slot.inventory_slot or ''),
+      tostring(slot.item or ''),
+      tostring(slot.label or '')
+    ))
+  end
+end, true)
+
+RegisterCommand('minv_hotbar_use', function(source, args)
+  if not canUseInventoryCommand(source) then
+    return reply('Sem permissÃ£o.')
+  end
+
+  local targetSource = tonumber(args[1])
+  local hotbarSlot = tonumber(args[2])
+
+  if not targetSource or not hotbarSlot then
+    return reply('Uso: minv_hotbar_use [source] [hotbarSlot]')
+  end
+
+  local ok, resultOrErr = exports['mz_core']:UseHotbarSlot(targetSource, hotbarSlot)
+  if not ok then
+    return reply(('Erro: %s'):format(resultOrErr or 'unknown'))
+  end
+
+  reply(('Hotbar usada: source=%s hotbar=%s inv_slot=%s item=%s uid=%s'):format(
+    targetSource,
+    tostring(resultOrErr.hotbar_slot),
+    tostring(resultOrErr.inventory_slot),
+    tostring(resultOrErr.item),
+    tostring(resultOrErr.instance_uid)
+  ))
+end, true)
+
 -----
 
 RegisterCommand('minv_stash_show', function(source, args)

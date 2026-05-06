@@ -42,10 +42,62 @@ lib.callback.register('mz_core:server:inventory:errors', function()
   return MZInventoryService.getPublicInventoryErrorCatalog()
 end)
 
+local function buildHotbarCallbackResponse(ok, resultOrErr)
+  if ok then
+    return {
+      ok = true,
+      data = resultOrErr or {}
+    }
+  end
+
+  return {
+    ok = false,
+    error = {
+      code = tostring(resultOrErr or 'unknown_error'),
+      message = tostring(resultOrErr or 'unknown_error'),
+      internal_code = tostring(resultOrErr or 'unknown_error')
+    }
+  }
+end
+
+lib.callback.register('mz_core:server:inventory:getHotbar', function(source)
+  return buildHotbarCallbackResponse(MZInventoryService.getPlayerHotbar(source))
+end)
+
+lib.callback.register('mz_core:server:inventory:bindHotbarSlot', function(source, payload)
+  payload = type(payload) == 'table' and payload or {}
+  return buildHotbarCallbackResponse(MZInventoryService.bindHotbarSlot(
+    source,
+    payload.hotbar_slot or payload.hotbarSlot,
+    payload.inventory_slot or payload.inventorySlot or payload.slot
+  ))
+end)
+
+lib.callback.register('mz_core:server:inventory:clearHotbarSlot', function(source, payload)
+  payload = type(payload) == 'table' and payload or {}
+  return buildHotbarCallbackResponse(MZInventoryService.clearHotbarSlot(
+    source,
+    payload.hotbar_slot or payload.hotbarSlot
+  ))
+end)
+
+lib.callback.register('mz_core:server:inventory:useHotbarSlot', function(source, payload)
+  payload = type(payload) == 'table' and payload or {}
+  return buildHotbarCallbackResponse(MZInventoryService.useHotbarSlot(
+    source,
+    payload.hotbar_slot or payload.hotbarSlot
+  ))
+end)
+
 RegisterNetEvent('mz_core:server:inventory:updateWeaponAmmo', function(payload)
   MZInventoryService.updateEquippedWeaponAmmo(source, payload)
 end)
 
 RegisterNetEvent('mz_core:server:inventory:unauthorizedWeaponDetected', function(payload)
   MZInventoryService.logUnauthorizedWeapon(source, payload)
+end)
+
+RegisterNetEvent('mz_core:server:inventory:useHotbarSlot', function(payload)
+  payload = type(payload) == 'table' and payload or {}
+  MZInventoryService.useHotbarSlot(source, payload.hotbar_slot or payload.hotbarSlot)
 end)

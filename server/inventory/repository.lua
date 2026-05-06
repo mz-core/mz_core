@@ -60,6 +60,100 @@ function MZInventoryRepository.getByInstanceUid(instanceUid)
   return row
 end
 
+function MZInventoryRepository.getPlayerHotbar(citizenid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if citizenid == '' then
+    return {}
+  end
+
+  return MySQL.query.await([[
+    SELECT citizenid, hotbar_slot, instance_uid, created_at, updated_at
+    FROM mz_player_hotbar
+    WHERE citizenid = ?
+    ORDER BY hotbar_slot ASC
+  ]], { citizenid }) or {}
+end
+
+function MZInventoryRepository.setPlayerHotbarSlot(citizenid, hotbarSlot, instanceUid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  hotbarSlot = tonumber(hotbarSlot)
+  instanceUid = tostring(instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+
+  if citizenid == '' or not hotbarSlot or hotbarSlot <= 0 or instanceUid == '' then
+    return false, 'invalid_hotbar_bind'
+  end
+
+  local ok = MySQL.transaction.await({
+    {
+      query = [[
+        DELETE FROM mz_player_hotbar
+        WHERE citizenid = ? AND instance_uid = ? AND hotbar_slot <> ?
+      ]],
+      parameters = { citizenid, instanceUid, hotbarSlot }
+    },
+    {
+      query = [[
+        INSERT INTO mz_player_hotbar (citizenid, hotbar_slot, instance_uid)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          instance_uid = VALUES(instance_uid),
+          updated_at = CURRENT_TIMESTAMP
+      ]],
+      parameters = { citizenid, hotbarSlot, instanceUid }
+    }
+  })
+
+  if ok == false then
+    return false, 'hotbar_save_failed'
+  end
+
+  return true
+end
+
+function MZInventoryRepository.clearPlayerHotbarSlot(citizenid, hotbarSlot)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  hotbarSlot = tonumber(hotbarSlot)
+  if citizenid == '' or not hotbarSlot or hotbarSlot <= 0 then
+    return false, 'invalid_hotbar_slot'
+  end
+
+  return MySQL.update.await([[
+    DELETE FROM mz_player_hotbar
+    WHERE citizenid = ? AND hotbar_slot = ?
+  ]], { citizenid, hotbarSlot }) or 0
+end
+
+function MZInventoryRepository.clearPlayerHotbarByInstanceUid(citizenid, instanceUid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  instanceUid = tostring(instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if citizenid == '' or instanceUid == '' then
+    return false, 'invalid_hotbar_instance'
+  end
+
+  return MySQL.update.await([[
+    DELETE FROM mz_player_hotbar
+    WHERE citizenid = ? AND instance_uid = ?
+  ]], { citizenid, instanceUid }) or 0
+end
+
+function MZInventoryRepository.clearInvalidPlayerHotbarRefs(citizenid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if citizenid == '' then
+    return 0
+  end
+
+  return MySQL.update.await([[
+    DELETE hb
+    FROM mz_player_hotbar hb
+    LEFT JOIN mz_inventory_items ii
+      ON ii.instance_uid = hb.instance_uid
+      AND ii.owner_type = 'player'
+      AND ii.owner_id = hb.citizenid
+      AND ii.inventory_type = 'main'
+    WHERE hb.citizenid = ? AND ii.id IS NULL
+  ]], { citizenid }) or 0
+end
+
 function MZInventoryRepository.findStackableSlot(ownerType, ownerId, inventoryType, itemName, metadata)
   local rows = MySQL.query.await([[
     SELECT *

@@ -174,6 +174,26 @@ exports('UseInventoryItemAction', function(source, request)
   return MZInventoryService.useInventoryItemAction(source, request)
 end)
 
+exports('GetPlayerHotbar', function(source)
+  return MZInventoryService.getPlayerHotbar(source)
+end)
+
+exports('BindHotbarSlot', function(source, hotbarSlot, inventorySlot)
+  return MZInventoryService.bindHotbarSlot(source, hotbarSlot, inventorySlot)
+end)
+
+exports('ClearHotbarSlot', function(source, hotbarSlot)
+  return MZInventoryService.clearHotbarSlot(source, hotbarSlot)
+end)
+
+exports('UseHotbarSlot', function(source, hotbarSlot)
+  return MZInventoryService.useHotbarSlot(source, hotbarSlot)
+end)
+
+exports('CleanupInvalidHotbarRefs', function(source)
+  return MZInventoryService.cleanupInvalidHotbarRefs(source)
+end)
+
 exports('GetInventoryErrorCatalog', function()
   return MZInventoryService.getPublicInventoryErrorCatalog()
 end)

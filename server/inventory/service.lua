@@ -10,6 +10,7 @@ local PendingWeaponAmmoUpdateTtlMs = 10000
 
 local enforceEquippedWeaponStillOwned
 local applyEquippedAmmoToMovingWeapon
+local cleanupInvalidHotbarRefsForPlayer
 
 local function getItemDefinition(itemName)
   return MZItems and MZItems[itemName] or nil
@@ -547,6 +548,36 @@ local function logInventoryAction(action, source, player, targetCtx, payload)
   })
 end
 
+cleanupInvalidHotbarRefsForPlayer = function(source, reason)
+  local player = MZPlayerService.getPlayer(source)
+  local citizenid = tostring(player and player.citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if citizenid == '' then
+    return 0
+  end
+
+  local removed = tonumber(MZInventoryRepository.clearInvalidPlayerHotbarRefs(citizenid)) or 0
+  if removed > 0 then
+    logInventoryAction('inventory_hotbar_invalid_ref_cleaned', source, player, nil, {
+      actor = buildInventoryActor(player, source),
+      target = {
+        type = 'hotbar',
+        id = citizenid
+      },
+      context = {
+        citizenid = citizenid,
+        removed = removed,
+        reason = tostring(reason or 'inventory_mutation')
+      },
+      meta = {
+        removed = removed,
+        reason = tostring(reason or 'inventory_mutation')
+      }
+    })
+  end
+
+  return removed
+end
+
 local InventoryMutationLocks = {}
 local InventoryMutationLockTimeoutMs = 5000
 
@@ -691,6 +722,10 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
 
   if actorPlayer and enforceEquippedWeaponStillOwned then
     enforceEquippedWeaponStillOwned(actorPlayer.source, mutationName or 'inventory_mutation')
+  end
+
+  if actorPlayer and cleanupInvalidHotbarRefsForPlayer then
+    cleanupInvalidHotbarRefsForPlayer(actorPlayer.source, mutationName or 'inventory_mutation')
   end
 
   if plan.result ~= nil then
@@ -2250,7 +2285,7 @@ local function buildSetPlayerSlotMetadataMutationPlan(ctx, slot, metadata, mode)
   }
 end
 
-local function buildUsePlayerItemMutationPlan(ctx, source, slot)
+local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanceUid)
   slot = tonumber(slot)
   if not isValidSlotNumber(slot, ctx.maxSlots) then
     return false, 'invalid_slot'
@@ -2259,6 +2294,14 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot)
   local row = findRowBySlot(getInventoryRowsFromContext(ctx), slot)
   if not row then
     return false, 'slot_empty'
+  end
+
+  expectedInstanceUid = tostring(expectedInstanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if expectedInstanceUid ~= '' then
+    local rowInstanceUid = tostring(row.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if rowInstanceUid ~= expectedInstanceUid then
+      return false, 'hotbar_item_moved'
+    end
   end
 
   local itemDef = getItemDefinition(row.item)
@@ -2915,6 +2958,37 @@ function MZInventoryService.usePlayerItem(source, slot)
   end)
 end
 
+function MZInventoryService.usePlayerItemByInstanceUid(source, instanceUid)
+  local ctx, err = getPlayerInventoryContext(source)
+  if not ctx then
+    return false, err
+  end
+
+  instanceUid = tostring(instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if instanceUid == '' then
+    return false, 'invalid_hotbar_instance'
+  end
+
+  return executeInventoryMutation(ctx.player, { ctx }, 'use_player_item_by_instance_uid', function()
+    local rows = getInventoryRowsFromContext(ctx)
+    local row = nil
+
+    for _, candidate in ipairs(rows) do
+      local candidateUid = tostring(candidate.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+      if candidateUid == instanceUid then
+        row = candidate
+        break
+      end
+    end
+
+    if not row then
+      return false, 'hotbar_item_missing'
+    end
+
+    return buildUsePlayerItemMutationPlan(ctx, source, row.slot, instanceUid)
+  end)
+end
+
 function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
   payload = type(payload) == 'table' and payload or {}
   local instanceUid = tostring(payload.instance_uid or payload.instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
@@ -3019,9 +3093,15 @@ local function mapPublicInventoryErrorCode(internalCode)
     use_handler_failed = 'use_failed',
     invalid_source = 'use_failed',
     invalid_ammo = 'use_failed',
+    invalid_hotbar_slot = 'invalid_slot',
     missing_weapon_uid = 'use_failed',
+    missing_instance_uid = 'use_failed',
     invalid_weapon_uid = 'use_failed',
     invalid_weapon_nonce = 'use_failed',
+    hotbar_slot_empty = 'invalid_slot',
+    hotbar_item_missing = 'use_failed',
+    hotbar_save_failed = 'use_failed',
+    hotbar_clear_failed = 'use_failed',
     item_not_weapon = 'item_not_usable',
     weapon_not_equipped = 'use_failed',
     weapon_not_owned = 'use_failed',
@@ -3250,6 +3330,95 @@ local function getPublicInventorySnapshot(source, descriptor)
   local currentWeight = getRowsWeight(rows)
 
   return true, buildPublicContainerPayload(ctx, normalized, rows, currentWeight), normalized
+end
+
+local function getHotbarSlotCount()
+  local count = tonumber(Config.Inventory and Config.Inventory.hotbarSlots) or 5
+  count = math.floor(count)
+  if count < 1 then
+    count = 1
+  end
+
+  return count
+end
+
+local function normalizeHotbarSlot(hotbarSlot)
+  hotbarSlot = tonumber(hotbarSlot)
+  if not hotbarSlot then
+    return nil
+  end
+
+  hotbarSlot = math.floor(hotbarSlot)
+  if hotbarSlot < 1 or hotbarSlot > getHotbarSlotCount() then
+    return nil
+  end
+
+  return hotbarSlot
+end
+
+local function isPlayerMainInventoryRow(row, citizenid)
+  return type(row) == 'table'
+    and tostring(row.owner_type or '') == 'player'
+    and tostring(row.owner_id or '') == tostring(citizenid or '')
+    and tostring(row.inventory_type or '') == MZConstants.InventoryTypes.MAIN
+end
+
+local function resolvePlayerHotbarSlots(source, citizenid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  local entries = MZInventoryRepository.getPlayerHotbar(citizenid)
+  local bySlot = {}
+  for _, entry in ipairs(entries) do
+    local slot = normalizeHotbarSlot(entry.hotbar_slot)
+    local instanceUid = tostring(entry.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if slot and instanceUid ~= '' then
+      bySlot[slot] = instanceUid
+    end
+  end
+
+  local slots = {}
+  for slot = 1, getHotbarSlotCount() do
+    local instanceUid = bySlot[slot]
+    local row = instanceUid and MZInventoryRepository.getByInstanceUid(instanceUid) or nil
+    local valid = row and isPlayerMainInventoryRow(row, citizenid)
+    local itemDef = valid and getItemDefinition(row.item) or nil
+
+    slots[#slots + 1] = {
+      hotbar_slot = slot,
+      instance_uid = instanceUid,
+      valid = valid == true,
+      inventory_slot = valid and (tonumber(row.slot) or row.slot) or nil,
+      item = valid and tostring(row.item or '') or nil,
+      label = valid and itemDef and tostring(itemDef.label or row.item or '') or nil,
+      usable = valid and itemDef and itemDef.usable == true or false,
+      unique = valid and itemDef and itemDef.unique == true or false
+    }
+  end
+
+  return slots
+end
+
+local function logHotbarAction(action, source, player, hotbarSlot, instanceUid, extra)
+  extra = type(extra) == 'table' and extra or {}
+  logInventoryAction(action, source, player, nil, {
+    actor = buildInventoryActor(player, source),
+    target = {
+      type = 'hotbar',
+      id = tostring(hotbarSlot or 'unknown')
+    },
+    context = {
+      citizenid = tostring(player and player.citizenid or ''),
+      hotbar_slot = tonumber(hotbarSlot) or hotbarSlot,
+      instance_uid = tostring(instanceUid or ''),
+      inventory_slot = extra.inventory_slot,
+      reason = tostring(extra.reason or '')
+    },
+    meta = {
+      item = tostring(extra.item or ''),
+      instance_uid = tostring(instanceUid or ''),
+      hotbar_slot = tonumber(hotbarSlot) or hotbarSlot,
+      reason = tostring(extra.reason or '')
+    }
+  })
 end
 
 local function buildPublicTouchedSnapshots(source, descriptors)
@@ -3652,6 +3821,186 @@ function MZInventoryService.useInventoryItemAction(source, request)
     result = resultOrErr,
     snapshot = snapshotOrErr
   })
+end
+
+function MZInventoryService.getPlayerHotbar(source)
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr
+  end
+
+  cleanupInvalidHotbarRefsForPlayer(source, 'get_hotbar')
+  return true, {
+    slots = resolvePlayerHotbarSlots(source, player.citizenid)
+  }
+end
+
+function MZInventoryService.bindHotbarSlot(source, hotbarSlot, inventorySlot)
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr
+  end
+
+  hotbarSlot = normalizeHotbarSlot(hotbarSlot)
+  if not hotbarSlot then
+    return false, 'invalid_hotbar_slot'
+  end
+
+  inventorySlot = tonumber(inventorySlot)
+  if not inventorySlot then
+    return false, 'invalid_slot'
+  end
+
+  local ctx, ctxErr = getPlayerInventoryContext(source)
+  if not ctx then
+    return false, ctxErr
+  end
+
+  if not isValidSlotNumber(inventorySlot, ctx.maxSlots) then
+    return false, 'invalid_slot'
+  end
+
+  local row = findRowBySlot(getInventoryRowsFromContext(ctx), inventorySlot)
+  if not row then
+    return false, 'slot_empty'
+  end
+
+  local itemDef = getItemDefinition(row.item)
+  if not itemDef then
+    return false, 'item_not_found'
+  end
+
+  if itemDef.usable ~= true then
+    return false, 'item_not_usable'
+  end
+
+  local instanceUid = tostring(row.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if instanceUid == '' then
+    return false, 'missing_instance_uid'
+  end
+
+  local ok, err = MZInventoryRepository.setPlayerHotbarSlot(player.citizenid, hotbarSlot, instanceUid)
+  if not ok then
+    return false, err or 'hotbar_save_failed'
+  end
+
+  logHotbarAction('inventory_hotbar_bind', source, player, hotbarSlot, instanceUid, {
+    item = row.item,
+    inventory_slot = tonumber(row.slot) or row.slot
+  })
+
+  return true, {
+    hotbar_slot = hotbarSlot,
+    instance_uid = instanceUid,
+    inventory_slot = tonumber(row.slot) or row.slot,
+    item = tostring(row.item or '')
+  }
+end
+
+function MZInventoryService.clearHotbarSlot(source, hotbarSlot)
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr
+  end
+
+  hotbarSlot = normalizeHotbarSlot(hotbarSlot)
+  if not hotbarSlot then
+    return false, 'invalid_hotbar_slot'
+  end
+
+  local currentInstanceUid = ''
+  local hotbar = MZInventoryRepository.getPlayerHotbar(player.citizenid)
+  for _, entry in ipairs(hotbar) do
+    if tonumber(entry.hotbar_slot) == hotbarSlot then
+      currentInstanceUid = tostring(entry.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+      break
+    end
+  end
+
+  local removedOrFalse, err = MZInventoryRepository.clearPlayerHotbarSlot(player.citizenid, hotbarSlot)
+  if removedOrFalse == false then
+    return false, err or 'hotbar_clear_failed'
+  end
+
+  local removed = tonumber(removedOrFalse) or 0
+  if removed > 0 then
+    logHotbarAction('inventory_hotbar_clear', source, player, hotbarSlot, currentInstanceUid, {
+      reason = 'manual_clear'
+    })
+  end
+
+  return true, {
+    hotbar_slot = hotbarSlot,
+    removed = removed
+  }
+end
+
+function MZInventoryService.useHotbarSlot(source, hotbarSlot)
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr
+  end
+
+  hotbarSlot = normalizeHotbarSlot(hotbarSlot)
+  if not hotbarSlot then
+    return false, 'invalid_hotbar_slot'
+  end
+
+  local hotbar = MZInventoryRepository.getPlayerHotbar(player.citizenid)
+  local instanceUid = ''
+  for _, entry in ipairs(hotbar) do
+    if tonumber(entry.hotbar_slot) == hotbarSlot then
+      instanceUid = tostring(entry.instance_uid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+      break
+    end
+  end
+
+  if instanceUid == '' then
+    return false, 'hotbar_slot_empty'
+  end
+
+  local row = MZInventoryRepository.getByInstanceUid(instanceUid)
+  if not isPlayerMainInventoryRow(row, player.citizenid) then
+    cleanupInvalidHotbarRefsForPlayer(source, 'hotbar_use_missing_item')
+    return false, 'hotbar_item_missing'
+  end
+
+  local itemDef = getItemDefinition(row.item)
+  if not itemDef then
+    cleanupInvalidHotbarRefsForPlayer(source, 'hotbar_use_missing_item_definition')
+    return false, 'item_not_found'
+  end
+
+  if itemDef.usable ~= true then
+    return false, 'item_not_usable'
+  end
+
+  local ok, resultOrErr = MZInventoryService.usePlayerItemByInstanceUid(source, instanceUid)
+  if not ok then
+    if resultOrErr == 'hotbar_item_missing' or resultOrErr == 'hotbar_item_moved' then
+      cleanupInvalidHotbarRefsForPlayer(source, 'hotbar_use_invalid_reference')
+    end
+    return false, resultOrErr
+  end
+
+  local usedRow = MZInventoryRepository.getByInstanceUid(instanceUid) or row
+
+  logHotbarAction('inventory_hotbar_use', source, player, hotbarSlot, instanceUid, {
+    item = usedRow.item,
+    inventory_slot = tonumber(usedRow.slot) or usedRow.slot
+  })
+
+  return true, {
+    hotbar_slot = hotbarSlot,
+    instance_uid = instanceUid,
+    inventory_slot = tonumber(usedRow.slot) or usedRow.slot,
+    item = tostring(usedRow.item or ''),
+    result = resultOrErr
+  }
+end
+
+function MZInventoryService.cleanupInvalidHotbarRefs(source)
+  return cleanupInvalidHotbarRefsForPlayer(source, 'manual_cleanup')
 end
 
 function MZInventoryService.getPublicInventoryErrorCatalog()
