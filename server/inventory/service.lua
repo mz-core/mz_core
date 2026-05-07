@@ -4319,9 +4319,21 @@ MZInventoryService.registerItemUseHandler('radio', function(payload)
   }
 end)
 
-MZInventoryService.registerItemUseHandler('weapon_pistol', function(payload)
-  return handleWeaponItemUse(payload)
-end)
+local WeaponUseItems = {
+  'weapon_pistol',
+  'weapon_smg',
+  'weapon_pumpshotgun',
+  'weapon_carbinerifle',
+  'weapon_sniperrifle',
+  'weapon_mg',
+  'weapon_rpg'
+}
+
+for _, weaponItemName in ipairs(WeaponUseItems) do
+  MZInventoryService.registerItemUseHandler(weaponItemName, function(payload)
+    return handleWeaponItemUse(payload)
+  end)
+end
 
 local AmmoUseItems = {
   'ammo_pistol',
