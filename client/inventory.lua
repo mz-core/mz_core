@@ -15,6 +15,58 @@ local function getInventoryConfig()
   return type(Config.Inventory) == 'table' and Config.Inventory or {}
 end
 
+local function logWeaponClientReject(reason, payload)
+  if getWeaponConfig().debugClient ~= true then
+    return
+  end
+
+  local encoded = '{}'
+  if json and type(json.encode) == 'function' then
+    local ok, result = pcall(function()
+      return json.encode(type(payload) == 'table' and payload or {})
+    end)
+    if ok and result then
+      encoded = tostring(result)
+    end
+  end
+
+  print(('[mz_core][inventory][apply_ammo_rejected] reason=%s | payload=%s'):format(
+    tostring(reason or 'unknown'),
+    encoded
+  ))
+end
+
+local function getAuthorizedMaxAmmo(authorized, payload)
+  authorized = type(authorized) == 'table' and authorized or {}
+  payload = type(payload) == 'table' and payload or {}
+
+  local maxAmmo = tonumber(authorized.maxAmmo or authorized.max_ammo or payload.maxAmmo or payload.max_ammo)
+  if maxAmmo == nil then
+    local itemDef = MZItems and MZItems[tostring(authorized.item or '')] or nil
+    if type(itemDef) == 'table' then
+      maxAmmo = tonumber(itemDef.maxAmmo)
+      if maxAmmo == nil then
+        local ammoTypes = getWeaponConfig().ammoTypes
+        local ammoTypeConfig = type(ammoTypes) == 'table' and ammoTypes[tostring(itemDef.ammoType or '')] or nil
+        if type(ammoTypeConfig) == 'table' then
+          maxAmmo = tonumber(ammoTypeConfig.maxAmmo)
+        end
+      end
+    end
+  end
+
+  if maxAmmo == nil then
+    return nil
+  end
+
+  maxAmmo = math.floor(maxAmmo)
+  if maxAmmo < 0 then
+    return 0
+  end
+
+  return maxAmmo
+end
+
 local function getHotbarSlotCount()
   local count = tonumber(getInventoryConfig().hotbarSlots) or 5
   count = math.floor(count)
@@ -34,6 +86,36 @@ local function useHotbarSlot(hotbarSlot)
   TriggerServerEvent('mz_core:server:inventory:useHotbarSlot', {
     hotbar_slot = math.floor(hotbarSlot)
   })
+end
+
+local function notifyInventoryWeapon(message, notifyType)
+  message = tostring(message or '')
+  if message == '' then
+    return
+  end
+
+  local payload = {
+    type = tostring(notifyType or 'info'),
+    title = 'Inventario',
+    message = message,
+    duration = 3500
+  }
+
+  if GetResourceState('mz_notify') == 'started' then
+    exports['mz_notify']:Notify(payload)
+    return
+  end
+
+  if lib and type(lib.notify) == 'function' then
+    lib.notify({
+      title = payload.title,
+      description = payload.message,
+      type = payload.type == 'info' and 'inform' or payload.type
+    })
+    return
+  end
+
+  print(('[mz_core][inventory][%s] %s'):format(payload.type, payload.message))
 end
 
 local function getWeaponHash(weaponName)
@@ -105,6 +187,7 @@ local function sendWeaponAmmoUpdate(reason, force)
   TriggerServerEvent('mz_core:server:inventory:updateWeaponAmmo', {
     instance_uid = authorized.instance_uid,
     equip_nonce = authorized.equip_nonce,
+    ammo_revision = math.max(0, math.floor(tonumber(authorized.ammo_revision) or 0)),
     slot = authorized.slot,
     ammo = ammo,
     reason = tostring(reason or 'periodic')
@@ -179,10 +262,89 @@ local function applyAuthorizedWeapon(payload)
     weapon = weaponName,
     weapon_hash = weaponHash,
     ammo = ammo,
+    ammo_revision = math.max(0, math.floor(tonumber(payload.ammo_revision) or 0)),
+    maxAmmo = getAuthorizedMaxAmmo({ item = tostring(payload.item or '') }, payload),
     serial = payload.serial,
     durability = payload.durability
   }
   MZClient.InventoryWeapons.lastAmmoSent = ammo
+end
+
+local function applyAuthorizedAmmo(payload)
+  payload = type(payload) == 'table' and payload or {}
+  local authorized = MZClient.InventoryWeapons.authorized
+  if type(authorized) ~= 'table' then
+    logWeaponClientReject('missing_authorized_weapon', payload)
+    return
+  end
+
+  local instanceUid = tostring(payload.instance_uid or '')
+  local equipNonce = tostring(payload.equip_nonce or '')
+  if instanceUid == '' or instanceUid ~= tostring(authorized.instance_uid or '') then
+    logWeaponClientReject('instance_uid_mismatch', payload)
+    return
+  end
+
+  if equipNonce == '' or equipNonce ~= tostring(authorized.equip_nonce or '') then
+    logWeaponClientReject('equip_nonce_mismatch', payload)
+    return
+  end
+
+  local weaponName = tostring(payload.weapon or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
+  if weaponName ~= '' and weaponName ~= tostring(authorized.weapon or '') then
+    logWeaponClientReject('weapon_mismatch', payload)
+    return
+  end
+
+  local ammo = tonumber(payload.ammo)
+  if ammo == nil then
+    logWeaponClientReject('invalid_ammo', payload)
+    return
+  end
+
+  local payloadRevision = tonumber(payload.ammo_revision)
+  if payloadRevision == nil then
+    logWeaponClientReject('missing_ammo_revision', payload)
+    return
+  end
+
+  payloadRevision = math.max(0, math.floor(payloadRevision))
+  local currentRevision = math.max(0, math.floor(tonumber(authorized.ammo_revision) or 0))
+  if payloadRevision ~= currentRevision + 1 then
+    logWeaponClientReject('stale_or_unexpected_ammo_revision', payload)
+    return
+  end
+
+  ammo = math.max(0, math.floor(ammo))
+  local maxAmmo = getAuthorizedMaxAmmo(authorized, payload)
+  if maxAmmo and ammo > maxAmmo then
+    logWeaponClientReject('ammo_above_max', payload)
+    return
+  end
+
+  local ped = getPed()
+  if not ped then
+    logWeaponClientReject('missing_ped', payload)
+    return
+  end
+
+  local weaponHash = tonumber(authorized.weapon_hash) or getWeaponHash(authorized.weapon)
+  if not weaponHash or not HasPedGotWeapon(ped, weaponHash, false) then
+    logWeaponClientReject('authorized_weapon_missing_from_ped', payload)
+    return
+  end
+
+  authorized.ammo = ammo
+  authorized.ammo_revision = payloadRevision
+  MZClient.InventoryWeapons.lastAmmoSent = ammo
+
+  SetPedAmmo(ped, weaponHash, ammo)
+  SetCurrentPedWeapon(ped, weaponHash, true)
+
+  local reloadAmount = tonumber(payload.reload_amount)
+  if reloadAmount and reloadAmount > 0 then
+    notifyInventoryWeapon(('Recarregado: +%s municoes.'):format(math.floor(reloadAmount)), 'success')
+  end
 end
 
 local function unequipAuthorizedWeapon(payload)
@@ -211,6 +373,10 @@ end
 
 RegisterNetEvent('mz_core:client:inventory:equipWeapon', function(payload)
   applyAuthorizedWeapon(payload)
+end)
+
+RegisterNetEvent('mz_core:client:inventory:applyWeaponAmmo', function(payload)
+  applyAuthorizedAmmo(payload)
 end)
 
 RegisterNetEvent('mz_core:client:inventory:unequipWeapon', function(payload)

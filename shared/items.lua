@@ -65,8 +65,9 @@ MZItems = {
     type = 'weapon',
     weapon = 'WEAPON_PISTOL',
     ammoType = 'ammo_pistol',
+    clipSize = 12,
     defaultAmmo = 12,
-    maxAmmo = 250,
+    maxAmmo = 120,
     weight = 2500,
     stack = false,
     unique = true,
@@ -75,6 +76,111 @@ MZItems = {
     bindOnReceive = true,
     generateSerial = true,
     hasDurability = true
+  },
+
+  ammo_pistol = {
+    image = 'ammo_pistol.png',
+    label = 'Munição de Pistola',
+    type = 'ammo',
+    ammoType = 'ammo_pistol',
+    reloadAmount = 12,
+    weight = 80,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_smg = {
+    image = 'ammo_smg.png',
+    label = 'Munição de SMG',
+    type = 'ammo',
+    ammoType = 'ammo_smg',
+    reloadAmount = 30,
+    weight = 90,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_shotgun = {
+    image = 'ammo_shotgun.png',
+    label = 'Cartucho Calibre 12',
+    type = 'ammo',
+    ammoType = 'ammo_shotgun',
+    reloadAmount = 8,
+    weight = 120,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_rifle = {
+    image = 'ammo_rifle.png',
+    label = 'Munição de Fuzil',
+    type = 'ammo',
+    ammoType = 'ammo_rifle',
+    reloadAmount = 30,
+    weight = 110,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_sniper = {
+    image = 'ammo_sniper.png',
+    label = 'Munição de Sniper',
+    type = 'ammo',
+    ammoType = 'ammo_sniper',
+    reloadAmount = 5,
+    weight = 160,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_heavy = {
+    image = 'ammo_heavy.png',
+    label = 'Munição Pesada',
+    type = 'ammo',
+    ammoType = 'ammo_heavy',
+    reloadAmount = 20,
+    weight = 250,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
+  },
+
+  ammo_rpg = {
+    image = 'ammo_rpg.png',
+    label = 'Foguete RPG',
+    type = 'ammo',
+    ammoType = 'ammo_rpg',
+    reloadAmount = 1,
+    weight = 1500,
+    stack = true,
+    unique = false,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = false
   },
 
   radio = {

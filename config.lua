@@ -68,7 +68,44 @@ Config.Weapons = {
   enforceInventoryWeapons = true,
   ammoSaveIntervalMs = 5000,
   ammoUpdateMinIntervalMs = 750,
-  unauthorizedLogIntervalMs = 5000
+  unauthorizedLogIntervalMs = 5000,
+  ammoTypes = {
+    ammo_pistol = {
+      label = 'Munição de Pistola',
+      reloadAmount = 12,
+      maxAmmo = 120
+    },
+    ammo_smg = {
+      label = 'Munição de SMG',
+      reloadAmount = 30,
+      maxAmmo = 180
+    },
+    ammo_shotgun = {
+      label = 'Cartucho Calibre 12',
+      reloadAmount = 8,
+      maxAmmo = 48
+    },
+    ammo_rifle = {
+      label = 'Munição de Fuzil',
+      reloadAmount = 30,
+      maxAmmo = 210
+    },
+    ammo_sniper = {
+      label = 'Munição de Sniper',
+      reloadAmount = 5,
+      maxAmmo = 40
+    },
+    ammo_heavy = {
+      label = 'Munição Pesada',
+      reloadAmount = 20,
+      maxAmmo = 100
+    },
+    ammo_rpg = {
+      label = 'Foguete RPG',
+      reloadAmount = 1,
+      maxAmmo = 5
+    }
+  }
 }
 
 Config.SeedOrgTypes = {

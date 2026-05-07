@@ -1338,7 +1338,9 @@ local function normalizeUseResult(result)
     consume = result.consume == true,
     amount = tonumber(result.amount) or 1,
     error = result.error,
-    data = result.data
+    data = result.data,
+    statements = type(result.statements) == 'table' and result.statements or {},
+    afterCommit = type(result.afterCommit) == 'function' and result.afterCommit or nil
   }
 end
 
@@ -1353,6 +1355,65 @@ local function getWeaponConfigNumber(key, fallback)
   end
 
   return value
+end
+
+local function getAmmoTypeConfig(ammoType)
+  local ammoTypes = getWeaponConfig().ammoTypes
+  if type(ammoTypes) ~= 'table' then
+    return {}
+  end
+
+  local config = ammoTypes[tostring(ammoType or '')]
+  return type(config) == 'table' and config or {}
+end
+
+local function getAmmoTypeConfigNumber(ammoType, key, fallback)
+  local value = tonumber(getAmmoTypeConfig(ammoType)[key])
+  if value == nil then
+    return fallback
+  end
+
+  return value
+end
+
+local function getWeaponMaxAmmo(itemDef, fallback)
+  if type(itemDef) ~= 'table' then
+    return tonumber(fallback)
+  end
+
+  local maxAmmo = tonumber(itemDef.maxAmmo)
+  if maxAmmo == nil then
+    maxAmmo = getAmmoTypeConfigNumber(itemDef.ammoType, 'maxAmmo', fallback)
+  end
+
+  if maxAmmo == nil then
+    return nil
+  end
+
+  maxAmmo = math.floor(maxAmmo)
+  if maxAmmo < 0 then
+    return 0
+  end
+
+  return maxAmmo
+end
+
+local function getAmmoReloadAmount(itemDef)
+  if type(itemDef) ~= 'table' then
+    return 1
+  end
+
+  local reloadAmount = tonumber(itemDef.reloadAmount)
+  if reloadAmount == nil then
+    reloadAmount = getAmmoTypeConfigNumber(itemDef.ammoType, 'reloadAmount', 1)
+  end
+
+  reloadAmount = math.floor(tonumber(reloadAmount) or 1)
+  if reloadAmount < 1 then
+    reloadAmount = 1
+  end
+
+  return reloadAmount
 end
 
 local function generateWeaponEquipNonce(source, instanceUid)
@@ -1434,6 +1495,12 @@ local function isWeaponItemDefinition(itemDef)
     and (tostring(itemDef.type or '') == 'weapon' or tostring(itemDef.weapon or '') ~= '')
 end
 
+local function isAmmoItemDefinition(itemDef)
+  return type(itemDef) == 'table'
+    and tostring(itemDef.type or '') == 'ammo'
+    and tostring(itemDef.ammoType or '') ~= ''
+end
+
 local function getWeaponNameFromDefinition(itemDef)
   if type(itemDef) ~= 'table' then
     return nil
@@ -1478,7 +1545,7 @@ local function clampWeaponAmmo(itemDef, ammo)
     ammo = 0
   end
 
-  local maxAmmo = tonumber(type(itemDef) == 'table' and itemDef.maxAmmo or nil)
+  local maxAmmo = getWeaponMaxAmmo(itemDef, 120)
   if maxAmmo and maxAmmo >= 0 and ammo > maxAmmo then
     ammo = math.floor(maxAmmo)
   end
@@ -1533,6 +1600,8 @@ local function buildWeaponClientPayload(row, itemDef, source, action)
     weapon_hash = weaponHash and tostring(weaponHash) or nil,
     equip_nonce = equipNonce,
     ammo = ammo,
+    ammo_revision = math.max(0, math.floor(tonumber(metadata.ammo_revision) or 0)),
+    clipSize = tonumber(itemDef.clipSize) or nil,
     durability = tonumber(metadata.durability) or 100,
     serial = metadata.serial and tostring(metadata.serial) or nil
   }
@@ -1584,6 +1653,7 @@ local function queuePendingWeaponAmmoUpdate(source, equipped)
     item = tostring(equipped.item or ''),
     equip_nonce = tostring(equipped.equip_nonce or ''),
     ammo = math.max(0, math.floor(tonumber(equipped.ammo) or 0)),
+    ammo_revision = math.max(0, math.floor(tonumber(equipped.ammo_revision) or 0)),
     expires_at = GetGameTimer() + PendingWeaponAmmoUpdateTtlMs
   }
 end
@@ -1643,6 +1713,7 @@ local function setEquippedWeaponState(source, player, row, payload)
     weapon = tostring(payload.weapon or ''),
     equip_nonce = tostring(payload.equip_nonce or ''),
     ammo = math.max(0, math.floor(tonumber(payload.ammo) or 0)),
+    ammo_revision = math.max(0, math.floor(tonumber(payload.ammo_revision) or 0)),
     serial = payload.serial,
     durability = payload.durability
   }
@@ -1702,7 +1773,7 @@ local function clearEquippedWeaponState(source, reason, options)
   return true
 end
 
-local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equipNonce)
+local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equipNonce, ammoRevision)
   local player, playerErr = getPlayerBySource(source)
   if not player then
     return false, playerErr
@@ -1725,6 +1796,17 @@ local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equip
   local allowedMode, allowedState = getAllowedWeaponAmmoUpdate(source, instanceUid, equipNonce)
   if not allowedMode then
     return false, 'weapon_not_equipped'
+  end
+
+  local requestedRevision = tonumber(ammoRevision)
+  if requestedRevision == nil then
+    return false, 'invalid_weapon_ammo_revision'
+  end
+
+  requestedRevision = math.max(0, math.floor(requestedRevision))
+  local knownRevision = math.max(0, math.floor(tonumber(allowedState and allowedState.ammo_revision) or 0))
+  if requestedRevision ~= knownRevision then
+    return false, 'weapon_ammo_revision_mismatch'
   end
 
   if allowedMode ~= 'pending' and isWeaponAmmoUpdateRateLimited(source, instanceUid) then
@@ -1773,6 +1855,7 @@ local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equip
   if equipped and tostring(equipped.instance_uid or '') == tostring(instanceUid or '') then
     equipped.ammo = nextAmmo
     equipped.slot = tonumber(row.slot) or row.slot
+    equipped.ammo_revision = knownRevision
   end
 
   clearPendingWeaponAmmoUpdate(source, instanceUid)
@@ -1784,8 +1867,182 @@ local function updateWeaponAmmoMetadata(source, instanceUid, ammo, reason, equip
 
   return true, {
     ammo = nextAmmo,
+    ammo_revision = knownRevision,
     slot = tonumber(row.slot) or row.slot,
     instance_uid = tostring(instanceUid or '')
+  }
+end
+
+local function buildApplyWeaponAmmoPayload(equipped, row, itemDef, newAmmo, ammoRevision, addAmmo)
+  local weaponName = tostring(equipped and equipped.weapon or '')
+  if weaponName == '' then
+    weaponName = getWeaponNameFromDefinition(itemDef) or ''
+  end
+
+  return {
+    weapon = weaponName,
+    weapon_hash = getWeaponHashValue(weaponName),
+    instance_uid = tostring(equipped and equipped.instance_uid or getWeaponInstanceUid(row)),
+    equip_nonce = tostring(equipped and equipped.equip_nonce or ''),
+    ammo = math.max(0, math.floor(tonumber(newAmmo) or 0)),
+    ammo_revision = math.max(0, math.floor(tonumber(ammoRevision) or 0)),
+    reload_amount = math.max(0, math.floor(tonumber(addAmmo) or 0)),
+    clipSize = tonumber(itemDef and itemDef.clipSize) or nil
+  }
+end
+
+local function handleAmmoItemUse(payload)
+  payload = type(payload) == 'table' and payload or {}
+
+  local source = tonumber(payload.source)
+  if not source then
+    return {
+      ok = false,
+      error = 'invalid_source'
+    }
+  end
+
+  local ammoDef = type(payload.definition) == 'table' and payload.definition or getItemDefinition(payload.item)
+  if not isAmmoItemDefinition(ammoDef) then
+    return {
+      ok = false,
+      error = 'item_not_ammo'
+    }
+  end
+
+  local ammoType = tostring(ammoDef.ammoType or '')
+  if ammoType == '' then
+    return {
+      ok = false,
+      error = 'invalid_ammo_type'
+    }
+  end
+
+  local slot = tonumber(payload.slot)
+  local amount = tonumber(payload.amount) or 0
+  if not slot or amount <= 0 then
+    return {
+      ok = false,
+      error = 'slot_empty'
+    }
+  end
+
+  local equipped = EquippedWeaponsBySource[source]
+  if type(equipped) ~= 'table' or tostring(equipped.instance_uid or '') == '' then
+    return {
+      ok = false,
+      error = 'weapon_reload_no_weapon'
+    }
+  end
+
+  local ctx = type(payload.context) == 'table' and payload.context or nil
+  if not ctx then
+    local ctxErr
+    ctx, ctxErr = getPlayerInventoryContext(source)
+    if not ctx then
+      return {
+        ok = false,
+        error = ctxErr
+      }
+    end
+  end
+
+  local rows = getInventoryRowsFromContext(ctx)
+  local ammoRow = findRowBySlot(rows, slot)
+  if not ammoRow or tostring(ammoRow.item or '') ~= tostring(payload.item or '') or (tonumber(ammoRow.amount) or 0) <= 0 then
+    return {
+      ok = false,
+      error = 'slot_empty'
+    }
+  end
+
+  local weaponRow = findPlayerWeaponRowByInstance(ctx, equipped.instance_uid)
+  if not weaponRow then
+    return {
+      ok = false,
+      error = 'weapon_not_owned'
+    }
+  end
+
+  local weaponDef = getItemDefinition(weaponRow.item)
+  if not isWeaponItemDefinition(weaponDef) then
+    return {
+      ok = false,
+      error = 'item_not_weapon'
+    }
+  end
+
+  if tostring(weaponDef.ammoType or '') ~= ammoType then
+    return {
+      ok = false,
+      error = 'weapon_reload_incompatible_ammo'
+    }
+  end
+
+  local maxAmmo = getWeaponMaxAmmo(weaponDef, 120) or 120
+  local weaponMetadata = type(weaponRow.metadata) == 'table' and weaponRow.metadata or {}
+  local currentAmmo = clampWeaponAmmo(weaponDef, equipped.ammo or weaponMetadata.ammo or weaponDef.defaultAmmo or 0)
+  if currentAmmo >= maxAmmo then
+    return {
+      ok = false,
+      error = 'weapon_ammo_full'
+    }
+  end
+
+  local addAmmo = math.min(getAmmoReloadAmount(ammoDef), maxAmmo - currentAmmo)
+  if addAmmo <= 0 then
+    return {
+      ok = false,
+      error = 'weapon_ammo_full'
+    }
+  end
+
+  local newAmmo = clampWeaponAmmo(weaponDef, currentAmmo + addAmmo)
+  local nextRevision = math.max(0, math.floor(tonumber(equipped.ammo_revision) or tonumber(weaponMetadata.ammo_revision) or 0)) + 1
+  local nextMetadata = cloneTable(weaponMetadata)
+  nextMetadata.ammo = newAmmo
+  nextMetadata.ammo_revision = nextRevision
+
+  local clientPayload = buildApplyWeaponAmmoPayload(equipped, weaponRow, weaponDef, newAmmo, nextRevision, addAmmo)
+
+  return {
+    ok = true,
+    consume = true,
+    amount = 1,
+    statements = {
+      buildTransactionUpdateMetadata(ctx, weaponRow.slot, nextMetadata)
+    },
+    afterCommit = function()
+      local currentEquipped = EquippedWeaponsBySource[source]
+      if type(currentEquipped) ~= 'table'
+        or tostring(currentEquipped.instance_uid or '') ~= tostring(equipped.instance_uid or '')
+        or tostring(currentEquipped.equip_nonce or '') ~= tostring(equipped.equip_nonce or '') then
+        return
+      end
+
+      currentEquipped.ammo = newAmmo
+      currentEquipped.slot = tonumber(weaponRow.slot) or weaponRow.slot
+      currentEquipped.ammo_revision = nextRevision
+
+      logWeaponInventoryAction('weapon_reload', source, ctx.player, weaponRow, {
+        reason = 'use_ammo_item',
+        ammo = newAmmo,
+        known_ammo = currentAmmo
+      })
+
+      TriggerClientEvent('mz_core:client:inventory:applyWeaponAmmo', source, clientPayload)
+    end,
+    data = {
+      reload = {
+        item = tostring(payload.item or ''),
+        ammoType = ammoType,
+        added = addAmmo,
+        ammo = newAmmo,
+        maxAmmo = maxAmmo,
+        ammo_revision = nextRevision,
+        message = ('Recarregado: +%s municoes.'):format(addAmmo)
+      }
+    }
   }
 end
 
@@ -2321,7 +2578,8 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
     amount = tonumber(row.amount) or 0,
     metadata = normalizeMetadataTable(row.metadata),
     definition = itemDef,
-    player = ctx.player
+    player = ctx.player,
+    context = ctx
   }
 
   local okCall, handlerResult = pcall(handler, payload)
@@ -2336,6 +2594,10 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
 
   local statements = {}
   local afterSlot = buildSlotSnapshot(row, slot)
+
+  for _, statement in ipairs(result.statements or {}) do
+    statements[#statements + 1] = statement
+  end
 
   if result.consume then
     local consumeAmount = tonumber(result.amount) or 1
@@ -2376,6 +2638,7 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
         handler_data = cloneTable(result.data or {})
       }
     },
+    afterCommit = result.afterCommit,
     result = result
   }
 end
@@ -3001,7 +3264,14 @@ function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
     return false, 'invalid_weapon_nonce'
   end
 
-  return updateWeaponAmmoMetadata(source, instanceUid, payload.ammo, payload.reason or 'client_update', equipNonce)
+  return updateWeaponAmmoMetadata(
+    source,
+    instanceUid,
+    payload.ammo,
+    payload.reason or 'client_update',
+    equipNonce,
+    payload.ammo_revision or payload.ammoRevision
+  )
 end
 
 function MZInventoryService.clearPlayerEquippedWeapon(source, reason)
@@ -3055,6 +3325,9 @@ local PublicInventoryErrors = {
   invalid_target = { code = 'invalid_target', message = 'Invalid inventory target.' },
   item_not_usable = { code = 'item_not_usable', message = 'Item is not usable.' },
   use_failed = { code = 'use_failed', message = 'Item use failed.' },
+  weapon_reload_no_weapon = { code = 'weapon_reload_no_weapon', message = 'Nenhuma arma equipada.' },
+  weapon_reload_incompatible_ammo = { code = 'weapon_reload_incompatible_ammo', message = 'Munição incompatível com a arma equipada.' },
+  weapon_ammo_full = { code = 'weapon_ammo_full', message = 'A arma já está com munição cheia.' },
   drop_create_failed = { code = 'drop_create_failed', message = 'Failed to create ground drop.' },
   player_not_loaded = { code = 'player_not_loaded', message = 'Player inventory is not available yet.' },
   unknown_error = { code = 'unknown_error', message = 'Unknown inventory error.' }
@@ -3093,11 +3366,15 @@ local function mapPublicInventoryErrorCode(internalCode)
     use_handler_failed = 'use_failed',
     invalid_source = 'use_failed',
     invalid_ammo = 'use_failed',
+    invalid_ammo_type = 'use_failed',
+    item_not_ammo = 'item_not_usable',
     invalid_hotbar_slot = 'invalid_slot',
     missing_weapon_uid = 'use_failed',
     missing_instance_uid = 'use_failed',
     invalid_weapon_uid = 'use_failed',
     invalid_weapon_nonce = 'use_failed',
+    invalid_weapon_ammo_revision = 'use_failed',
+    weapon_ammo_revision_mismatch = 'use_failed',
     hotbar_slot_empty = 'invalid_slot',
     hotbar_item_missing = 'use_failed',
     hotbar_save_failed = 'use_failed',
@@ -3105,6 +3382,9 @@ local function mapPublicInventoryErrorCode(internalCode)
     item_not_weapon = 'item_not_usable',
     weapon_not_equipped = 'use_failed',
     weapon_not_owned = 'use_failed',
+    weapon_reload_no_weapon = 'weapon_reload_no_weapon',
+    weapon_reload_incompatible_ammo = 'weapon_reload_incompatible_ammo',
+    weapon_ammo_full = 'weapon_ammo_full',
     weapon_ammo_rate_limited = 'use_failed',
     weapon_ammo_increase_blocked = 'use_failed',
     drop_create_failed = 'drop_create_failed'
@@ -3927,6 +4207,19 @@ function MZInventoryService.clearHotbarSlot(source, hotbarSlot)
     logHotbarAction('inventory_hotbar_clear', source, player, hotbarSlot, currentInstanceUid, {
       reason = 'manual_clear'
     })
+
+    local equipped = EquippedWeaponsBySource[tonumber(source)]
+    if currentInstanceUid ~= ''
+      and type(equipped) == 'table'
+      and tostring(equipped.instance_uid or '') == currentInstanceUid then
+      logHotbarAction('inventory_hotbar_clear_equipped_weapon', source, player, hotbarSlot, currentInstanceUid, {
+        reason = 'manual_clear_equipped_weapon',
+        item = equipped.item,
+        inventory_slot = equipped.slot
+      })
+
+      clearEquippedWeaponState(source, 'hotbar_clear', { notifyClient = true })
+    end
   end
 
   return true, {
@@ -4029,3 +4322,19 @@ end)
 MZInventoryService.registerItemUseHandler('weapon_pistol', function(payload)
   return handleWeaponItemUse(payload)
 end)
+
+local AmmoUseItems = {
+  'ammo_pistol',
+  'ammo_smg',
+  'ammo_shotgun',
+  'ammo_rifle',
+  'ammo_sniper',
+  'ammo_heavy',
+  'ammo_rpg'
+}
+
+for _, ammoItemName in ipairs(AmmoUseItems) do
+  MZInventoryService.registerItemUseHandler(ammoItemName, function(payload)
+    return handleAmmoItemUse(payload)
+  end)
+end
