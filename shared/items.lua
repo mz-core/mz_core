@@ -297,6 +297,22 @@ MZItems = {
     generateSerial = false
   },
 
+  jerrycan = {
+    image = 'jerrycan.png',
+    label = 'Galão de Gasolina',
+    weight = 5000,
+    stack = false,
+    unique = true,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = true,
+    metadata = {
+      fuel = 100.0,
+      maxFuel = 100.0
+    }
+  },
+
   radio = {
     image = 'radio.png',
     label = 'Rádio',
