@@ -14,9 +14,9 @@ RegisterNetEvent('mz_core:server:vehicle:takeOut', function(plate, garage)
   TriggerClientEvent('mz_core:client:vehicle:takeOutResult', source, ok, result)
 end)
 
-RegisterNetEvent('mz_core:server:vehicle:store', function(plate, garage, props, fuel, engine, body)
+RegisterNetEvent('mz_core:server:vehicle:store', function(plate, garage, props, fuel, engine, body, destroyed)
   local source = source
-  local ok, result = MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body)
+  local ok, result = MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body, destroyed)
   TriggerClientEvent('mz_core:client:vehicle:storeResult', source, ok, result)
 end)
 

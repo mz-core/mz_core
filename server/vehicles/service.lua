@@ -351,6 +351,10 @@ local function validateSnapshotSource(source, vehicle, plate, snapshot, options)
   return true
 end
 
+local function isTruthyDestroyed(value)
+  return value == true or value == 1 or value == '1'
+end
+
 local function normalizeWorldSnapshot(snapshot, existing)
   snapshot = type(snapshot) == 'table' and snapshot or {}
   existing = type(existing) == 'table' and existing or {}
@@ -381,18 +385,16 @@ local function normalizeWorldSnapshot(snapshot, existing)
 
   local engineHealth = tonumber(snapshot.engine_health or snapshot.engine)
   local bodyHealth = tonumber(snapshot.body_health or snapshot.body)
-  local wasDestroyed = existing.destroyed == true
-    or existing.destroyed == 1
-    or existing.destroyed == '1'
-  local destroyed = wasDestroyed
-    or snapshot.destroyed == true
-    or snapshot.destroyed == 1
-    or snapshot.destroyed == '1'
-    or (engineHealth ~= nil and engineHealth <= 50.0)
-    or (bodyHealth ~= nil and bodyHealth <= 100.0)
+  local hasFreshCondition = snapshot.destroyed ~= nil
+    or engineHealth ~= nil
+    or bodyHealth ~= nil
 
-  if wasDestroyed == true or snapshot.destroyed ~= nil or engineHealth ~= nil or bodyHealth ~= nil then
-    world.destroyed = destroyed == true
+  if hasFreshCondition then
+    world.destroyed = isTruthyDestroyed(snapshot.destroyed)
+      or (engineHealth ~= nil and engineHealth <= 50.0)
+      or (bodyHealth ~= nil and bodyHealth <= 100.0)
+  else
+    world.destroyed = isTruthyDestroyed(existing.destroyed)
   end
 
   return world
@@ -403,24 +405,24 @@ local function computeDestroyed(snapshot, existing)
   existing = type(existing) == 'table' and existing or {}
 
   local engine = tonumber(snapshot.engine_health or snapshot.engine)
-    or tonumber(existing.engine_health or existing.engine)
-    or 1000.0
   local body = tonumber(snapshot.body_health or snapshot.body)
-    or tonumber(existing.body_health or existing.body)
-    or 1000.0
-  local metadata = type(existing.metadata_json) == 'table' and existing.metadata_json or {}
-  local world = type(metadata.world) == 'table' and metadata.world or {}
-  local wasDestroyed = existing.destroyed == true
-    or existing.destroyed == 1
-    or existing.destroyed == '1'
-    or world.destroyed == true
-    or world.destroyed == 1
-    or world.destroyed == '1'
+  local hasFreshCondition = snapshot.destroyed ~= nil
+    or engine ~= nil
+    or body ~= nil
 
-  return wasDestroyed
-    or snapshot.destroyed == true
-    or snapshot.destroyed == 1
-    or snapshot.destroyed == '1'
+  if not hasFreshCondition then
+    local metadata = type(existing.metadata_json) == 'table' and existing.metadata_json or {}
+    local world = type(metadata.world) == 'table' and metadata.world or {}
+    local condition = type(metadata.condition) == 'table' and metadata.condition or {}
+
+    return isTruthyDestroyed(world.destroyed)
+      or isTruthyDestroyed(condition.destroyed)
+  end
+
+  engine = engine or tonumber(existing.engine) or 1000.0
+  body = body or tonumber(existing.body) or 1000.0
+
+  return isTruthyDestroyed(snapshot.destroyed)
     or engine <= 50.0
     or body <= 100.0
 end
@@ -1383,7 +1385,7 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
   return true, updatedVehicle
 end
 
-function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body)
+function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body, isDestroyed)
   local ok, vehicleOrErr = MZVehicleService.canAccessVehicle(source, plate)
   if not ok then
     return false, vehicleOrErr
@@ -1409,8 +1411,7 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
   local currentMetadata = type(vehicle.metadata_json) == 'table' and vehicle.metadata_json or {}
   local currentWorld = type(currentMetadata.world) == 'table' and currentMetadata.world or {}
   local currentCondition = type(currentMetadata.condition) == 'table' and currentMetadata.condition or {}
-  local destroyed = currentWorld.destroyed == true
-    or currentCondition.destroyed == true
+  local destroyed = isTruthyDestroyed(isDestroyed)
     or nextEngine <= 50.0
     or nextBody <= 100.0
   local nextMetadata = mergeTable(vehicle.metadata_json or {}, buildFlowMetadataPatch('store', source, {

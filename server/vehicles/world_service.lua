@@ -201,17 +201,23 @@ local function computeDestroyed(snapshot, existing, plate)
   snapshot = type(snapshot) == 'table' and snapshot or {}
   existing = type(existing) == 'table' and existing or {}
 
-  local engine = tonumber(snapshot.engine_health or snapshot.engine)
-    or tonumber(existing.engine_health or existing.engine)
-    or 1000.0
-  local body = tonumber(snapshot.body_health or snapshot.body)
-    or tonumber(existing.body_health or existing.body)
-    or 1000.0
+  local snapshotEngine = tonumber(snapshot.engine_health or snapshot.engine)
+  local snapshotBody = tonumber(snapshot.body_health or snapshot.body)
+  local engine = snapshotEngine or tonumber(existing.engine_health or existing.engine) or 1000.0
+  local body = snapshotBody or tonumber(existing.body_health or existing.body) or 1000.0
   local wasDestroyed = isTruthyDestroyed(existing.destroyed)
-  local destroyed = wasDestroyed
-    or isTruthyDestroyed(snapshot.destroyed)
-    or engine <= 50.0
-    or body <= 100.0
+  local hasFreshCondition = snapshot.destroyed ~= nil
+    or snapshotEngine ~= nil
+    or snapshotBody ~= nil
+  local destroyed
+
+  if hasFreshCondition then
+    destroyed = isTruthyDestroyed(snapshot.destroyed)
+      or engine <= 50.0
+      or body <= 100.0
+  else
+    destroyed = wasDestroyed
+  end
 
   logWorld(('destroyed compute %s engine=%.3f body=%.3f result=%s previous=%s'):format(
     normalizePlate(plate or snapshot.plate or existing.plate),

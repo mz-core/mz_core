@@ -133,15 +133,7 @@ local function getVehicleDestroyedState(vehicle)
   local bodyHealth = GetVehicleBodyHealth(vehicle)
   local entityHealth = GetEntityHealth(vehicle)
   local dead = IsEntityDead(vehicle) == true
-  local driveable = true
   local onFire = false
-
-  if type(IsVehicleDriveable) == 'function' then
-    local ok, result = pcall(IsVehicleDriveable, vehicle, false)
-    if ok then
-      driveable = result == true
-    end
-  end
 
   if type(IsEntityOnFire) == 'function' then
     local ok, result = pcall(IsEntityOnFire, vehicle)
@@ -151,7 +143,6 @@ local function getVehicleDestroyedState(vehicle)
   end
 
   local destroyed = dead
-    or driveable == false
     or (tonumber(engineHealth) or 1000.0) <= 50.0
     or (tonumber(bodyHealth) or 1000.0) <= 100.0
     or (tonumber(entityHealth) or 1000) <= 0
@@ -160,7 +151,6 @@ local function getVehicleDestroyedState(vehicle)
   return {
     destroyed = destroyed,
     dead = dead,
-    driveable = driveable,
     engine = engineHealth,
     body = bodyHealth,
     health = entityHealth,
@@ -352,7 +342,7 @@ local function sendDestroyedSnapshot(vehicle, plate, destroyedState)
   debugVehicleWorld(('client destroyed detected %s dead=%s driveable=%s engine=%.3f body=%.3f'):format(
     plate,
     tostring(destroyedState.dead == true),
-    tostring(destroyedState.driveable == true),
+    'n/a',
     tonumber(destroyedState.engine) or 0.0,
     tonumber(destroyedState.body) or 0.0
   ))
@@ -611,8 +601,7 @@ CreateThread(function()
           end
 
           local destroyed = checkPersistentVehicleDestroyed(vehicle)
-          local lastApplied = tonumber(AppliedWorldProps[vehicle]) or 0
-          if destroyed ~= true and GetGameTimer() - lastApplied > 30000 then
+          if destroyed ~= true and not AppliedWorldProps[vehicle] then
             applyWorldVehicleState(vehicle)
           end
         end

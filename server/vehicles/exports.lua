@@ -139,8 +139,8 @@ exports('TakeOutVehicle', function(source, plate, garage)
   return MZVehicleService.takeOutVehicle(source, plate, garage)
 end)
 
-exports('StoreVehicle', function(source, plate, garage, props, fuel, engine, body)
-  return MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body)
+exports('StoreVehicle', function(source, plate, garage, props, fuel, engine, body, destroyed)
+  return MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engine, body, destroyed)
 end)
 
 exports('ImpoundVehicle', function(plate, reason, actorSource, extraData)

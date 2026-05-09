@@ -187,12 +187,59 @@ local function setAuthorizedAmmoDisplay(authorized, totalAmmo, clipAmmo, reserve
   authorized.ammoText = ('%d / %d'):format(clipAmmo, reserveAmmo)
 end
 
+local POST_AUTHORITATIVE_AMMO_PROTECT_MS = 2500
+
 local function lockAuthorizedClip(authorized, durationMs)
   if type(authorized) ~= 'table' then
     return
   end
 
   authorized.clipLockedUntil = GetGameTimer() + (tonumber(durationMs) or 1500)
+end
+
+local function isAuthorizedClipLocked(authorized)
+  if type(authorized) ~= 'table' then
+    return false
+  end
+
+  return GetGameTimer() < (tonumber(authorized.clipLockedUntil) or 0)
+end
+
+local function markAuthoritativeAmmo(authorized, reason, durationMs)
+  if type(authorized) ~= 'table' then
+    return
+  end
+
+  local now = GetGameTimer()
+  local protectMs = tonumber(durationMs) or POST_AUTHORITATIVE_AMMO_PROTECT_MS
+  authorized.reloadVisualProtectedUntil = now + protectMs
+  authorized.lastAuthoritativeAmmoAt = now
+  authorized.lastAuthoritativeReason = tostring(reason or 'authoritative')
+  lockAuthorizedClip(authorized, protectMs)
+end
+
+local function isAuthoritativeAmmoProtected(authorized)
+  if type(authorized) ~= 'table' then
+    return false
+  end
+
+  return GetGameTimer() < (tonumber(authorized.reloadVisualProtectedUntil) or 0)
+end
+
+local function logIgnoredNativeAmmo(reason, authorized, nativeTotal, nativeClip)
+  if Config.Debug ~= true and getWeaponConfig().debugClient ~= true then
+    return
+  end
+
+  print(('[mz_core][inventory][weapon_native_ammo_ignored] reason=%s native_total=%s authorized_total=%s native_clip=%s authorized_clip=%s locked_until=%s protected_until=%s'):format(
+    tostring(reason or 'unknown'),
+    tostring(nativeTotal),
+    tostring(authorized and authorized.ammo or ''),
+    tostring(nativeClip),
+    tostring(authorized and authorized.clipAmmo or ''),
+    tostring(authorized and authorized.clipLockedUntil or ''),
+    tostring(authorized and authorized.reloadVisualProtectedUntil or '')
+  ))
 end
 
 local function applyWeaponAmmoToPed(ped, weaponHash, totalAmmo, clipSize)
@@ -258,7 +305,11 @@ local function isNativeClipReliable(authorized, nativeClip, nativeTotal, weaponH
     return false, 'clip_above_total'
   end
 
-  if GetGameTimer() < (tonumber(authorized.clipLockedUntil) or 0) then
+  if isAuthoritativeAmmoProtected(authorized) then
+    return false, 'authoritative_ammo_protected'
+  end
+
+  if isAuthorizedClipLocked(authorized) then
     return false, 'clip_locked'
   end
 
@@ -376,6 +427,43 @@ local function hasPublishedWeaponHudDisplayChanged(authorized)
     or tostring(MZClient.InventoryWeapons.lastPublishedAmmoText or '') ~= tostring(authorized.ammoText or '')
 end
 
+local function canAcceptNativeAmmoDrop(authorized, nativeTotal, weaponHash)
+  if type(authorized) ~= 'table' then
+    return false, 'missing_authorized'
+  end
+
+  if isAuthoritativeAmmoProtected(authorized) then
+    return false, 'authoritative_ammo_protected'
+  end
+
+  local ped = getPed()
+  if not ped or not weaponHash or GetSelectedPedWeapon(ped) ~= weaponHash then
+    return false, 'weapon_not_selected'
+  end
+
+  local knownAmmo = tonumber(authorized.ammo)
+  nativeTotal = tonumber(nativeTotal)
+  if knownAmmo == nil or nativeTotal == nil then
+    return false, 'missing_ammo_values'
+  end
+
+  knownAmmo = math.floor(knownAmmo)
+  nativeTotal = math.floor(nativeTotal)
+  local totalDrop = knownAmmo - nativeTotal
+  if totalDrop <= 0 then
+    return false, 'no_total_drop'
+  end
+
+  local clipSize = math.max(0, math.floor(tonumber(authorized.clipSize) or 0))
+  local knownClip = math.max(0, math.floor(tonumber(authorized.clipAmmo) or clipSize or 0))
+  local maxReasonableDrop = math.max(clipSize, knownClip, 1)
+  if totalDrop > maxReasonableDrop then
+    return false, 'total_drop_too_large'
+  end
+
+  return true, 'ok'
+end
+
 local function updateAuthorizedVisualAmmoFromPed(reason)
   local authorized = MZClient.InventoryWeapons.authorized
   if type(authorized) ~= 'table' or tostring(authorized.instance_uid or '') == '' then
@@ -396,6 +484,17 @@ local function updateAuthorizedVisualAmmoFromPed(reason)
   local nativeClip = getWeaponClipAmmoNative(ped, weaponHash)
   local knownAmmo = tonumber(authorized.ammo)
   if knownAmmo == nil or nativeTotal >= knownAmmo then
+    return false
+  end
+
+  local canAcceptDrop, dropReason = canAcceptNativeAmmoDrop(authorized, nativeTotal, weaponHash)
+  if not canAcceptDrop then
+    logIgnoredNativeAmmo('visual_' .. tostring(dropReason), authorized, nativeTotal, nativeClip)
+    return false
+  end
+
+  if isAuthorizedClipLocked(authorized) then
+    logIgnoredNativeAmmo('visual_clip_locked', authorized, nativeTotal, nativeClip)
     return false
   end
 
@@ -447,6 +546,17 @@ local function sendWeaponAmmoUpdate(reason, force)
     local reliableClip = isNativeClipReliable(authorized, nativeClip, nativeTotal, weaponHash)
     setAuthorizedAmmoDisplay(authorized, nativeTotal, reliableClip and nativeClip or nil)
   elseif nativeTotal < knownAmmo then
+    local canAcceptDrop, dropReason = canAcceptNativeAmmoDrop(authorized, nativeTotal, weaponHash)
+    if not canAcceptDrop then
+      logIgnoredNativeAmmo('server_update_' .. tostring(dropReason), authorized, nativeTotal, nativeClip)
+      return false
+    end
+
+    if isAuthorizedClipLocked(authorized) then
+      logIgnoredNativeAmmo('server_update_clip_locked', authorized, nativeTotal, nativeClip)
+      return false
+    end
+
     local totalDrop = knownAmmo - nativeTotal
     local reliableClip = isNativeClipReliable(authorized, nativeClip, nativeTotal, weaponHash)
     local nextClip = reliableClip and nativeClip or nil
@@ -574,7 +684,7 @@ local function applyAuthorizedWeapon(payload)
     serial = payload.serial,
     durability = payload.durability
   }
-  lockAuthorizedClip(MZClient.InventoryWeapons.authorized, 1500)
+  markAuthoritativeAmmo(MZClient.InventoryWeapons.authorized, 'equip', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
   MZClient.InventoryWeapons.lastAmmoSent = ammo
   publishWeaponHudState('equip')
 end
@@ -650,7 +760,7 @@ local function applyAuthorizedAmmo(payload)
 
   setAuthorizedAmmoDisplay(authorized, ammo, clipAmmo)
   authorized.ammo_revision = payloadRevision
-  lockAuthorizedClip(authorized, 1500)
+  markAuthoritativeAmmo(authorized, 'reload', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
   MZClient.InventoryWeapons.lastAmmoSent = ammo
 
   publishWeaponHudState('ammo_apply')
