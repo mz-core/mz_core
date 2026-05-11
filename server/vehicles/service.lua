@@ -1447,6 +1447,7 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
     metadata_json = nextMetadata
   })
 
+  debugVehicleWorld(('store_vehicle deduplicate before_clear plate=%s'):format(plate))
   if MZVehicleWorldService then
     MZVehicleWorldService.clearWorldState(plate, source)
   end
