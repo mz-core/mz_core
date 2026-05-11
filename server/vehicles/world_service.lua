@@ -398,6 +398,30 @@ local function deduplicateVehiclesByPlate(plate, keepEntity)
   return deleted
 end
 
+local function deleteUnoccupiedVehiclesByPlate(plate)
+  plate = normalizePlate(plate)
+  if plate == '' then
+    return 0
+  end
+
+  local allEntities = findAllVehiclesByPlate(plate)
+  local deleted = 0
+
+  for _, entity in ipairs(allEntities) do
+    if hasDriverOrPassengers(entity) then
+      debugWorld(('skip delete unoccupied cleanup %s reason=occupied'):format(plate))
+    elseif type(DeleteEntity) == 'function' then
+      local ok = pcall(DeleteEntity, entity)
+      if ok then
+        deleted = deleted + 1
+      end
+    end
+  end
+
+  debugWorld(('delete unoccupied cleanup %s removed=%d total=%d'):format(plate, deleted, #allEntities))
+  return deleted
+end
+
 local function logWorldAction(action, vehicle, actorSource, before, after, meta)
   if not MZLogService then
     return
@@ -871,6 +895,7 @@ function MZVehicleWorldService.clearWorldState(plate, actorSource)
   MySQL.update.await('DELETE FROM mz_vehicle_world_state WHERE UPPER(TRIM(plate)) = ?', { plate })
   MZVehicleWorldService.clearCache(plate)
   clearSpawningPlate(plate)
+  deleteUnoccupiedVehiclesByPlate(plate)
 
   logWorldAction('vehicle_world_clear', { plate = plate }, actorSource, before or {}, {})
   return true
@@ -1028,6 +1053,7 @@ function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reas
 
   local alreadySpawned, entity = MZVehicleWorldService.IsPlateSpawned(row.plate)
   if alreadySpawned then
+    deduplicateVehiclesByPlate(row.plate, entity)
     setSpawnedVehicleState(entity, row)
     debugWorld(('spawn check already_exists plate=%s netId=%s'):format(row.plate, tostring(safeGetNetworkIdFromEntity(entity))))
     logWorld(('skip spawn already spawned %s %s'):format(reason, row.plate))
