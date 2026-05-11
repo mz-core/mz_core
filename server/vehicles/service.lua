@@ -1149,20 +1149,23 @@ function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
   end
 
   local debounceMs = tonumber(getVehicleWorldConfig().restoreDebounceMs) or 5000
-  local restoreDebounceNow = nil
-  if reason ~= 'command' and tonumber(source) and tonumber(source) > 0 and debounceMs > 0 then
-    local now = getGameTimerSafe()
-    local last = tonumber(RestoreDebounce[source]) or 0
-    if now - last < debounceMs then
-      debugVehicleWorld(('restore skipped debounce %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
-      return true, {
-        restored = 0,
-        failed = 0,
-        debounced = true
-      }
-    end
-    restoreDebounceNow = now
+if reason ~= 'command' and tonumber(source) and tonumber(source) > 0 and debounceMs > 0 then
+  local now = getGameTimerSafe()
+  local last = tonumber(RestoreDebounce[source]) or 0
+
+  if now - last < debounceMs then
+    debugVehicleWorld(('restore skipped debounce %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
+    return true, {
+      restored = 0,
+      failed = 0,
+      debounced = true
+    }
   end
+
+  -- Marca o debounce ANTES das queries/await para evitar corrida entre
+  -- player_loaded, get_player_data e player_world_ready.
+  RestoreDebounce[source] = now
+end
 
   debugVehicleWorld(('restore start %s %s %s'):format(reason, tostring(source), tostring(player.citizenid or 'unknown')))
   debugVehicleWorld(('player loaded restore %s %s'):format(tostring(source), tostring(player.citizenid or 'unknown')))
@@ -1182,10 +1185,6 @@ function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
 
   if not MZVehicleWorldService or not MZVehicleWorldService.RestoreOutVehiclesForPlayer then
     return false, 'world_service_unavailable'
-  end
-
-  if restoreDebounceNow then
-    RestoreDebounce[source] = restoreDebounceNow
   end
 
   for _, vehicle in ipairs(vehiclesOrErr or {}) do
@@ -1226,19 +1225,39 @@ function MZVehicleService.registerOutVehicleEntity(source, plate, netId, snapsho
   netId = tonumber(netId) or tonumber(snapshot.net_id or snapshot.netId) or 0
 
   if netId > 0 then
-    local isSpawned, _, reason = MZVehicleWorldService.isSpawned(plate, netId)
-    if isSpawned and reason == 'different_net_id' then
-      debugVehicleWorld(('skip duplicate %s'):format(plate))
-      return false, 'vehicle_already_spawned'
-    end
+  local isSpawned, existingEntity, spawnReason = MZVehicleWorldService.isSpawned(plate, netId)
 
-    local registered, registerErr = MZVehicleWorldService.registerEntity(vehicle, source, netId)
-    if registered ~= true then
-      debugVehicleWorld(('register entity failed, saving snapshot anyway %s %s'):format(plate, tostring(registerErr or 'entity_not_found')))
+  if isSpawned and spawnReason == 'different_net_id' then
+    debugVehicleWorld(('different_net_id detected on register_out plate=%s oldEntity=%s newNetId=%s; keeping new entity as official'):format(
+      plate,
+      tostring(existingEntity or 0),
+      tostring(netId)
+    ))
+  end
+
+  local registered, registerErr = MZVehicleWorldService.registerEntity(vehicle, source, netId)
+
+  if registered == true then
+    if MZVehicleWorldService.DeduplicateVehiclesByPlate then
+      local removed = MZVehicleWorldService.DeduplicateVehiclesByPlate(plate, netId)
+      debugVehicleWorld(('register_out dedupe plate=%s keepNetId=%s removed=%s'):format(
+        plate,
+        tostring(netId),
+        tostring(removed or 0)
+      ))
     end
   else
-    debugVehicleWorld(('invalid net id, saving snapshot anyway %s'):format(plate))
+    debugVehicleWorld(('register entity failed, saving snapshot anyway %s %s'):format(plate, tostring(registerErr or 'entity_not_found')))
+
+    -- Se já existia outro netId com a mesma placa e o novo netId não registrou,
+    -- não deixa o ghost antigo vencer silenciosamente.
+    if isSpawned and spawnReason == 'different_net_id' then
+      return false, registerErr or 'entity_not_found'
+    end
   end
+else
+  debugVehicleWorld(('invalid net id, saving snapshot anyway %s'):format(plate))
+end
 
   local updateOk, updateResult = MZVehicleService.updateOutVehicleSnapshot(source, plate, snapshot)
   if updateOk == true then

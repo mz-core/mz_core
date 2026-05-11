@@ -398,6 +398,27 @@ local function deduplicateVehiclesByPlate(plate, keepEntity)
   return deleted
 end
 
+function MZVehicleWorldService.DeduplicateVehiclesByPlate(plate, keepNetIdOrEntity)
+  plate = normalizePlate(plate)
+
+  if plate == '' then
+    return 0
+  end
+
+  local keepEntity = tonumber(keepNetIdOrEntity) or 0
+
+  -- Se recebeu netId em vez de entity handle, tenta resolver.
+  if keepEntity > 0 and not safeDoesEntityExist(keepEntity) then
+    keepEntity = getEntityFromNetId(keepEntity)
+  end
+
+  if keepEntity <= 0 or not safeDoesEntityExist(keepEntity) then
+    keepEntity = nil
+  end
+
+  return deduplicateVehiclesByPlate(plate, keepEntity)
+end
+
 local function deleteUnoccupiedVehiclesByPlate(plate)
   plate = normalizePlate(plate)
   if plate == '' then
@@ -1135,6 +1156,8 @@ function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reas
       end
       return false, registerErr or 'register_failed'
     end
+
+    deduplicateVehiclesByPlate(row.plate, spawnedEntity)
 
     row.net_id = tonumber(netId) or 0
     row.entity_handle = tonumber(spawnedEntity) or 0
