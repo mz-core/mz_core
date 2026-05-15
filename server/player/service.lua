@@ -218,7 +218,7 @@ function MZPlayerService.loadPlayer(source)
 
   if not ok then
     print(('[mz_core] loadPlayer failed for source %s: %s'):format(tostring(source), tostring(playerData)))
-    return nil, 'load_player_failed'
+    return nil, playerData
   end
 
   return playerData, err

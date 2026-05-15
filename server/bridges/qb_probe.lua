@@ -1,12 +1,24 @@
 local DEBUG_ACE = 'mzcore.debug'
 local DEBUG_ALLOW_CONSOLE = true
 
+local function isAceAllowed(src, ace)
+  local sourceId = tonumber(src)
+  if not sourceId or sourceId <= 0 then return false end
+
+  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if ace == '' then return false end
+
+  local allowed = IsPlayerAceAllowed(sourceId, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
 local function isDebugAllowed(source)
   if source == 0 then
     return DEBUG_ALLOW_CONSOLE
   end
 
-  return IsPlayerAceAllowed(source, DEBUG_ACE)
+  return isAceAllowed(source, DEBUG_ACE)
 end
 
 local function probePrint(source, message)

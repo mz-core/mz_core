@@ -129,6 +129,68 @@ function MZOrgRepository.getPlayerMemberships(citizenid)
   ]], { citizenid }) or {}
 end
 
+local GoalTableHasOrgIdColumn = nil
+
+local function goalTableHasOrgIdColumn()
+  if GoalTableHasOrgIdColumn ~= nil then
+    return GoalTableHasOrgIdColumn
+  end
+
+  local row = MySQL.single.await([[
+    SELECT COUNT(1) AS total
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE()
+      AND table_name = 'mz_org_goals'
+      AND column_name = 'org_id'
+  ]])
+
+  GoalTableHasOrgIdColumn = row and tonumber(row.total) and tonumber(row.total) > 0 or false
+  return GoalTableHasOrgIdColumn
+end
+
+function MZOrgRepository.listMembersForOrg(orgId)
+  return MySQL.query.await([[
+    SELECT
+      po.citizenid,
+      po.org_id,
+      po.grade_id,
+      po.is_primary,
+      po.active,
+      po.duty,
+      po.joined_at,
+      po.updated_at,
+      o.code AS org_code,
+      o.name AS org_name,
+      t.code AS type_code,
+      g.level AS grade_level,
+      g.code AS grade_code,
+      g.name AS grade_name,
+      p.firstname,
+      p.lastname,
+      sessions.last_seen_at,
+      CASE
+        WHEN g.level = (
+          SELECT MAX(g2.level)
+          FROM mz_org_grades g2
+          WHERE g2.org_id = po.org_id
+        ) THEN 1
+        ELSE 0
+      END AS is_leader
+    FROM mz_player_orgs po
+    INNER JOIN mz_orgs o ON o.id = po.org_id
+    INNER JOIN mz_org_types t ON t.id = o.type_id
+    INNER JOIN mz_org_grades g ON g.id = po.grade_id
+    LEFT JOIN mz_players p ON p.citizenid = po.citizenid
+    LEFT JOIN (
+      SELECT citizenid, MAX(last_seen_at) AS last_seen_at
+      FROM mz_player_sessions
+      GROUP BY citizenid
+    ) sessions ON sessions.citizenid = po.citizenid
+    WHERE po.org_id = ? AND po.active = 1
+    ORDER BY g.level DESC, p.firstname ASC, p.lastname ASC, po.citizenid ASC
+  ]], { orgId }) or {}
+end
+
 function MZOrgRepository.getPermissionsForOrg(orgId)
   return MySQL.query.await('SELECT * FROM mz_org_permissions WHERE org_id = ? ORDER BY id ASC', { orgId }) or {}
 end
@@ -206,6 +268,96 @@ function MZOrgRepository.removeMembership(citizenid, orgId)
     SET active = 0, updated_at = CURRENT_TIMESTAMP
     WHERE citizenid = ? AND org_id = ?
   ]], { citizenid, orgId })
+end
+
+function MZOrgRepository.createGoal(org, data)
+  local insertId
+
+  if goalTableHasOrgIdColumn() then
+    insertId = MySQL.insert.await([[
+      INSERT INTO mz_org_goals (
+        org_id, org_code, title, description, type, status, target, progress,
+        starts_at, ends_at, created_by_citizenid, created_by_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ]], {
+      org.id,
+      org.code,
+      data.title,
+      data.description,
+      data.type,
+      data.status or 'active',
+      data.target or 1,
+      data.progress or 0,
+      data.starts_at,
+      data.ends_at,
+      data.created_by_citizenid,
+      data.created_by_name
+    })
+  else
+    insertId = MySQL.insert.await([[
+      INSERT INTO mz_org_goals (
+        org_code, title, description, type, status, target, progress,
+        starts_at, ends_at, created_by_citizenid, created_by_name
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ]], {
+      org.code,
+      data.title,
+      data.description,
+      data.type,
+      data.status or 'active',
+      data.target or 1,
+      data.progress or 0,
+      data.starts_at,
+      data.ends_at,
+      data.created_by_citizenid,
+      data.created_by_name
+    })
+  end
+
+  return insertId and MZOrgRepository.getGoalById(insertId) or nil
+end
+
+function MZOrgRepository.getGoalById(goalId)
+  return MySQL.single.await([[
+    SELECT *
+    FROM mz_org_goals
+    WHERE id = ?
+    LIMIT 1
+  ]], { goalId })
+end
+
+function MZOrgRepository.listGoals(filters)
+  filters = type(filters) == 'table' and filters or {}
+  local sql = 'SELECT * FROM mz_org_goals WHERE 1 = 1'
+  local params = {}
+
+  if filters.orgCode then
+    sql = sql .. ' AND org_code = ?'
+    params[#params + 1] = filters.orgCode
+  end
+
+  if filters.status then
+    sql = sql .. ' AND status = ?'
+    params[#params + 1] = filters.status
+  end
+
+  if filters.type then
+    sql = sql .. ' AND type = ?'
+    params[#params + 1] = filters.type
+  end
+
+  if filters.search then
+    sql = sql .. ' AND (title LIKE ? OR description LIKE ?)'
+    local like = '%' .. filters.search .. '%'
+    params[#params + 1] = like
+    params[#params + 1] = like
+  end
+
+  sql = sql .. ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  params[#params + 1] = tonumber(filters.limit) or 50
+  params[#params + 1] = tonumber(filters.offset) or 0
+
+  return MySQL.query.await(sql, params) or {}
 end
 
 function MZOrgRepository.getPlayerOverrides(citizenid)

@@ -2,6 +2,18 @@ local function reply(msg)
   print(('[mz_core] %s'):format(msg))
 end
 
+local function isAceAllowed(src, ace)
+  local sourceId = tonumber(src)
+  if not sourceId or sourceId <= 0 then return false end
+
+  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if ace == '' then return false end
+
+  local allowed = IsPlayerAceAllowed(sourceId, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
 local function canUseVehicleCommand(source)
   if source == 0 then
     return true
@@ -11,7 +23,7 @@ local function canUseVehicleCommand(source)
     return true
   end
 
-  return IsPlayerAceAllowed(source, 'mzcore.vehicles') or IsPlayerAceAllowed(source, 'mzcore.debug')
+  return isAceAllowed(source, 'mzcore.vehicles') or isAceAllowed(source, 'mzcore.debug')
 end
 
 RegisterCommand('mveh_add_player', function(source, args)

@@ -9,13 +9,60 @@ local function asBool(value)
   return false
 end
 
+local function isAceAllowed(src, ace)
+  local sourceId = tonumber(src)
+  if not sourceId or sourceId <= 0 then return false end
+
+  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if ace == '' then return false end
+
+  local allowed = IsPlayerAceAllowed(sourceId, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
 local function canUseOrgCommand(src)
   if src == 0 then
     return true
   end
 
-  return IsPlayerAceAllowed(src, 'mzcore.orgs.manage')
+  return isAceAllowed(src, 'mzcore.orgs.manage')
 end
+
+RegisterCommand('mzcore_ace_test', function(source)
+  if not Config or Config.Debug ~= true then
+    return
+  end
+
+  local src = tonumber(source) or 0
+  if src <= 0 then
+    print('[mz_core][ace_test] use dentro do jogo')
+    return
+  end
+
+  local ownerAce = (Config and Config.OwnerAce) or 'group.mz_owner'
+  local rawOwner = IsPlayerAceAllowed(src, 'group.mz_owner')
+  local rawOwnerCfg = IsPlayerAceAllowed(src, ownerAce)
+  local rawCommand = IsPlayerAceAllowed(src, 'command')
+
+  local okExportOwner, exportedOwner = pcall(function()
+    return exports['mz_core']:HasGlobalPermission(src, 'group.mz_owner')
+  end)
+
+  local okExportOwnerCfg, exportedOwnerCfg = pcall(function()
+    return exports['mz_core']:HasGlobalPermission(src, ownerAce)
+  end)
+
+  print('[mz_core][ace_test] resource=', GetCurrentResourceName())
+  print('[mz_core][ace_test] source=', src, 'type=', type(source))
+  print('[mz_core][ace_test] name=', GetPlayerName(src))
+  print('[mz_core][ace_test] Config.OwnerAce=', ownerAce)
+  print('[mz_core][ace_test] raw group.mz_owner=', rawOwner, 'type=', type(rawOwner))
+  print('[mz_core][ace_test] raw Config.OwnerAce=', rawOwnerCfg, 'type=', type(rawOwnerCfg))
+  print('[mz_core][ace_test] raw command=', rawCommand, 'type=', type(rawCommand))
+  print('[mz_core][ace_test] export HasGlobalPermission(group.mz_owner) ok=', okExportOwner, 'result=', exportedOwner, 'type=', type(exportedOwner))
+  print('[mz_core][ace_test] export HasGlobalPermission(Config.OwnerAce) ok=', okExportOwnerCfg, 'result=', exportedOwnerCfg, 'type=', type(exportedOwnerCfg))
+end, false)
 
 local function reply(src, message)
   print(('[mz_core] %s'):format(message))

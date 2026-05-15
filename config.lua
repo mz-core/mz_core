@@ -2,6 +2,7 @@ Config = {}
 
 Config.Framework = 'mz_core'
 Config.Debug = false
+Config.OwnerAce = 'group.mz_owner'
 
 Config.DefaultSpawn = {
   x = -1037.71,

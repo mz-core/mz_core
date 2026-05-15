@@ -58,19 +58,17 @@ RegisterNetEvent('mz_core:vehicles:server:restoreWorldVehicleSpawned', function(
   snapshot.net_id = tonumber(netId or snapshot.net_id or snapshot.netId) or 0
 
   local normalizedPlate = normalizePlate(plate)
-  if MZVehicleWorldService and MZVehicleWorldService.isSpawned then
-    local spawned, _, reason = MZVehicleWorldService.isSpawned(normalizedPlate, snapshot.net_id)
-    if spawned == true and reason == 'different_net_id' then
-      debugVehicleWorld(('skip duplicate client_fallback %s'):format(normalizedPlate))
-      TriggerClientEvent('mz_core:vehicles:client:deleteWorldVehicleNet', src, snapshot.net_id)
-      return
-    end
-  end
 
   if MZVehicleService and MZVehicleService.registerOutVehicleEntity then
     local ok, err = MZVehicleService.registerOutVehicleEntity(src, normalizedPlate, snapshot.net_id, snapshot)
     if ok ~= true then
       debugVehicleWorld(('spawn failed client_fallback %s %s'):format(normalizedPlate, tostring(err or 'register_failed')))
+
+      -- Só deleta o veículo recém-spawnado se ele realmente não conseguiu ser registrado.
+      -- A decisão de different_net_id agora fica dentro do registerOutVehicleEntity.
+      if snapshot.net_id and tonumber(snapshot.net_id) and tonumber(snapshot.net_id) > 0 then
+        TriggerClientEvent('mz_core:vehicles:client:deleteWorldVehicleNet', src, snapshot.net_id)
+      end
     end
   end
 end)

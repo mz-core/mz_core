@@ -1,9 +1,21 @@
+local function isAceAllowed(src, ace)
+  local sourceId = tonumber(src)
+  if not sourceId or sourceId <= 0 then return false end
+
+  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if ace == '' then return false end
+
+  local allowed = IsPlayerAceAllowed(sourceId, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
 local function canUseInventoryCommand(src)
   if src == 0 then
     return true
   end
 
-  return IsPlayerAceAllowed(src, 'mzcore.inventory.manage')
+  return isAceAllowed(src, 'mzcore.inventory.manage')
 end
 
 local function reply(message)
