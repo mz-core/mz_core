@@ -126,7 +126,11 @@ local function canViewOrgLogs(source, orgCode)
     return false
   end
 
-  return MZOrgService.canOrg(source, orgCode, 'logs.view') == true
+  return MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
+    or MZOrgService.canOrg(source, orgCode, 'logs.view') == true
 end
 
 local function sanitizeFilters(filters)

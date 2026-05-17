@@ -511,6 +511,7 @@ local defaultOrgs = {
         'staff.teleport',
         'staff.logs.view',
         'staff.orgs.manage',
+        'staff.orgs.create',
         'staff.orgs.set_leader'
       }
     }

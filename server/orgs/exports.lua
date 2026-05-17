@@ -74,6 +74,10 @@ exports('ListOrgs', function(orgTypeCode)
   return MZOrgService.listOrgs(orgTypeCode)
 end)
 
+exports('CreateOrgFromTemplate', function(source, payload)
+  return MZOrgService.createOrgFromTemplate(source, payload)
+end)
+
 exports('CreateOrg', function(data, actor)
   return MZOrgService.createOrg(data, actor)
 end)

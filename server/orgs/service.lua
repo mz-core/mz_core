@@ -222,6 +222,8 @@ end
 
 local function hasStaffView(source)
   return MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
     or hasStaffManage(source)
 end
 
@@ -245,6 +247,7 @@ end
 
 local function canViewRecruitment(source, orgCode)
   return isOwner(source)
+    or hasStaffView(source)
     or hasAnyOrgCapability(source, orgCode, { 'recruitment.view', 'recruitment.manage', 'members.invite', 'manage.members' })
 end
 
@@ -258,6 +261,198 @@ local function canStaffSetLeader(source, orgCode)
   return isOwner(source)
     or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
     or MZOrgService.canOrg(source, orgCode, 'staff.orgs.set_leader') == true
+end
+
+local function canCreateOrgs(source)
+  return isOwner(source)
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
+end
+
+local OrgCreationTemplates = {
+  job = {
+    has_salary = true,
+    has_shared_account = true,
+    requires_shared_account = true,
+    has_storage = true,
+    grades = {
+      { level = 1, code = 'recruta', name = 'Recruta', salary = 1200 },
+      { level = 2, code = 'membro', name = 'Membro', salary = 1500 },
+      { level = 3, code = 'supervisor', name = 'Supervisor', salary = 2200 },
+      { level = 4, code = 'gerente', name = 'Gerente', salary = 3200 },
+      { level = 5, code = 'lider', name = 'Lider', salary = 4500 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'account.deposit' },
+      [3] = { 'members.invite', 'goals.manage', 'recruitment.manage', 'account.deposit' },
+      [4] = { 'members.remove', 'members.promote', 'members.demote', 'manage.members', 'account.withdraw', 'account.manage', 'goals.manage', 'recruitment.manage' },
+      [5] = { 'manage.members', 'members.set_leader', 'account.manage', 'account.withdraw', 'manage.account', 'goals.manage', 'recruitment.manage', 'boss.actions' }
+    }
+  },
+  gang = {
+    has_salary = false,
+    has_shared_account = true,
+    requires_shared_account = true,
+    has_storage = true,
+    grades = {
+      { level = 1, code = 'recruta', name = 'Recruta', salary = 0 },
+      { level = 2, code = 'membro', name = 'Membro', salary = 0 },
+      { level = 3, code = 'gerente', name = 'Gerente', salary = 0 },
+      { level = 4, code = 'lider', name = 'Lider', salary = 0 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'account.deposit' },
+      [3] = { 'members.invite', 'members.remove', 'members.promote', 'members.demote', 'goals.manage', 'recruitment.manage', 'account.deposit' },
+      [4] = { 'manage.members', 'members.set_leader', 'account.manage', 'account.withdraw', 'manage.account', 'goals.manage', 'recruitment.manage', 'boss.actions' }
+    }
+  },
+  business = {
+    has_salary = true,
+    has_shared_account = true,
+    requires_shared_account = true,
+    has_storage = true,
+    grades = {
+      { level = 1, code = 'funcionario', name = 'Funcionario', salary = 1000 },
+      { level = 2, code = 'supervisor', name = 'Supervisor', salary = 1600 },
+      { level = 3, code = 'gerente', name = 'Gerente', salary = 2400 },
+      { level = 4, code = 'dono', name = 'Dono', salary = 0 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'account.deposit', 'goals.manage' },
+      [3] = { 'members.invite', 'members.remove', 'members.promote', 'members.demote', 'manage.members', 'account.withdraw', 'account.manage', 'goals.manage' },
+      [4] = { 'manage.members', 'members.set_leader', 'account.manage', 'account.withdraw', 'manage.account', 'goals.manage', 'boss.actions' }
+    }
+  },
+  government = {
+    has_salary = true,
+    has_shared_account = true,
+    requires_shared_account = true,
+    has_storage = true,
+    grades = {
+      { level = 1, code = 'assistente', name = 'Assistente', salary = 1200 },
+      { level = 2, code = 'agente', name = 'Agente', salary = 1800 },
+      { level = 3, code = 'coordenador', name = 'Coordenador', salary = 2800 },
+      { level = 4, code = 'diretor', name = 'Diretor', salary = 4200 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'account.deposit' },
+      [3] = { 'members.invite', 'members.remove', 'members.promote', 'members.demote', 'goals.manage', 'recruitment.manage', 'account.deposit' },
+      [4] = { 'manage.members', 'members.set_leader', 'account.manage', 'account.withdraw', 'manage.account', 'goals.manage', 'recruitment.manage', 'boss.actions' }
+    }
+  },
+  vip = {
+    has_salary = false,
+    has_shared_account = false,
+    has_storage = false,
+    grades = {
+      { level = 1, code = 'membro', name = 'Membro', salary = 0 },
+      { level = 2, code = 'vip', name = 'VIP', salary = 0 },
+      { level = 3, code = 'vip_plus', name = 'VIP Plus', salary = 0 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'vip.chat.tag' },
+      [3] = { 'members.invite', 'members.remove', 'manage.members', 'members.set_leader', 'vip.chat.tag' }
+    }
+  },
+  event = {
+    has_salary = false,
+    has_shared_account = false,
+    has_storage = false,
+    grades = {
+      { level = 1, code = 'participante', name = 'Participante', salary = 0 },
+      { level = 2, code = 'organizador', name = 'Organizador', salary = 0 },
+      { level = 3, code = 'coordenador', name = 'Coordenador', salary = 0 }
+    },
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'logs.view'
+    },
+    grade_permissions = {
+      [2] = { 'members.invite', 'goals.manage' },
+      [3] = { 'members.invite', 'members.remove', 'members.promote', 'members.demote', 'manage.members', 'members.set_leader', 'goals.manage', 'boss.actions' }
+    }
+  }
+}
+
+local function normalizeOrgCreateType(value)
+  value = limitString(value, 32)
+  if not value then return nil end
+  value = value:lower()
+  if value == 'legal' then value = 'job' end
+  if value == 'illegal' then value = 'gang' end
+  if value == 'staff' then return nil end
+  return OrgCreationTemplates[value] and value or nil
+end
+
+local function normalizeOrgCreateCode(value)
+  value = limitString(value, 64)
+  if not value then return nil end
+  value = value:lower()
+  value = value:gsub('%s+', '_')
+  if not value:match('^[a-z0-9_-]+$') then return nil end
+  if #value < 2 or #value > 48 then return nil end
+  return value
+end
+
+local function normalizeOrgCreateName(value)
+  value = limitString(value, 120)
+  if not value then return nil end
+  if #value < 2 then return nil end
+  return value
+end
+
+local function logOrgCreateBlocked(source, orgCode, reason, meta)
+  logDetailed('orgs', 'org.create.blocked', {
+    actor = makeActor(source),
+    target = {
+      type = 'org',
+      id = tostring(orgCode or 'unknown')
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
 end
 
 local function maxGradeLevel(grades)
@@ -1388,6 +1583,198 @@ function MZOrgService.cancelRecruitment(source, recruitmentId, reason)
   })
 
   return true, normalizeRecruitmentRow(updated)
+end
+
+function MZOrgService.createOrgFromTemplate(source, payload)
+  local src = normalizeSource(source)
+  payload = type(payload) == 'table' and payload or {}
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgCreateBlocked(src, nil, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  local orgType = normalizeOrgCreateType(payload.type or payload.orgType or payload.typeCode)
+  local code = normalizeOrgCreateCode(payload.code or payload.orgCode)
+  local name = normalizeOrgCreateName(payload.name or payload.label)
+  local reason = limitString(payload.reason, 255)
+
+  if not orgType then
+    logOrgCreateBlocked(src, code, 'invalid_type', { requested_type = payload.type or payload.orgType or payload.typeCode })
+    return false, 'invalid_type'
+  end
+
+  if not code then
+    logOrgCreateBlocked(src, nil, 'invalid_code')
+    return false, 'invalid_code'
+  end
+
+  if not name then
+    logOrgCreateBlocked(src, code, 'invalid_name')
+    return false, 'invalid_name'
+  end
+
+  if not canCreateOrgs(src) then
+    logOrgCreateBlocked(src, code, 'forbidden', { org_type = orgType })
+    return false, 'forbidden'
+  end
+
+  local template = OrgCreationTemplates[orgType]
+  if not template then
+    logOrgCreateBlocked(src, code, 'template_not_found', { org_type = orgType })
+    return false, 'template_not_found'
+  end
+
+  local typeRow = MZOrgRepository.getOrgTypeByCode(orgType)
+  if not typeRow then
+    logOrgCreateBlocked(src, code, 'invalid_type', { org_type = orgType })
+    return false, 'invalid_type'
+  end
+
+  if MZOrgRepository.getOrgByCode(code) then
+    logOrgCreateBlocked(src, code, 'org_already_exists', { org_type = orgType })
+    return false, 'org_already_exists'
+  end
+
+  local hasSharedAccount = template.requires_shared_account == true
+    or asBool(payload.hasSharedAccount)
+    or asBool(payload.has_shared_account)
+    or template.has_shared_account == true
+  local hasSalary = template.has_salary == true or asBool(payload.hasSalary) or asBool(payload.has_salary)
+  local hasStorage = template.has_storage == true or asBool(payload.hasStorage) or asBool(payload.has_storage)
+
+  local org = MZOrgRepository.createOrg({
+    type_id = typeRow.id,
+    code = code,
+    name = name,
+    is_public = false,
+    requires_whitelist = true,
+    has_salary = hasSalary,
+    has_shared_account = hasSharedAccount,
+    has_storage = hasStorage,
+    active = true,
+    config = {
+      created_from_template = orgType,
+      created_by = tostring(actor.citizenid),
+      created_reason = reason
+    }
+  })
+
+  if not org then
+    logOrgCreateBlocked(src, code, 'create_org_failed', { org_type = orgType })
+    return false, 'create_org_failed'
+  end
+
+  local gradesByLevel = {}
+  local previousGrade = nil
+
+  for _, gradeDef in ipairs(template.grades or {}) do
+    local salary = hasSalary and (tonumber(gradeDef.salary) or 0) or 0
+    local grade = MZOrgRepository.createGrade(org.id, {
+      level = gradeDef.level,
+      code = gradeDef.code,
+      name = gradeDef.name,
+      salary = salary,
+      inherits_grade_id = previousGrade and previousGrade.id or nil,
+      priority = gradeDef.priority or gradeDef.level,
+      config = {
+        template = orgType
+      }
+    })
+
+    if not grade then
+      logOrgCreateBlocked(src, code, 'create_grade_failed', {
+        org_type = orgType,
+        grade_level = gradeDef.level,
+        grade_code = gradeDef.code
+      })
+      return false, 'create_grade_failed'
+    end
+
+    gradesByLevel[tonumber(grade.level)] = grade
+    previousGrade = grade
+  end
+
+  local permissionOk = true
+  for _, permission in ipairs(template.base_permissions or {}) do
+    local okSet = pcall(function()
+      MZOrgRepository.setPermission(org.id, nil, permission, true)
+    end)
+    if not okSet then permissionOk = false end
+  end
+
+  for level, permissions in pairs(template.grade_permissions or {}) do
+    local grade = gradesByLevel[tonumber(level)]
+    if grade then
+      for _, permission in ipairs(permissions or {}) do
+        local okSet = pcall(function()
+          MZOrgRepository.setPermission(org.id, grade.id, permission, true)
+        end)
+        if not okSet then permissionOk = false end
+      end
+    end
+  end
+
+  if not permissionOk then
+    logOrgCreateBlocked(src, code, 'create_permission_failed', { org_type = orgType, org_id = org.id })
+    return false, 'create_permission_failed'
+  end
+
+  if hasSharedAccount then
+    if not MZOrgAccountService or not MZOrgAccountService.getBalance then
+      logOrgCreateBlocked(src, code, 'create_account_failed', { org_type = orgType, org_id = org.id })
+      return false, 'create_account_failed'
+    end
+
+    local accountOk, accountErr = MZOrgAccountService.getBalance(code)
+    if accountOk ~= true then
+      logOrgCreateBlocked(src, code, 'create_account_failed', {
+        org_type = orgType,
+        org_id = org.id,
+        account_error = accountErr
+      })
+      return false, 'create_account_failed'
+    end
+  end
+
+  logDetailed('orgs', 'org.create', {
+    actor = makeActor(src),
+    target = {
+      type = 'org',
+      id = tostring(org.id),
+      code = code,
+      name = name
+    },
+    context = {
+      org_id = org.id,
+      org_code = code,
+      org_type = orgType
+    },
+    after = {
+      name = name,
+      type = orgType,
+      has_salary = hasSalary,
+      has_shared_account = hasSharedAccount,
+      has_storage = hasStorage,
+      grades = #template.grades
+    },
+    meta = {
+      reason = reason,
+      template = orgType
+    }
+  })
+
+  return true, {
+    org = normalizeOrgRow(MZOrgRepository.getOrgByCode(code) or org),
+    grades = template.grades,
+    template = orgType,
+    hasSharedAccount = hasSharedAccount,
+    hasSalary = hasSalary,
+    hasStorage = hasStorage
+  }
 end
 
 function MZOrgService.createOrg(data, actor)

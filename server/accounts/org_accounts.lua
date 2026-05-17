@@ -36,6 +36,8 @@ local function canViewOrgAccount(source, orgCode)
 
   if MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
     or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
     or MZOrgService.hasGlobalPermission(source, 'staff.logs.view') == true then
     return true
   end
