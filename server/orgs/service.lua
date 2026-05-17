@@ -11,409 +11,194 @@ local function asBool(value)
   return false
 end
 
-local function isAceAllowed(src, ace)
-  local sourceId = tonumber(src)
-  if not sourceId or sourceId <= 0 then
-    return false, {
-      reason = 'invalid_source',
-      source = src,
-      sourceType = type(src),
-      ace = ace
-    }
-  end
-
-  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
-  if ace == '' then
-    return false, {
-      reason = 'invalid_ace',
-      source = sourceId,
-      ace = ace
-    }
-  end
-
-  local raw = IsPlayerAceAllowed(sourceId, ace)
-  local normalized = tostring(raw):lower()
-  local allowed = raw == true or raw == 1 or normalized == '1' or normalized == 'true'
-
-  return allowed, {
-    source = sourceId,
-    ace = ace,
-    raw = raw,
-    rawType = type(raw),
-    normalized = normalized,
-    allowed = allowed
-  }
-end
-
-local function logOrgAction(action, actor, target, data)
-  if not MZLogService then return end
-  MZLogService.create('orgs', action, actor, target, data or {})
-end
-
-local function normalizeActor(actor)
-  if actor == nil then
-    return 'system'
-  end
-
-  if type(actor) == 'number' then
-    if actor == 0 then
-      return 'console'
-    end
-
-    local player = MZPlayerService.getPlayer(actor)
-    if player and player.citizenid then
-      return player.citizenid
-    end
-
-    return ('source:%s'):format(actor)
-  end
-
-  return tostring(actor)
-end
-
-local function buildOrgDetailedActor(actor)
-  if actor == nil then
-    return {
-      type = 'system',
-      id = 'system'
-    }
-  end
-
-  if tonumber(actor) == 0 then
-    return {
-      type = 'console',
-      id = 'console'
-    }
-  end
-
-  if type(actor) == 'number' then
-    local player = MZPlayerService.getPlayer(actor)
-    if player and player.citizenid then
-      return {
-        type = 'player',
-        id = tostring(player.citizenid),
-        source = actor
-      }
-    end
-
-    return {
-      type = 'source',
-      id = tostring(actor)
-    }
-  end
-
-  return {
-    type = 'system',
-    id = tostring(actor)
-  }
-end
-
-local function buildMembershipSnapshot(citizenid, org, membership, grade, overrides)
-  local snapshot = {
-    citizenid = citizenid and tostring(citizenid) or nil,
-    org_id = org and (tonumber(org.id) or org.id) or (membership and (tonumber(membership.org_id) or membership.org_id) or nil),
-    org_code = org and tostring(org.code) or (membership and membership.org_code and tostring(membership.org_code) or nil),
-    org_type = org and org.type_code and tostring(org.type_code) or (membership and membership.type_code and tostring(membership.type_code) or nil),
-    grade_id = grade and (tonumber(grade.id) or grade.id) or (membership and (tonumber(membership.grade_id) or membership.grade_id) or nil),
-    grade_level = grade and tonumber(grade.level) or (membership and tonumber(membership.grade_level) or nil),
-    grade_code = grade and grade.code and tostring(grade.code) or (membership and membership.grade_code and tostring(membership.grade_code) or nil),
-    grade_name = grade and grade.name and tostring(grade.name) or (membership and membership.grade_name and tostring(membership.grade_name) or nil),
-    is_primary = membership ~= nil and asBool(membership.is_primary) or nil,
-    duty = membership ~= nil and asBool(membership.duty) or nil,
-    active = membership ~= nil and asBool(membership.active) or nil,
-    expires_at = membership and membership.expires_at or nil
-  }
-
-  for key, value in pairs(overrides or {}) do
-    snapshot[key] = value
-  end
-
-  return snapshot
-end
-
-local function logOrgActionDetailed(action, actor, citizenid, org, beforeState, afterState, meta)
-  if not MZLogService or not org then return end
-
-  MZLogService.createDetailed('orgs', action, {
-    actor = buildOrgDetailedActor(actor),
-    target = {
-      type = 'player_org',
-      id = ('%s:%s'):format(tostring(citizenid or 'unknown'), tostring(org.code or 'unknown')),
-      citizenid = citizenid and tostring(citizenid) or nil,
-      org_code = org.code and tostring(org.code) or nil
-    },
-    context = {
-      org_id = tonumber(org.id) or org.id,
-      org_code = tostring(org.code or ''),
-      org_type = tostring(org.type_code or '')
-    },
-    before = beforeState or {},
-    after = afterState or {},
-    meta = meta or {}
-  })
-end
-
-local function logInviteMemberAudit(action, actorSource, targetSource, targetPlayer, org, reason, extra)
-  if not MZLogService then return end
-
-  extra = type(extra) == 'table' and extra or {}
-
-  MZLogService.createDetailed('orgs', action, {
-    actor = buildOrgDetailedActor(actorSource),
-    target = {
-      type = 'player',
-      id = targetPlayer and tostring(targetPlayer.citizenid or targetSource or 'unknown') or tostring(targetSource or 'unknown'),
-      source = tonumber(targetSource),
-      citizenid = targetPlayer and tostring(targetPlayer.citizenid or '') or nil,
-      name = targetPlayer and targetPlayer.charinfo and (('%s %s'):format(tostring(targetPlayer.charinfo.firstname or ''), tostring(targetPlayer.charinfo.lastname or ''))):gsub('^%s+', ''):gsub('%s+$', '') or nil
-    },
-    context = {
-      org_id = org and (tonumber(org.id) or org.id) or nil,
-      org_code = org and tostring(org.code or '') or nil,
-      org_type = org and tostring(org.type_code or '') or nil
-    },
-    meta = {
-      reason = reason,
-      result = extra.result,
-      grade_level = extra.gradeLevel,
-      grade_code = extra.gradeCode,
-      grade_name = extra.gradeName
-    }
-  })
-end
-
-local function logRemoveMemberAudit(action, actorSource, targetCitizenid, targetPlayer, org, reason, extra)
-  if not MZLogService then return end
-
-  extra = type(extra) == 'table' and extra or {}
-
-  MZLogService.createDetailed('orgs', action, {
-    actor = buildOrgDetailedActor(actorSource),
-    target = {
-      type = 'player_org',
-      id = ('%s:%s'):format(tostring(targetCitizenid or 'unknown'), tostring(org and org.code or 'unknown')),
-      citizenid = targetCitizenid and tostring(targetCitizenid) or nil,
-      name = targetPlayer and (('%s %s'):format(tostring(targetPlayer.firstname or ''), tostring(targetPlayer.lastname or ''))):gsub('^%s+', ''):gsub('%s+$', '') or nil
-    },
-    context = {
-      org_id = org and (tonumber(org.id) or org.id) or nil,
-      org_code = org and tostring(org.code or '') or nil,
-      org_type = org and tostring(org.type_code or '') or nil
-    },
-    before = extra.before or {},
-    after = extra.after or {},
-    meta = {
-      reason = reason,
-      result = extra.result,
-      actor_grade_level = extra.actorGradeLevel,
-      target_grade_level = extra.targetGradeLevel
-    }
-  })
-end
-
-local function logGradeMemberAudit(action, actorSource, targetCitizenid, targetPlayer, org, reason, extra)
-  if not MZLogService then return end
-
-  extra = type(extra) == 'table' and extra or {}
-
-  MZLogService.createDetailed('orgs', action, {
-    actor = buildOrgDetailedActor(actorSource),
-    target = {
-      type = 'player_org',
-      id = ('%s:%s'):format(tostring(targetCitizenid or 'unknown'), tostring(org and org.code or 'unknown')),
-      citizenid = targetCitizenid and tostring(targetCitizenid) or nil,
-      name = targetPlayer and (('%s %s'):format(tostring(targetPlayer.firstname or ''), tostring(targetPlayer.lastname or ''))):gsub('^%s+', ''):gsub('%s+$', '') or nil
-    },
-    context = {
-      org_id = org and (tonumber(org.id) or org.id) or nil,
-      org_code = org and tostring(org.code or '') or nil,
-      org_type = org and tostring(org.type_code or '') or nil
-    },
-    before = extra.before or {},
-    after = extra.after or {},
-    meta = {
-      reason = reason,
-      result = extra.result,
-      action = extra.action,
-      actor_grade_level = extra.actorGradeLevel,
-      target_grade_level = extra.targetGradeLevel,
-      new_grade_level = extra.newGradeLevel
-    }
-  })
-end
-
-local function logGoalAudit(action, actorSource, org, reason, extra)
-  if not MZLogService then return end
-
-  extra = type(extra) == 'table' and extra or {}
-
-  MZLogService.createDetailed('orgs', action, {
-    actor = buildOrgDetailedActor(actorSource),
-    target = {
-      type = 'org_goal',
-      id = extra.goalId and tostring(extra.goalId) or tostring(org and org.code or 'unknown')
-    },
-    context = {
-      org_id = org and (tonumber(org.id) or org.id) or nil,
-      org_code = org and tostring(org.code or '') or nil,
-      org_type = org and tostring(org.type_code or '') or nil
-    },
-    before = extra.before or {},
-    after = extra.after or {},
-    meta = {
-      reason = reason,
-      result = extra.result,
-      title = extra.title,
-      type = extra.type,
-      target = extra.target
-    }
-  })
-end
-
-local function buildGradeMap(grades)
-  local map = {}
-  for _, grade in ipairs(grades) do
-    map[grade.id] = grade
-  end
-  return map
-end
-
-local function collectInheritedPermissions(gradeId, gradeMap, permissions, out, visited)
-  if not gradeId then return end
-  visited = visited or {}
-  if visited[gradeId] then return end
-  visited[gradeId] = true
-
-  local grade = gradeMap[gradeId]
-  if not grade then return end
-
-  if grade.inherits_grade_id then
-    collectInheritedPermissions(grade.inherits_grade_id, gradeMap, permissions, out, visited)
-  end
-
-  for _, perm in ipairs(permissions) do
-    if perm.grade_id == grade.id then
-      out[perm.permission] = asBool(perm.allow)
-    end
-  end
-end
-
-local function isOwner(source)
-  local ownerAce = (Config and Config.OwnerAce) or 'group.mz_owner'
-  local allowed = isAceAllowed(source, ownerAce)
-  return allowed == true
-end
-
-local function normalizePermission(value)
-  if type(value) ~= 'string' then return nil end
-  value = value:gsub('^%s+', ''):gsub('%s+$', '')
-  if value == '' then return nil end
-  return value
-end
-
-local function normalizeOrgCode(value)
+local function trim(value)
   if type(value) ~= 'string' and type(value) ~= 'number' then return nil end
   value = tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
   if value == '' then return nil end
   return value
 end
 
-local function normalizeString(value, maxLength)
-  if value == nil then return nil end
-  if type(value) ~= 'string' and type(value) ~= 'number' then return false end
-
-  value = tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
-  if value == '' then return nil end
-
-  maxLength = tonumber(maxLength) or 255
-  if #value > maxLength then return false end
-
+local function limitString(value, maxLength)
+  value = trim(value)
+  if not value then return nil end
+  maxLength = tonumber(maxLength) or 64
+  if #value > maxLength then value = value:sub(1, maxLength) end
   return value
 end
 
-local function normalizeGoalType(value)
-  value = normalizeString(value or 'manual', 32)
-  if value == false then return false end
-  value = tostring(value or 'manual'):lower()
-
-  local allowed = {
-    manual = true,
-    weekly = true,
-    monthly = true,
-    collective = true,
-    individual = true
-  }
-
-  return allowed[value] and value or false
+local function normalizeNumber(value, fallback, minValue, maxValue)
+  value = tonumber(value) or fallback
+  value = math.floor(value or 0)
+  if minValue and value < minValue then value = minValue end
+  if maxValue and value > maxValue then value = maxValue end
+  return value
 end
 
-local function normalizeGoalDate(value)
-  if value == nil or value == '' then return nil end
-  if type(value) ~= 'string' and type(value) ~= 'number' then return false end
+local function normalizeSource(source)
+  source = tonumber(source)
+  if not source or source <= 0 then return nil end
+  return math.floor(source)
+end
 
-  value = tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
-  if value == '' then return nil end
-  if #value > 32 then return false end
-  if not value:match('^%d%d%d%d%-%d%d%-%d%d') then return false end
-  local y, m, d = value:match('^(%d%d%d%d)%-(%d%d)%-(%d%d)')
-  y, m, d = tonumber(y), tonumber(m), tonumber(d)
-  if not y or not m or not d or m < 1 or m > 12 or d < 1 or d > 31 then return false end
+local function isAceAllowed(source, ace)
+  local src = normalizeSource(source)
+  ace = limitString(ace, 128)
+  if not src or not ace then return false end
 
-  if #value == 10 then
-    return value .. ' 00:00:00'
+  local allowed = IsPlayerAceAllowed(src, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
+local function isOwner(source)
+  return isAceAllowed(source, (Config and Config.OwnerAce) or 'group.mz_owner')
+end
+
+local function getPlayerNameFromRow(row)
+  if not row then return nil end
+  local first = trim(row.firstname) or ''
+  local last = trim(row.lastname) or ''
+  local full = (first .. ' ' .. last):gsub('^%s+', ''):gsub('%s+$', '')
+  if full ~= '' then return full end
+  return nil
+end
+
+local function getPlayerDisplayName(player, source)
+  if player and player.charinfo then
+    local first = trim(player.charinfo.firstname) or ''
+    local last = trim(player.charinfo.lastname) or ''
+    local full = (first .. ' ' .. last):gsub('^%s+', ''):gsub('%s+$', '')
+    if full ~= '' then return full end
   end
 
-  return value:gsub('T', ' '):gsub('Z$', '')
-end
-
-local function dateSortKey(value)
-  if not value then return nil end
-  local y, m, d = tostring(value):match('^(%d%d%d%d)%-(%d%d)%-(%d%d)')
-  if not y then return nil end
-  return tonumber(y .. m .. d)
-end
-
-local function normalizePanelOrgType(orgType)
-  orgType = tostring(orgType or '')
-
-  if orgType == 'job' then return 'legal' end
-  if orgType == 'gang' then return 'gang' end
-  if orgType == 'staff' then return 'staff' end
-  if orgType == 'business' then return 'business' end
-  if orgType == 'government' then return 'government' end
-  if orgType == 'vip' then return 'vip' end
-
-  return 'legal'
-end
-
-local function collectOrgCapabilities(org)
-  local capabilities = {}
-  local seen = {}
-
-  local function addCapability(capability)
-    capability = normalizePermission(capability)
-    if not capability or seen[capability] then return end
-    seen[capability] = true
-    capabilities[#capabilities + 1] = capability
+  local src = normalizeSource(source)
+  if src then
+    local ok, name = pcall(GetPlayerName, src)
+    if ok and trim(name) then return trim(name) end
   end
 
-  addCapability('org.view')
+  return nil
+end
 
-  for permission, allowed in pairs((org and org.permissions) or {}) do
-    if allowed == true then
-      addCapability(permission)
+local function makeActor(source)
+  local src = normalizeSource(source)
+  local player = src and MZPlayerService.getPlayer(src) or nil
+  if player and player.citizenid then
+    return {
+      type = 'player',
+      id = tostring(player.citizenid),
+      citizenid = tostring(player.citizenid),
+      source = src,
+      name = getPlayerDisplayName(player, src)
+    }
+  end
+
+  if tonumber(source) == 0 then
+    return { type = 'console', id = 'console' }
+  end
+
+  return { type = 'source', id = tostring(source or 'unknown') }
+end
+
+local function logDetailed(scope, action, payload)
+  if MZLogService and MZLogService.createDetailed then
+    MZLogService.createDetailed(scope, action, payload or {})
+  end
+end
+
+local function logBlocked(action, source, orgCode, targetCitizenId, reason, meta)
+  logDetailed('orgs', action, {
+    actor = makeActor(source),
+    target = {
+      type = 'player',
+      id = tostring(targetCitizenId or 'unknown'),
+      citizenid = targetCitizenId
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
+end
+
+local function buildGradeMap(grades)
+  local byId = {}
+  local byLevel = {}
+  local byCode = {}
+
+  for _, grade in ipairs(grades or {}) do
+    byId[tonumber(grade.id) or grade.id] = grade
+    byLevel[tonumber(grade.level) or grade.level] = grade
+    byCode[tostring(grade.code or '')] = grade
+  end
+
+  return byId, byLevel, byCode
+end
+
+local function collectInheritedPermissions(gradeId, gradeMap, permissions, out, visited)
+  if not gradeId then return end
+  visited = visited or {}
+  local key = tonumber(gradeId) or gradeId
+  if visited[key] then return end
+  visited[key] = true
+
+  local grade = gradeMap[key]
+  if not grade then return end
+
+  if grade.inherits_grade_id then
+    collectInheritedPermissions(grade.inherits_grade_id, gradeMap, permissions, out, visited)
+  end
+
+  for _, permission in ipairs(permissions or {}) do
+    if tonumber(permission.grade_id) == tonumber(grade.id) then
+      out[tostring(permission.permission)] = asBool(permission.allow)
+    end
+  end
+end
+
+local function resolveOrgPermissions(orgId, gradeId)
+  local grades = MZOrgRepository.getGradesForOrg(orgId)
+  local permissions = MZOrgRepository.getPermissionsForOrg(orgId)
+  local gradeMap = buildGradeMap(grades)
+  local out = {}
+
+  for _, permission in ipairs(permissions or {}) do
+    if permission.grade_id == nil then
+      out[tostring(permission.permission)] = asBool(permission.allow)
     end
   end
 
-  table.sort(capabilities)
-
-  return capabilities
+  collectInheritedPermissions(gradeId, gradeMap, permissions, out)
+  return out, grades, permissions
 end
 
-local function getPlayerOrgByCode(player, orgCode)
+local function hasPlayerOverride(citizenid, permission)
+  if not citizenid or not permission then return nil end
+  for _, row in ipairs(MZOrgRepository.getPlayerOverrides(citizenid) or {}) do
+    if row.permission == permission then
+      return asBool(row.allow)
+    end
+  end
+  return nil
+end
+
+local function getOrgMemberContext(source, orgCode)
+  local player = MZPlayerService.getPlayer(source)
   if not player then return nil end
+  orgCode = tostring(orgCode or '')
 
   for _, org in ipairs(player.orgs or {}) do
+    if tostring(org.code or '') == orgCode then
+      return org
+    end
+  end
+
+  MZOrgService.loadPlayerOrgs(source)
+  player = MZPlayerService.getPlayer(source)
+  for _, org in ipairs((player and player.orgs) or {}) do
     if tostring(org.code or '') == orgCode then
       return org
     end
@@ -422,1304 +207,189 @@ local function getPlayerOrgByCode(player, orgCode)
   return nil
 end
 
-local function buildPanelOrgContext(org)
-  if type(org) ~= 'table' then return nil end
+local function hasAnyOrgCapability(source, orgCode, capabilities)
+  for _, capability in ipairs(capabilities or {}) do
+    if MZOrgService.canOrg(source, orgCode, capability) == true then
+      return true
+    end
+  end
+  return false
+end
 
-  local grade = type(org.grade) == 'table' and org.grade or {}
-  local code = normalizeOrgCode(org.code)
-  if not code then return nil end
+local function hasStaffManage(source)
+  return MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
+end
 
+local function hasStaffView(source)
+  return MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
+    or hasStaffManage(source)
+end
+
+local function canViewOrg(source, orgCode)
+  return isOwner(source)
+    or hasStaffView(source)
+    or MZOrgService.canOrg(source, orgCode, 'org.view') == true
+    or MZOrgService.canOrg(source, orgCode, 'members.view') == true
+end
+
+local function canManageMembers(source, orgCode)
+  return isOwner(source)
+    or hasStaffManage(source)
+    or hasAnyOrgCapability(source, orgCode, { 'members.invite', 'manage.members' })
+end
+
+local function canManageRecruitment(source, orgCode)
+  return isOwner(source)
+    or hasAnyOrgCapability(source, orgCode, { 'recruitment.manage', 'members.invite', 'manage.members' })
+end
+
+local function canViewRecruitment(source, orgCode)
+  return isOwner(source)
+    or hasAnyOrgCapability(source, orgCode, { 'recruitment.view', 'recruitment.manage', 'members.invite', 'manage.members' })
+end
+
+local function hasLeaderPermission(source, orgCode)
+  return isOwner(source)
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
+    or MZOrgService.canOrg(source, orgCode, 'members.set_leader') == true
+end
+
+local function canStaffSetLeader(source, orgCode)
+  return isOwner(source)
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
+    or MZOrgService.canOrg(source, orgCode, 'staff.orgs.set_leader') == true
+end
+
+local function maxGradeLevel(grades)
+  local maxLevel = nil
+  for _, grade in ipairs(grades or {}) do
+    local level = tonumber(grade.level)
+    if level and (not maxLevel or level > maxLevel) then
+      maxLevel = level
+    end
+  end
+  return maxLevel
+end
+
+local function topGrade(grades)
+  local selected = nil
+  for _, grade in ipairs(grades or {}) do
+    local level = tonumber(grade.level)
+    if level and (not selected or level > tonumber(selected.level)) then
+      selected = grade
+    end
+  end
+  return selected
+end
+
+local function lowestGrade(grades)
+  local selected = nil
+  for _, grade in ipairs(grades or {}) do
+    local level = tonumber(grade.level)
+    if level and level > 0 and (not selected or level < tonumber(selected.level)) then
+      selected = grade
+    end
+  end
+  return selected
+end
+
+local function resolveGrade(org, options)
+  options = type(options) == 'table' and options or {}
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local _, byLevel, byCode = buildGradeMap(grades)
+  local grade = nil
+
+  local level = tonumber(options.gradeLevel or options.grade_level or options.level)
+  local code = limitString(options.gradeCode or options.grade_code or options.code, 64)
+
+  if level then
+    grade = byLevel[math.floor(level)]
+  elseif code then
+    grade = byCode[code]
+  else
+    grade = lowestGrade(grades)
+  end
+
+  if not grade then
+    return nil, 'grade_not_found'
+  end
+
+  return grade, nil, grades
+end
+
+local function actorGradeLevel(source, orgCode)
+  local org = getOrgMemberContext(source, orgCode)
+  if not org or not org.grade then return nil end
+  if type(org.grade) == 'table' then return tonumber(org.grade.level) end
+  return tonumber(org.grade)
+end
+
+local function validateGradeForActor(source, org, grade, grades)
+  if not grade then return false, 'invalid_grade' end
+  if isOwner(source) then return true end
+
+  local targetLevel = tonumber(grade.level) or 0
+  local maxLevel = maxGradeLevel(grades or MZOrgRepository.getGradesForOrg(org.id)) or targetLevel
+
+  if targetLevel >= maxLevel and not hasLeaderPermission(source, org.code) then
+    return false, 'leader_permission_required'
+  end
+
+  if hasStaffManage(source) then
+    return true
+  end
+
+  local actorLevel = actorGradeLevel(source, org.code)
+  if not actorLevel or actorLevel <= targetLevel then
+    return false, 'grade_not_allowed'
+  end
+
+  return true
+end
+
+local function normalizeOrgRow(row)
+  if not row then return nil end
   return {
-    code = code,
-    name = tostring(org.name or code),
-    type = normalizePanelOrgType(org.type),
-    grade = tonumber(grade.level) or 0,
-    gradeCode = tostring(grade.code or ''),
-    gradeName = tostring(grade.name or ''),
-    capabilities = collectOrgCapabilities(org)
+    id = row.id,
+    code = row.code,
+    name = row.name,
+    type = row.type_code,
+    typeCode = row.type_code,
+    typeName = row.type_name,
+    is_public = asBool(row.is_public),
+    requiresWhitelist = asBool(row.requires_whitelist),
+    hasSalary = asBool(row.has_salary),
+    hasSharedAccount = asBool(row.has_shared_account),
+    hasStorage = asBool(row.has_storage),
+    active = asBool(row.active),
+    config = MZUtils.jsonDecode(row.config_json, {}) or {}
   }
 end
 
-local function buildSafeMemberName(row)
-  if type(row) ~= 'table' then return 'Membro' end
-
-  local firstName = tostring(row.firstname or ''):gsub('^%s+', ''):gsub('%s+$', '')
-  local lastName = tostring(row.lastname or ''):gsub('^%s+', ''):gsub('%s+$', '')
-  local fullName = (('%s %s'):format(firstName, lastName)):gsub('^%s+', ''):gsub('%s+$', '')
-
-  if fullName ~= '' then
-    return fullName
-  end
-
-  return tostring(row.citizenid or 'Membro')
-end
-
-local function normalizeOrgMember(row)
-  if type(row) ~= 'table' then return nil end
-  if not row.citizenid then return nil end
-
+local function normalizeMemberRow(row)
+  if not row then return nil end
+  local name = getPlayerNameFromRow(row) or row.citizenid
   return {
     citizenid = tostring(row.citizenid),
-    name = buildSafeMemberName(row),
-    orgCode = tostring(row.org_code or ''),
+    name = name,
+    orgCode = row.org_code,
+    orgName = row.org_name,
+    type = row.type_code,
     grade = tonumber(row.grade_level) or 0,
-    gradeCode = tostring(row.grade_code or ''),
-    gradeName = tostring(row.grade_name or ''),
+    gradeLevel = tonumber(row.grade_level) or 0,
+    gradeCode = row.grade_code,
+    gradeName = row.grade_name,
     isLeader = asBool(row.is_leader),
     isDuty = asBool(row.duty),
     joinedAt = row.joined_at,
+    updatedAt = row.updated_at,
     lastSeen = row.last_seen_at,
     status = asBool(row.active) and 'active' or 'inactive'
   }
 end
 
-
-local function getMembershipSafe(citizenid, org)
-  if not org or not org.id then
-    return nil
-  end
-
-  local membership = MZOrgRepository.getPlayerMembership(citizenid, org.id)
-  if membership then
-    return membership
-  end
-
-  local memberships = MZOrgRepository.getPlayerMemberships(citizenid)
-  for _, row in ipairs(memberships or {}) do
-    if tonumber(row.org_id) == tonumber(org.id) then
-      return row
-    end
-
-    if row.org_code and org.code and row.org_code == org.code then
-      return row
-    end
-  end
-
-  return nil
-end
-
-
-local function refreshPlayerByCitizenId(citizenid)
-  local src = MZPlayerService.getSourceByCitizenId(citizenid)
-  if not src then return end
-  MZOrgService.loadPlayerOrgs(src)
-  local player = MZPlayerService.getPlayer(src)
-  TriggerClientEvent('mz_core:client:playerLoaded', src, player)
-end
-
-function MZOrgService.loadPlayerOrgs(source)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then return {} end
-
-  local memberships = MZOrgRepository.getPlayerMemberships(player.citizenid)
-  local overrides = MZOrgRepository.getPlayerOverrides(player.citizenid)
-  local result = {}
-  player.job = nil
-  player.gang = nil
-
-  for _, membership in ipairs(memberships) do
-    local grades = MZOrgRepository.getGradesForOrg(membership.org_id)
-    local permissions = MZOrgRepository.getPermissionsForOrg(membership.org_id)
-    local gradeMap = buildGradeMap(grades)
-    local resolvedPermissions = {}
-
-    for _, perm in ipairs(permissions) do
-      if perm.grade_id == nil then
-        resolvedPermissions[perm.permission] = asBool(perm.allow)
-      end
-    end
-
-    collectInheritedPermissions(membership.grade_id, gradeMap, permissions, resolvedPermissions)
-
-    local orgData = {
-      org_id = membership.org_id,
-      code = membership.org_code,
-      name = membership.org_name,
-      type = membership.type_code,
-      grade = {
-        id = membership.grade_id,
-        level = membership.grade_level,
-        code = membership.grade_code,
-        name = membership.grade_name,
-        salary = membership.salary
-      },
-      isPrimary = asBool(membership.is_primary),
-      duty = asBool(membership.duty),
-      permissions = resolvedPermissions
-    }
-
-    result[#result + 1] = orgData
-
-    if orgData.type == 'job' and orgData.isPrimary then
-      player.job = orgData
-    end
-
-    if orgData.type == 'gang' and orgData.isPrimary then
-      player.gang = orgData
-    end
-  end
-
-  for _, override in ipairs(overrides) do
-    for _, org in ipairs(result) do
-      org.permissions[override.permission] = asBool(override.allow)
-    end
-  end
-
-  player.orgs = result
-  return result
-end
-
-function MZOrgService.getPlayerOrgs(source)
-  local player = MZPlayerService.getPlayer(source)
-  return player and player.orgs or {}
-end
-
-function MZOrgService.getOrgByCode(code)
-  return MZOrgRepository.getOrgByCode(code)
-end
-
-function MZOrgService.listOrgs(orgTypeCode)
-  return MZOrgRepository.listOrgs(orgTypeCode)
-end
-
-function MZOrgService.createOrg(data, actor)
-  if type(data) ~= 'table' then return false, 'invalid_data' end
-  if not data.type then return false, 'missing_type' end
-  if not data.code or not data.name then return false, 'missing_fields' end
-
-  local orgType = MZOrgRepository.getOrgTypeByCode(data.type)
-  if not orgType then return false, 'org_type_not_found' end
-  if MZOrgRepository.getOrgByCode(data.code) then return false, 'org_code_exists' end
-
-  local org = MZOrgRepository.createOrg({
-    type_id = orgType.id,
-    code = data.code,
-    name = data.name,
-    is_public = data.is_public,
-    requires_whitelist = data.requires_whitelist,
-    has_salary = data.has_salary,
-    has_shared_account = data.has_shared_account,
-    has_storage = data.has_storage,
-    active = data.active,
-    config = data.config
-  })
-
-  if org and asBool(org.has_shared_account) then
-    MySQL.insert.await([[
-      INSERT INTO mz_org_accounts (org_id, balance)
-      VALUES (?, 0)
-      ON DUPLICATE KEY UPDATE org_id = org_id
-    ]], { org.id })
-  end
-
-  logOrgAction('create_org', normalizeActor(actor), org and org.code or nil, {
-    type = data.type,
-    code = data.code,
-    name = data.name
-  })
-
-  return true, org
-end
-
-function MZOrgService.createGrade(orgCode, data, actor)
-  if type(data) ~= 'table' then return false, 'invalid_data' end
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-  if type(data.level) ~= 'number' then return false, 'invalid_level' end
-  if not data.code or not data.name then return false, 'missing_fields' end
-  if MZOrgRepository.getGradeByLevel(org.id, data.level) then return false, 'grade_level_exists' end
-  if MZOrgRepository.getGradeByCode(org.id, data.code) then return false, 'grade_code_exists' end
-
-  local inheritsGradeId = nil
-  if data.inherits_level ~= nil then
-    local inheritsGrade = MZOrgRepository.getGradeByLevel(org.id, data.inherits_level)
-    if not inheritsGrade then return false, 'inherits_grade_not_found' end
-    inheritsGradeId = inheritsGrade.id
-  elseif data.inherits_grade_id ~= nil then
-    inheritsGradeId = data.inherits_grade_id
-  end
-
-  local grade = MZOrgRepository.createGrade(org.id, {
-    level = data.level,
-    code = data.code,
-    name = data.name,
-    salary = data.salary,
-    inherits_grade_id = inheritsGradeId,
-    priority = data.priority,
-    config = data.config
-  })
-
-  logOrgAction('create_grade', normalizeActor(actor), org.code, {
-    org = org.code,
-    level = data.level,
-    code = data.code,
-    name = data.name,
-    salary = data.salary or 0,
-    inherits_level = data.inherits_level
-  })
-
-  return true, grade
-end
-
-function MZOrgService.setOrgPermission(orgCode, permission, allow, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-  if not permission or permission == '' then return false, 'invalid_permission' end
-  MZOrgRepository.setPermission(org.id, nil, permission, allow ~= false)
-
-  logOrgAction('set_org_permission', normalizeActor(actor), org.code, {
-    org = org.code,
-    permission = permission,
-    allow = allow ~= false
-  })
-
-  return true
-end
-
-function MZOrgService.setGradePermission(orgCode, gradeLevel, permission, allow, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-  local grade = MZOrgRepository.getGradeByLevel(org.id, gradeLevel)
-  if not grade then return false, 'grade_not_found' end
-  if not permission or permission == '' then return false, 'invalid_permission' end
-  MZOrgRepository.setPermission(org.id, grade.id, permission, allow ~= false)
-
-  logOrgAction('set_grade_permission', normalizeActor(actor), org.code, {
-    org = org.code,
-    grade_level = gradeLevel,
-    permission = permission,
-    allow = allow ~= false
-  })
-
-  return true
-end
-
-function MZOrgService.addMember(citizenid, orgCode, gradeLevel, options, actor)
-  options = options or {}
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-  local target = MZPlayerRepository.getByCitizenId(citizenid)
-  if not target then return false, 'player_not_found' end
-  local grade = MZOrgRepository.getGradeByLevel(org.id, gradeLevel)
-  if not grade then return false, 'grade_not_found' end
-  local beforeMembership = getMembershipSafe(citizenid, org)
-  local beforeGrade = beforeMembership and MZOrgRepository.getGradeById(beforeMembership.grade_id) or nil
-
-  MZOrgRepository.setMembership(citizenid, org.id, grade.id, options.is_primary == true, options.duty == true, options.expires_at)
-
-  if options.is_primary == true then
-    MZOrgRepository.setPrimaryMembership(citizenid, org.type_code, org.id)
-  end
-
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'add_member',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, beforeMembership, beforeGrade),
-    buildMembershipSnapshot(citizenid, org, beforeMembership, grade, {
-      is_primary = options.is_primary == true,
-      duty = options.duty == true,
-      active = true,
-      expires_at = options.expires_at
-    }),
-    {
-      requested_grade_level = tonumber(gradeLevel) or gradeLevel
-    }
-  )
-
-  return true
-end
-
-function MZOrgService.inviteOrgMember(source, orgCode, targetSource, options)
-  local originalSource = source
-  source = tonumber(source)
-  targetSource = tonumber(targetSource)
-  orgCode = normalizeOrgCode(orgCode)
-  options = type(options) == 'table' and options or {}
-
-  if not source or source <= 0 then
-    return false, 'invalid_source'
-  end
-
-  if not targetSource or targetSource <= 0 then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, nil, nil, 'invalid_target', { result = 'blocked' })
-    return false, 'invalid_target'
-  end
-
-  if source == targetSource then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, nil, nil, 'self_target', { result = 'blocked' })
-    return false, 'self_target'
-  end
-
-  if not orgCode then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, nil, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, nil, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  local targetPlayer = MZPlayerService.getPlayer(targetSource)
-  if not targetPlayer or not targetPlayer.citizenid then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, nil, org, 'invalid_target', { result = 'blocked' })
-    return false, 'invalid_target'
-  end
-
-  local isOwnerActor = MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-  local isStaffActor = MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
-  local canInvite = isOwnerActor
-    or isStaffActor
-    or MZOrgService.canOrg(source, orgCode, 'members.invite') == true
-
-  if not canInvite then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'forbidden', { result = 'blocked' })
-    return false, 'forbidden'
-  end
-
-  local membership = getMembershipSafe(targetPlayer.citizenid, org)
-  if membership and asBool(membership.active) then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'already_member', { result = 'blocked' })
-    return false, 'already_member'
-  end
-
-  local grades = MZOrgRepository.getGradesForOrg(org.id)
-  local requestedGradeLevel = options.gradeLevel ~= nil and tonumber(options.gradeLevel) or nil
-  local requestedGradeCode = normalizePermission(options.gradeCode)
-  local gradeRequested = requestedGradeLevel ~= nil or requestedGradeCode ~= nil
-  local initialGrade = nil
-
-  if requestedGradeLevel ~= nil and requestedGradeLevel <= 0 then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'invalid_grade', { result = 'blocked' })
-    return false, 'invalid_grade'
-  end
-
-  if requestedGradeLevel ~= nil then
-    initialGrade = MZOrgRepository.getGradeByLevel(org.id, requestedGradeLevel)
-    if requestedGradeCode and initialGrade and tostring(initialGrade.code or '') ~= tostring(requestedGradeCode) then
-      logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'invalid_grade', {
-        result = 'blocked',
-        gradeLevel = requestedGradeLevel,
-        gradeCode = requestedGradeCode
-      })
-      return false, 'invalid_grade'
-    end
-  elseif requestedGradeCode then
-    initialGrade = MZOrgRepository.getGradeByCode(org.id, requestedGradeCode)
-  else
-    initialGrade = grades and grades[1] or nil
-  end
-
-  if not initialGrade then
-    local reason = gradeRequested and 'invalid_grade' or 'grade_not_found'
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, reason, {
-      result = 'blocked',
-      gradeLevel = requestedGradeLevel,
-      gradeCode = requestedGradeCode
-    })
-    return false, reason
-  end
-
-  if gradeRequested and not isOwnerActor and not isStaffActor then
-    local actorPlayer = MZPlayerService.getPlayer(source)
-    if not actorPlayer or not actorPlayer.citizenid then
-      logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'grade_not_allowed', {
-        result = 'blocked',
-        gradeLevel = tonumber(initialGrade.level),
-        gradeCode = initialGrade.code,
-        gradeName = initialGrade.name
-      })
-      return false, 'grade_not_allowed'
-    end
-
-    local actorMembership = getMembershipSafe(actorPlayer.citizenid, org)
-    if not actorMembership or not asBool(actorMembership.active) then
-      logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'grade_not_allowed', {
-        result = 'blocked',
-        gradeLevel = tonumber(initialGrade.level),
-        gradeCode = initialGrade.code,
-        gradeName = initialGrade.name
-      })
-      return false, 'grade_not_allowed'
-    end
-
-    local actorGrade = MZOrgRepository.getGradeById(actorMembership.grade_id)
-    local actorLevel = actorGrade and tonumber(actorGrade.level) or 0
-    local selectedLevel = tonumber(initialGrade.level) or 0
-    if actorLevel <= selectedLevel then
-      logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, 'grade_not_allowed', {
-        result = 'blocked',
-        gradeLevel = selectedLevel,
-        gradeCode = initialGrade.code,
-        gradeName = initialGrade.name
-      })
-      return false, 'grade_not_allowed'
-    end
-  end
-
-  local added, err = MZOrgService.addMember(targetPlayer.citizenid, orgCode, tonumber(initialGrade.level), {
-    is_primary = false,
-    duty = false
-  }, source)
-
-  if not added then
-    logInviteMemberAudit('org.member.invite.blocked', source, targetSource, targetPlayer, org, err or 'add_failed', {
-      result = 'blocked',
-      gradeLevel = tonumber(initialGrade.level),
-      gradeCode = initialGrade.code,
-      gradeName = initialGrade.name
-    })
-    return false, err or 'add_failed'
-  end
-
-  logInviteMemberAudit('org.member.invite', source, targetSource, targetPlayer, org, 'success', {
-    result = 'allowed',
-    gradeLevel = tonumber(initialGrade.level),
-    gradeCode = initialGrade.code,
-    gradeName = initialGrade.name
-  })
-
-  return true, {
-    orgCode = orgCode,
-    targetSource = targetSource,
-    targetCitizenId = tostring(targetPlayer.citizenid),
-    grade = tonumber(initialGrade.level) or 0,
-    gradeCode = tostring(initialGrade.code or ''),
-    gradeName = tostring(initialGrade.name or '')
-  }
-end
-
-function MZOrgService.removeMember(citizenid, orgCode, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-  local currentGrade = MZOrgRepository.getGradeById(membership.grade_id)
-
-  MZOrgRepository.removeMembership(citizenid, org.id)
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'remove_member',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade),
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade, {
-      active = false,
-      removed = true
-    }),
-    {
-      removed = true
-    }
-  )
-
-  return true
-end
-
-function MZOrgService.removeOrgMemberSecure(source, orgCode, targetCitizenId)
-  local originalSource = source
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-  targetCitizenId = normalizePermission(targetCitizenId)
-
-  if not source or source <= 0 then
-    return false, 'invalid_source'
-  end
-
-  if not orgCode then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, nil, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  if not targetCitizenId then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, nil, nil, 'invalid_target', { result = 'blocked' })
-    return false, 'invalid_target'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, nil, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  local actorPlayer = MZPlayerService.getPlayer(source)
-  if actorPlayer and actorPlayer.citizenid and tostring(actorPlayer.citizenid) == tostring(targetCitizenId) then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, nil, org, 'self_remove', { result = 'blocked' })
-    return false, 'self_remove'
-  end
-
-  local targetPlayer = MZPlayerRepository.getByCitizenId(targetCitizenId)
-  if not targetPlayer then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, nil, org, 'invalid_target', { result = 'blocked' })
-    return false, 'invalid_target'
-  end
-
-  local targetMembership = getMembershipSafe(targetCitizenId, org)
-  if not targetMembership or not asBool(targetMembership.active) then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'not_member', { result = 'blocked' })
-    return false, 'not_member'
-  end
-
-  local targetGrade = MZOrgRepository.getGradeById(targetMembership.grade_id)
-  if not targetGrade then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'not_member', { result = 'blocked' })
-    return false, 'not_member'
-  end
-
-  local isOwnerActor = MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-  local isStaffActor = MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
-
-  local grades = MZOrgRepository.getGradesForOrg(org.id)
-  local maxLevel = 0
-  for _, grade in ipairs(grades or {}) do
-    local level = tonumber(grade.level) or 0
-    if level > maxLevel then maxLevel = level end
-  end
-
-  local targetLevel = tonumber(targetGrade.level) or 0
-  local protectedTarget = maxLevel > 0 and targetLevel >= maxLevel
-  if protectedTarget and not isOwnerActor then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'protected_target', {
-      result = 'blocked',
-      targetGradeLevel = targetLevel
-    })
-    return false, 'protected_target'
-  end
-
-  local canRemove = isOwnerActor or isStaffActor
-    or MZOrgService.canOrg(source, orgCode, 'members.remove') == true
-    or MZOrgService.canOrg(source, orgCode, 'members.kick') == true
-    or MZOrgService.canOrg(source, orgCode, 'manage.members') == true
-
-  if not canRemove then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked' })
-    return false, 'forbidden'
-  end
-
-  if not isOwnerActor and not isStaffActor then
-    if not actorPlayer or not actorPlayer.citizenid then
-      logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked' })
-      return false, 'forbidden'
-    end
-
-    local actorMembership = getMembershipSafe(actorPlayer.citizenid, org)
-    if not actorMembership or not asBool(actorMembership.active) then
-      logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked' })
-      return false, 'forbidden'
-    end
-
-    local actorGrade = MZOrgRepository.getGradeById(actorMembership.grade_id)
-    local actorLevel = actorGrade and tonumber(actorGrade.level) or 0
-    if actorLevel <= targetLevel then
-      logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, 'target_higher_or_equal', {
-        result = 'blocked',
-        actorGradeLevel = actorLevel,
-        targetGradeLevel = targetLevel
-      })
-      return false, 'target_higher_or_equal'
-    end
-  end
-
-  local beforeState = buildMembershipSnapshot(targetCitizenId, org, targetMembership, targetGrade)
-  local removed, err = MZOrgService.removeMember(targetCitizenId, orgCode, source)
-  if not removed then
-    logRemoveMemberAudit('org.member.remove.blocked', source, targetCitizenId, targetPlayer, org, err or 'remove_failed', {
-      result = 'blocked',
-      before = beforeState,
-      targetGradeLevel = targetLevel
-    })
-    return false, err or 'remove_failed'
-  end
-
-  logRemoveMemberAudit('org.member.remove', source, targetCitizenId, targetPlayer, org, 'success', {
-    result = 'allowed',
-    before = beforeState,
-    after = buildMembershipSnapshot(targetCitizenId, org, targetMembership, targetGrade, {
-      active = false,
-      removed = true
-    }),
-    targetGradeLevel = targetLevel
-  })
-
-  return true, {
-    orgCode = orgCode,
-    targetCitizenId = tostring(targetCitizenId),
-    removed = true
-  }
-end
-
-local function adjacentGradeForAction(grades, currentLevel, action)
-  currentLevel = tonumber(currentLevel) or 0
-  local selected = nil
-
-  for _, grade in ipairs(grades or {}) do
-    local level = tonumber(grade.level) or 0
-    if action == 'promote' then
-      if level > currentLevel and (not selected or level < (tonumber(selected.level) or 0)) then
-        selected = grade
-      end
-    elseif action == 'demote' then
-      if level < currentLevel and (not selected or level > (tonumber(selected.level) or 0)) then
-        selected = grade
-      end
-    end
-  end
-
-  return selected
-end
-
-function MZOrgService.changeOrgMemberGradeSecure(source, orgCode, targetCitizenId, action)
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-  targetCitizenId = normalizePermission(targetCitizenId)
-  action = action == 'demote' and 'demote' or 'promote'
-
-  local logAction = action == 'promote' and 'org.member.promote' or 'org.member.demote'
-  local blockedAction = logAction .. '.blocked'
-
-  if not source or source <= 0 then
-    return false, 'invalid_source'
-  end
-
-  if not orgCode then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, nil, nil, 'invalid_org', { result = 'blocked', action = action })
-    return false, 'invalid_org'
-  end
-
-  if not targetCitizenId then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, nil, nil, 'invalid_target', { result = 'blocked', action = action })
-    return false, 'invalid_target'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, nil, nil, 'invalid_org', { result = 'blocked', action = action })
-    return false, 'invalid_org'
-  end
-
-  local actorPlayer = MZPlayerService.getPlayer(source)
-  if actorPlayer and actorPlayer.citizenid and tostring(actorPlayer.citizenid) == tostring(targetCitizenId) then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, nil, org, 'self_action', { result = 'blocked', action = action })
-    return false, 'self_action'
-  end
-
-  local targetPlayer = MZPlayerRepository.getByCitizenId(targetCitizenId)
-  if not targetPlayer then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, nil, org, 'invalid_target', { result = 'blocked', action = action })
-    return false, 'invalid_target'
-  end
-
-  local targetMembership = getMembershipSafe(targetCitizenId, org)
-  if not targetMembership or not asBool(targetMembership.active) then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'not_member', { result = 'blocked', action = action })
-    return false, 'not_member'
-  end
-
-  local targetGrade = MZOrgRepository.getGradeById(targetMembership.grade_id)
-  if not targetGrade then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'grade_not_found', { result = 'blocked', action = action })
-    return false, 'grade_not_found'
-  end
-
-  local grades = MZOrgRepository.getGradesForOrg(org.id)
-  local newGrade = adjacentGradeForAction(grades, targetGrade.level, action)
-  if not newGrade then
-    local limitReason = action == 'promote' and 'max_grade' or 'min_grade'
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, limitReason, {
-      result = 'blocked',
-      action = action,
-      targetGradeLevel = tonumber(targetGrade.level) or 0
-    })
-    return false, limitReason
-  end
-
-  local maxLevel = 0
-  for _, grade in ipairs(grades or {}) do
-    local level = tonumber(grade.level) or 0
-    if level > maxLevel then maxLevel = level end
-  end
-
-  local isOwnerActor = MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-  local isStaffActor = MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
-
-  local targetLevel = tonumber(targetGrade.level) or 0
-  if action == 'demote' and maxLevel > 0 and targetLevel >= maxLevel and not isOwnerActor and not isStaffActor then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'protected_target', {
-      result = 'blocked',
-      action = action,
-      targetGradeLevel = targetLevel
-    })
-    return false, 'protected_target'
-  end
-
-  local permission = action == 'promote' and 'members.promote' or 'members.demote'
-  local canChange = isOwnerActor or isStaffActor
-    or MZOrgService.canOrg(source, orgCode, permission) == true
-    or MZOrgService.canOrg(source, orgCode, 'manage.members') == true
-
-  if not canChange then
-    logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked', action = action })
-    return false, 'forbidden'
-  end
-
-  local actorLevel = 0
-  if not isOwnerActor and not isStaffActor then
-    if not actorPlayer or not actorPlayer.citizenid then
-      logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked', action = action })
-      return false, 'forbidden'
-    end
-
-    local actorMembership = getMembershipSafe(actorPlayer.citizenid, org)
-    if not actorMembership or not asBool(actorMembership.active) then
-      logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'forbidden', { result = 'blocked', action = action })
-      return false, 'forbidden'
-    end
-
-    local actorGrade = MZOrgRepository.getGradeById(actorMembership.grade_id)
-    actorLevel = actorGrade and tonumber(actorGrade.level) or 0
-
-    if actorLevel <= targetLevel then
-      logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'target_higher_or_equal', {
-        result = 'blocked',
-        action = action,
-        actorGradeLevel = actorLevel,
-        targetGradeLevel = targetLevel
-      })
-      return false, 'target_higher_or_equal'
-    end
-
-    if action == 'promote' and actorLevel <= (tonumber(newGrade.level) or 0) then
-      logGradeMemberAudit(blockedAction, source, targetCitizenId, targetPlayer, org, 'promotion_above_actor', {
-        result = 'blocked',
-        action = action,
-        actorGradeLevel = actorLevel,
-        targetGradeLevel = targetLevel,
-        newGradeLevel = tonumber(newGrade.level) or 0
-      })
-      return false, 'promotion_above_actor'
-    end
-  end
-
-  local beforeState = buildMembershipSnapshot(targetCitizenId, org, targetMembership, targetGrade)
-  MZOrgRepository.updateMembershipGrade(targetCitizenId, org.id, newGrade.id)
-  refreshPlayerByCitizenId(targetCitizenId)
-
-  local afterState = buildMembershipSnapshot(targetCitizenId, org, targetMembership, newGrade)
-  logGradeMemberAudit(logAction, source, targetCitizenId, targetPlayer, org, 'success', {
-    result = 'allowed',
-    action = action,
-    before = beforeState,
-    after = afterState,
-    actorGradeLevel = actorLevel,
-    targetGradeLevel = targetLevel,
-    newGradeLevel = tonumber(newGrade.level) or 0
-  })
-
-  return true, {
-    orgCode = orgCode,
-    targetCitizenId = tostring(targetCitizenId),
-    action = action,
-    oldGrade = tonumber(targetGrade.level) or 0,
-    newGrade = tonumber(newGrade.level) or 0,
-    oldGradeCode = tostring(targetGrade.code or ''),
-    newGradeCode = tostring(newGrade.code or ''),
-    oldGradeName = tostring(targetGrade.name or ''),
-    newGradeName = tostring(newGrade.name or '')
-  }
-end
-
-function MZOrgService.promoteOrgMemberSecure(source, orgCode, targetCitizenId)
-  return MZOrgService.changeOrgMemberGradeSecure(source, orgCode, targetCitizenId, 'promote')
-end
-
-function MZOrgService.demoteOrgMemberSecure(source, orgCode, targetCitizenId)
-  return MZOrgService.changeOrgMemberGradeSecure(source, orgCode, targetCitizenId, 'demote')
-end
-
-function MZOrgService.setPrimary(citizenid, orgCode, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-  local currentGrade = MZOrgRepository.getGradeById(membership.grade_id)
-
-  MZOrgRepository.setPrimaryMembership(citizenid, org.type_code, org.id)
-
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'set_primary',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade),
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade, {
-      is_primary = true
-    })
-  )
-
-  return true
-end
-
-function MZOrgService.setDuty(citizenid, orgCode, duty, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-  local currentGrade = MZOrgRepository.getGradeById(membership.grade_id)
-
-  MZOrgRepository.setMembershipDuty(citizenid, org.id, duty == true)
-
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'set_duty',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade),
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade, {
-      duty = duty == true
-    }),
-    {
-      duty = duty == true
-    }
-  )
-
-  return true
-end
-
-function MZOrgService.setGrade(citizenid, orgCode, gradeLevel, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-
-  local grade = MZOrgRepository.getGradeByLevel(org.id, gradeLevel)
-  if not grade then return false, 'grade_not_found' end
-
-  MZOrgRepository.updateMembershipGrade(citizenid, org.id, grade.id)
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgAction('set_grade', normalizeActor(actor), citizenid, {
-    org = org.code,
-    grade_level = gradeLevel,
-    grade_code = grade.code
-  })
-
-  return true
-end
-
-function MZOrgService.promote(citizenid, orgCode, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-
-  local currentGrade = MZOrgRepository.getGradeById(membership.grade_id)
-  if not currentGrade then return false, 'grade_not_found' end
-
-  local nextGrade = MZOrgRepository.getGradeByLevel(org.id, tonumber(currentGrade.level) + 1)
-  if not nextGrade then return false, 'max_grade_reached' end
-
-  MZOrgRepository.updateMembershipGrade(citizenid, org.id, nextGrade.id)
-
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'promote_member',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade),
-    buildMembershipSnapshot(citizenid, org, membership, nextGrade),
-    {
-      from_level = tonumber(currentGrade.level) or currentGrade.level,
-      from_code = currentGrade.code,
-      to_level = tonumber(nextGrade.level) or nextGrade.level,
-      to_code = nextGrade.code
-    }
-  )
-
-  return true, nextGrade
-end
-
-function MZOrgService.demote(citizenid, orgCode, actor)
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then return false, 'org_not_found' end
-
-  local membership = getMembershipSafe(citizenid, org)
-  if not membership or not asBool(membership.active) then
-    return false, 'membership_not_found'
-  end
-
-  local currentGrade = MZOrgRepository.getGradeById(membership.grade_id)
-  if not currentGrade then return false, 'grade_not_found' end
-
-  local nextGrade = MZOrgRepository.getGradeByLevel(org.id, tonumber(currentGrade.level) - 1)
-  if not nextGrade then return false, 'min_grade_reached' end
-
-  MZOrgRepository.updateMembershipGrade(citizenid, org.id, nextGrade.id)
-
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgActionDetailed(
-    'demote_member',
-    actor,
-    citizenid,
-    org,
-    buildMembershipSnapshot(citizenid, org, membership, currentGrade),
-    buildMembershipSnapshot(citizenid, org, membership, nextGrade),
-    {
-      from_level = tonumber(currentGrade.level) or currentGrade.level,
-      from_code = currentGrade.code,
-      to_level = tonumber(nextGrade.level) or nextGrade.level,
-      to_code = nextGrade.code
-    }
-  )
-
-  return true, nextGrade
-end
-
-function MZOrgService.setPlayerPermission(citizenid, permission, allow, expiresAt, actor)
-  if not MZPlayerRepository.getByCitizenId(citizenid) then return false, 'player_not_found' end
-  if not permission or permission == '' then return false, 'invalid_permission' end
-
-  MZOrgRepository.setPlayerOverride(citizenid, permission, allow ~= false, expiresAt)
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgAction('set_player_permission', normalizeActor(actor), citizenid, {
-    permission = permission,
-    allow = allow ~= false,
-    expires_at = expiresAt
-  })
-
-  return true
-end
-
-function MZOrgService.removePlayerPermission(citizenid, permission, actor)
-  MZOrgRepository.removePlayerOverride(citizenid, permission)
-  refreshPlayerByCitizenId(citizenid)
-
-  logOrgAction('remove_player_permission', normalizeActor(actor), citizenid, {
-    permission = permission
-  })
-
-  return true
-end
-
-function MZOrgService.hasPermission(source, permission)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then return false end
-
-  for _, org in ipairs(player.orgs or {}) do
-    if org.permissions and org.permissions[permission] == true then
-      return true
-    end
-  end
-
-  return false
-end
-
-function MZOrgService.hasGlobalPermission(source, permission)
-  local originalSource = source
-  source = tonumber(source)
-  permission = normalizePermission(permission)
-
-  if not source or source <= 0 or not permission then
-    return false
-  end
-
-  local ownerAce = (Config and Config.OwnerAce) or 'group.mz_owner'
-  local ownerAllowed, ownerDebug = isAceAllowed(source, ownerAce)
-
-  if Config and Config.Debug == true and (permission == ownerAce or permission == 'group.mz_owner') then
-    print(('[mz_core][HasGlobalPermission][debug] src=%s srcType=%s permission=%s ownerAce=%s raw=%s rawType=%s normalized=%s allowed=%s resource=%s'):format(
-      tostring(source),
-      type(originalSource),
-      tostring(permission),
-      tostring(ownerAce),
-      tostring(ownerDebug and ownerDebug.raw),
-      tostring(ownerDebug and ownerDebug.rawType),
-      tostring(ownerDebug and ownerDebug.normalized),
-      tostring(ownerDebug and ownerDebug.allowed),
-      tostring(GetCurrentResourceName())
-    ))
-  end
-
-  if permission == ownerAce or permission == 'group.mz_owner' then
-    return ownerAllowed == true
-  end
-
-  if ownerAllowed == true then
-    return true
-  end
-
-  local aceAllowed = isAceAllowed(source, permission)
-  if aceAllowed == true then
-    return true
-  end
-
-  return MZOrgService.hasPermission(source, permission)
-end
-
-function MZOrgService.canOrg(source, orgCode, capability)
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-  capability = normalizePermission(capability)
-
-  if not source or source <= 0 or not orgCode or not capability then
-    return false
-  end
-
-  if MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true then
-    return true
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    return false
-  end
-
-  local player = MZPlayerService.getPlayer(source)
-  if not player then
-    return false
-  end
-
-  if type(player.orgs) ~= 'table' then
-    MZOrgService.loadPlayerOrgs(source)
-  end
-
-  local playerOrg = getPlayerOrgByCode(player, orgCode)
-  if not playerOrg then
-    MZOrgService.loadPlayerOrgs(source)
-    playerOrg = getPlayerOrgByCode(player, orgCode)
-  end
-
-  if not playerOrg then
-    return false
-  end
-
-  if capability == 'org.view' then
-    return true
-  end
-
-  return playerOrg.permissions and playerOrg.permissions[capability] == true
-end
-
-function MZOrgService.getPlayerOrgContext(source)
-  source = tonumber(source)
-  if not source or source <= 0 then
-    return {}
-  end
-
-  local player = MZPlayerService.getPlayer(source)
-  if not player then
-    return {}
-  end
-
-  local orgs = MZOrgService.loadPlayerOrgs(source) or {}
-  local result = {}
-
-  for _, org in ipairs(orgs) do
-    local context = buildPanelOrgContext(org)
-    if context then
-      result[#result + 1] = context
-    end
-  end
-
-  return result
-end
-
-function MZOrgService.listOrgMembers(source, orgCode)
-  local originalSource = source
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-
-  if not source or source <= 0 then
-    if Config and Config.Debug == true then
-      print(('[mz_core][ListOrgMembers][debug] invalid_source source=%s sourceType=%s orgCode=%s resource=%s'):format(
-        tostring(originalSource),
-        type(originalSource),
-        tostring(orgCode),
-        tostring(GetCurrentResourceName())
-      ))
-    end
-
-    return false, 'invalid_source'
-  end
-
-  if not orgCode then
-    return false, 'invalid_org'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    return false, 'org_not_found'
-  end
-
-  local canView = MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
-    or MZOrgService.canOrg(source, orgCode, 'org.view') == true
-
-  if not canView then
-    return false, 'forbidden'
-  end
-
-  local rows = MZOrgRepository.listMembersForOrg(org.id)
-  local members = {}
-
-  for _, row in ipairs(rows or {}) do
-    local member = normalizeOrgMember(row)
-    if member then
-      members[#members + 1] = member
-    end
-  end
-
-  return members
-end
-
-local function safeCapabilityList(values)
-  local out = {}
-  for permission, allowed in pairs(values or {}) do
-    if allowed == true then
-      out[#out + 1] = permission
-    end
-  end
-
-  table.sort(out)
-  return out
-end
-
-local function directPermissionsForGrade(gradeId, permissions)
-  local out = {}
-  for _, permission in ipairs(permissions or {}) do
-    if permission.grade_id == gradeId and asBool(permission.allow) == true then
-      out[#out + 1] = permission.permission
-    end
-  end
-
-  table.sort(out)
-  return out
-end
-
-function MZOrgService.getOrgAccessModel(source, orgCode)
-  local originalSource = source
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-
-  if not source or source <= 0 then
-    if Config and Config.Debug == true then
-      print(('[mz_core][GetOrgAccessModel][debug] invalid_source source=%s sourceType=%s orgCode=%s resource=%s'):format(
-        tostring(originalSource),
-        type(originalSource),
-        tostring(orgCode),
-        tostring(GetCurrentResourceName())
-      ))
-    end
-
-    return false, 'invalid_source'
-  end
-
-  if not orgCode then
-    return false, 'invalid_org'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    return false, 'org_not_found'
-  end
-
-  local canView = MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
-    or MZOrgService.canOrg(source, orgCode, 'manage.permissions') == true
-    or MZOrgService.canOrg(source, orgCode, 'manage.members') == true
-    or MZOrgService.canOrg(source, orgCode, 'org.view') == true
-
-  if not canView then
-    return false, 'forbidden'
-  end
-
-  local grades = MZOrgRepository.getGradesForOrg(org.id)
-  local permissions = MZOrgRepository.getPermissionsForOrg(org.id)
-  local gradeMap = buildGradeMap(grades)
-  local basePermissions = {}
-
-  for _, permission in ipairs(permissions or {}) do
-    if permission.grade_id == nil then
-      basePermissions[permission.permission] = asBool(permission.allow)
-    end
-  end
-
-  local outGrades = {}
-  for _, grade in ipairs(grades or {}) do
-    local resolved = {}
-    collectInheritedPermissions(grade.id, gradeMap, permissions, resolved)
-
-    local parent = grade.inherits_grade_id and gradeMap[grade.inherits_grade_id] or nil
-    outGrades[#outGrades + 1] = {
-      level = tonumber(grade.level) or 0,
-      code = tostring(grade.code or ''),
-      name = tostring(grade.name or ''),
-      salary = tonumber(grade.salary) or 0,
-      inheritsLevel = parent and tonumber(parent.level) or nil,
-      inheritsCode = parent and tostring(parent.code or '') or nil,
-      capabilities = safeCapabilityList(resolved),
-      directCapabilities = directPermissionsForGrade(grade.id, permissions)
-    }
-  end
-
-  local playerOverrides = {}
-  local player = MZPlayerService.getPlayer(source)
-  if player and player.citizenid then
-    for _, override in ipairs(MZOrgRepository.getPlayerOverrides(player.citizenid) or {}) do
-      playerOverrides[#playerOverrides + 1] = {
-        permission = tostring(override.permission or ''),
-        allow = asBool(override.allow),
-        expiresAt = override.expires_at
-      }
-    end
-  end
-
-  return {
-    orgCode = tostring(org.code or orgCode),
-    orgName = tostring(org.name or orgCode),
-    type = normalizePanelOrgType(org.type_code),
-    baseCapabilities = safeCapabilityList(basePermissions),
-    grades = outGrades,
-    playerOverrides = playerOverrides
-  }
-end
-
 local function normalizeGoalRow(row)
-  if type(row) ~= 'table' then return nil end
-
+  if not row then return nil end
   local target = tonumber(row.target) or 0
   local progress = tonumber(row.progress) or 0
   local percent = target > 0 and math.floor((progress / target) * 100) or 0
@@ -1745,192 +415,1019 @@ local function normalizeGoalRow(row)
   }
 end
 
-local function canViewGoals(source, orgCode)
-  if MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true then return true end
-  if MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true then return true end
-  if MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true then return true end
-  if not orgCode then return false end
-  if MZOrgService.canOrg(source, orgCode, 'goals.view') == true then return true end
-  if MZOrgService.canOrg(source, orgCode, 'goals.manage') == true then return true end
-  return MZOrgService.canOrg(source, orgCode, 'org.view') == true
-end
-
-local function canManageGoals(source, orgCode)
-  if MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true then return true end
-  if MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true then return true end
-  if MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true then return true end
-  if not orgCode then return false end
-  if MZOrgService.canOrg(source, orgCode, 'goals.manage') == true then return true end
-  return MZOrgService.canOrg(source, orgCode, 'manage.goals') == true
-end
-
-local function normalizeGoalFilters(filters)
-  filters = type(filters) == 'table' and filters or {}
-
+local function normalizeRecruitmentRow(row)
+  if not row then return nil end
   return {
-    orgCode = normalizeOrgCode(filters.orgCode),
-    status = normalizeString(filters.status, 32),
-    type = filters.type ~= nil and filters.type ~= '' and normalizeGoalType(filters.type) or nil,
-    search = normalizeString(filters.search, 80),
-    limit = math.min(math.max(math.floor(tonumber(filters.limit) or 50), 1), 100),
-    offset = math.min(math.max(math.floor(tonumber(filters.offset) or 0), 0), 10000)
+    id = tonumber(row.id) or row.id,
+    orgCode = row.org_code,
+    targetCitizenId = row.target_citizenid,
+    targetName = row.target_name,
+    candidateCitizenId = row.target_citizenid,
+    candidateName = row.target_name,
+    status = row.status,
+    desiredGradeLevel = tonumber(row.desired_grade_level),
+    desiredGradeCode = row.desired_grade_code,
+    note = row.note,
+    message = row.note,
+    createdByCitizenId = row.created_by_citizenid,
+    createdByName = row.created_by_name,
+    reviewedByCitizenId = row.reviewed_by_citizenid,
+    reviewedByName = row.reviewed_by_name,
+    reviewedAt = row.reviewed_at,
+    decisionNote = row.decision_note,
+    metadata = MZUtils.jsonDecode(row.metadata_json, {}) or {},
+    createdAt = row.created_at,
+    updatedAt = row.updated_at,
+    type = 'application'
   }
 end
 
-function MZOrgService.listOrgGoals(source, filters)
-  source = tonumber(source)
-  if not source or source <= 0 then return false, 'invalid_source' end
-
-  filters = normalizeGoalFilters(filters)
-  if filters.type == false or filters.status == false or filters.search == false then
-    return false, 'invalid_filters'
-  end
-
-  if filters.orgCode then
-    local org = MZOrgRepository.getOrgByCode(filters.orgCode)
-    if not org then return false, 'invalid_org' end
-  end
-
-  if not canViewGoals(source, filters.orgCode) then
-    return false, 'forbidden'
-  end
-
-  local rows = MZOrgRepository.listGoals(filters)
-  local out = {}
-  for _, row in ipairs(rows or {}) do
-    local item = normalizeGoalRow(row)
-    if item then out[#out + 1] = item end
-  end
-
-  return out
+local function getPlayerRowByCitizenId(citizenid)
+  citizenid = limitString(citizenid, 64)
+  if not citizenid then return nil end
+  return MZPlayerRepository.getByCitizenId(citizenid)
 end
 
-function MZOrgService.getOrgGoal(source, goalId)
-  source = tonumber(source)
-  goalId = tonumber(goalId)
-  if not source or source <= 0 then return false, 'invalid_source' end
-  if not goalId or goalId <= 0 then return false, 'invalid_goal' end
-
-  local row = MZOrgRepository.getGoalById(goalId)
-  if not row then return false, 'goal_not_found' end
-  if not canViewGoals(source, row.org_code) then return false, 'forbidden' end
-
-  return normalizeGoalRow(row)
+local function refreshOnlinePlayerByCitizenId(citizenid)
+  local target = MZPlayerService.getPlayerByCitizenId(citizenid)
+  if not target or not target.source then return end
+  MZOrgService.loadPlayerOrgs(target.source)
+  TriggerClientEvent('mz_core:client:playerLoaded', target.source, target)
 end
 
-function MZOrgService.createOrgGoal(source, orgCode, payload)
-  source = tonumber(source)
-  orgCode = normalizeOrgCode(orgCode)
-  payload = type(payload) == 'table' and payload or {}
-
-  if not source or source <= 0 then return false, 'invalid_source' end
-  if not orgCode then
-    logGoalAudit('org.goal.create.blocked', source, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  local org = MZOrgRepository.getOrgByCode(orgCode)
-  if not org then
-    logGoalAudit('org.goal.create.blocked', source, nil, 'invalid_org', { result = 'blocked' })
-    return false, 'invalid_org'
-  end
-
-  if not canManageGoals(source, orgCode) then
-    logGoalAudit('org.goal.create.blocked', source, org, 'forbidden', { result = 'blocked' })
-    return false, 'forbidden'
-  end
-
-  local title = normalizeString(payload.title, 120)
-  if not title or title == false then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_title', { result = 'blocked' })
-    return false, 'invalid_title'
-  end
-
-  local description = normalizeString(payload.description, 1000)
-  if description == false then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_description', { result = 'blocked', title = title })
-    return false, 'invalid_description'
-  end
-
-  local goalType = normalizeGoalType(payload.type)
-  if goalType == false then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_type', { result = 'blocked', title = title })
-    return false, 'invalid_type'
-  end
-
-  local target = tonumber(payload.target)
-  if not target then target = 1 end
-  target = math.floor(target)
-  if target < 1 or target > 100000 then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_target', { result = 'blocked', title = title, target = target })
-    return false, 'invalid_target'
-  end
-
-  local startsAt = normalizeGoalDate(payload.startsAt or payload.starts_at)
-  local endsAt = normalizeGoalDate(payload.endsAt or payload.ends_at)
-  if startsAt == false or endsAt == false then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_dates', { result = 'blocked', title = title })
-    return false, 'invalid_dates'
-  end
-
-  local startKey = dateSortKey(startsAt)
-  local endKey = dateSortKey(endsAt)
-  if startKey and endKey and endKey < startKey then
-    logGoalAudit('org.goal.create.blocked', source, org, 'invalid_dates', { result = 'blocked', title = title })
-    return false, 'invalid_dates'
-  end
-
+function MZOrgService.loadPlayerOrgs(source)
   local player = MZPlayerService.getPlayer(source)
-  local citizenid = player and player.citizenid and tostring(player.citizenid) or nil
-  local charinfo = player and type(player.charinfo) == 'table' and player.charinfo or {}
-  local createdByName = (('%s %s'):format(tostring(charinfo.firstname or ''), tostring(charinfo.lastname or ''))):gsub('^%s+', ''):gsub('%s+$', '')
-  if createdByName == '' then createdByName = GetPlayerName(source) or citizenid or 'unknown' end
+  if not player then return {} end
 
-  local row = MZOrgRepository.createGoal(org, {
-    title = title,
-    description = description,
-    type = goalType or 'manual',
-    status = 'active',
-    target = target,
-    progress = 0,
-    starts_at = startsAt,
-    ends_at = endsAt,
-    created_by_citizenid = citizenid,
-    created_by_name = createdByName
-  })
+  local memberships = MZOrgRepository.getPlayerMemberships(player.citizenid)
+  local result = {}
 
-  if not row then
-    logGoalAudit('org.goal.create.blocked', source, org, 'create_failed', {
-      result = 'blocked',
-      title = title,
-      type = goalType,
-      target = target
-    })
-    return false, 'create_failed'
+  player.job = nil
+  player.gang = nil
+
+  for _, membership in ipairs(memberships or {}) do
+    local resolvedPermissions = resolveOrgPermissions(membership.org_id, membership.grade_id)
+    local permissionList = {}
+    for permission, allowed in pairs(resolvedPermissions) do
+      if allowed == true then permissionList[#permissionList + 1] = permission end
+    end
+    table.sort(permissionList)
+
+    local orgData = {
+      org_id = membership.org_id,
+      orgId = membership.org_id,
+      code = membership.org_code,
+      name = membership.org_name,
+      type = membership.type_code,
+      grade = {
+        id = membership.grade_id,
+        level = membership.grade_level,
+        code = membership.grade_code,
+        name = membership.grade_name,
+        salary = membership.salary
+      },
+      gradeLevel = membership.grade_level,
+      gradeCode = membership.grade_code,
+      gradeName = membership.grade_name,
+      isPrimary = asBool(membership.is_primary),
+      duty = asBool(membership.duty),
+      permissions = resolvedPermissions,
+      capabilities = permissionList
+    }
+
+    result[#result + 1] = orgData
+
+    if orgData.type == 'job' and orgData.isPrimary then player.job = orgData end
+    if orgData.type == 'gang' and orgData.isPrimary then player.gang = orgData end
   end
 
-  local item = normalizeGoalRow(row)
-  logGoalAudit('org.goal.create', source, org, 'success', {
-    result = 'allowed',
-    goalId = item and item.id or row.id,
-    after = item or {},
-    title = title,
-    type = goalType,
-    target = target
-  })
-
-  return true, item
+  player.orgs = result
+  return result
 end
 
-function MZOrgService.hasGradeOrAbove(source, orgCode, minLevel)
+function MZOrgService.getPlayerOrgs(source)
+  local player = MZPlayerService.getPlayer(source)
+  if not player then return {} end
+  if not player.orgs then return MZOrgService.loadPlayerOrgs(source) end
+  return player.orgs or {}
+end
+
+function MZOrgService.getPlayerOrgContext(source)
+  return MZOrgService.getPlayerOrgs(source)
+end
+
+function MZOrgService.hasPermission(source, permission)
+  permission = limitString(permission, 128)
+  if not permission then return false end
+  if isOwner(source) then return true end
+
   local player = MZPlayerService.getPlayer(source)
   if not player then return false end
 
-  for _, org in ipairs(player.orgs or {}) do
-    if org.code == orgCode and org.grade and tonumber(org.grade.level or 0) >= tonumber(minLevel or 0) then
+  local override = hasPlayerOverride(player.citizenid, permission)
+  if override ~= nil then return override == true end
+
+  for _, org in ipairs(MZOrgService.getPlayerOrgs(source) or {}) do
+    if org.permissions and org.permissions[permission] == true then
       return true
     end
   end
 
   return false
+end
+
+function MZOrgService.hasGlobalPermission(source, permission)
+  permission = limitString(permission, 128)
+  if not permission then return false end
+  if isOwner(source) then return true end
+  if isAceAllowed(source, permission) then return true end
+  return MZOrgService.hasPermission(source, permission) == true
+end
+
+function MZOrgService.canOrg(source, orgCode, capability)
+  orgCode = limitString(orgCode, 64)
+  capability = limitString(capability, 128)
+  if not orgCode or not capability then return false end
+  if isOwner(source) then return true end
+
+  local player = MZPlayerService.getPlayer(source)
+  if not player then return false end
+
+  local override = hasPlayerOverride(player.citizenid, capability)
+  if override ~= nil then return override == true end
+
+  local org = getOrgMemberContext(source, orgCode)
+  return org and org.permissions and org.permissions[capability] == true or false
+end
+
+function MZOrgService.hasGradeOrAbove(source, orgCode, minLevel)
+  local org = getOrgMemberContext(source, orgCode)
+  if not org or not org.grade then return false end
+  local level = type(org.grade) == 'table' and tonumber(org.grade.level) or tonumber(org.grade)
+  return (level or 0) >= (tonumber(minLevel) or 0)
+end
+
+function MZOrgService.getOrgByCode(orgCode)
+  orgCode = limitString(orgCode, 64)
+  if not orgCode then return nil end
+  return normalizeOrgRow(MZOrgRepository.getOrgByCode(orgCode))
+end
+
+function MZOrgService.listOrgs(orgTypeCode)
+  local rows = MZOrgRepository.listOrgs(limitString(orgTypeCode, 32))
+  local out = {}
+  for _, row in ipairs(rows or {}) do out[#out + 1] = normalizeOrgRow(row) end
+  return out
+end
+
+function MZOrgService.listOrgMembers(source, orgCode)
+  orgCode = limitString(orgCode, 64)
+  if not orgCode then return false, 'invalid_org' end
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not canViewOrg(source, orgCode) then return false, 'forbidden' end
+
+  local rows = MZOrgRepository.listMembersForOrg(org.id)
+  local out = {}
+  for _, row in ipairs(rows or {}) do out[#out + 1] = normalizeMemberRow(row) end
+  return out
+end
+
+function MZOrgService.getOrgAccessModel(source, orgCode)
+  orgCode = limitString(orgCode, 64)
+  if not orgCode then return false, 'invalid_org' end
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not canViewOrg(source, orgCode) then return false, 'forbidden' end
+
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local permissions = MZOrgRepository.getPermissionsForOrg(org.id)
+  local gradeMap = buildGradeMap(grades)
+  local baseCapabilities = {}
+  local gradeOut = {}
+
+  for _, permission in ipairs(permissions or {}) do
+    if permission.grade_id == nil and asBool(permission.allow) then
+      baseCapabilities[#baseCapabilities + 1] = permission.permission
+    end
+  end
+  table.sort(baseCapabilities)
+
+  for _, grade in ipairs(grades or {}) do
+    local resolved = {}
+    for _, capability in ipairs(baseCapabilities) do resolved[capability] = true end
+    collectInheritedPermissions(grade.id, gradeMap, permissions, resolved)
+
+    local caps = {}
+    for capability, allowed in pairs(resolved) do
+      if allowed then caps[#caps + 1] = capability end
+    end
+    table.sort(caps)
+
+    local inherits = grade.inherits_grade_id and gradeMap[tonumber(grade.inherits_grade_id)] or nil
+    gradeOut[#gradeOut + 1] = {
+      id = grade.id,
+      level = tonumber(grade.level) or 0,
+      code = grade.code,
+      name = grade.name,
+      salary = tonumber(grade.salary) or 0,
+      inheritsLevel = inherits and tonumber(inherits.level) or nil,
+      inheritsCode = inherits and inherits.code or nil,
+      capabilities = caps
+    }
+  end
+
+  local player = MZPlayerService.getPlayer(source)
+  local overrides = {}
+  if player and player.citizenid then
+    for _, row in ipairs(MZOrgRepository.getPlayerOverrides(player.citizenid) or {}) do
+      overrides[#overrides + 1] = {
+        permission = row.permission,
+        allow = asBool(row.allow),
+        expiresAt = row.expires_at
+      }
+    end
+  end
+
+  return {
+    orgCode = org.code,
+    orgName = org.name,
+    type = org.type_code,
+    baseCapabilities = baseCapabilities,
+    grades = gradeOut,
+    playerOverrides = overrides
+  }
+end
+
+function MZOrgService.addMember(citizenid, orgCode, gradeLevel, options, actor)
+  citizenid = limitString(citizenid, 64)
+  orgCode = limitString(orgCode, 64)
+  if not citizenid then return false, 'invalid_target' end
+  if not orgCode then return false, 'invalid_org' end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  local playerRow = getPlayerRowByCitizenId(citizenid)
+  if not playerRow then return false, 'target_not_found' end
+
+  local existingMembership = MZOrgRepository.getPlayerMembership(citizenid, org.id)
+  if existingMembership and asBool(existingMembership.active) then
+    return false, 'already_member'
+  end
+
+  options = type(options) == 'table' and options or {}
+  if gradeLevel then options.gradeLevel = gradeLevel end
+  local grade, gradeErr = resolveGrade(org, options)
+  if not grade then return false, gradeErr or 'invalid_grade' end
+
+  MZOrgRepository.setMembership(citizenid, org.id, grade.id, options.is_primary, options.duty, options.expiresAt)
+  if options.is_primary then
+    MZOrgRepository.setPrimaryMembership(citizenid, org.type_code, org.id)
+  end
+
+  refreshOnlinePlayerByCitizenId(citizenid)
+  logDetailed('orgs', 'org.member.add', {
+    actor = makeActor(actor),
+    target = {
+      type = 'player',
+      id = citizenid,
+      citizenid = citizenid,
+      name = getPlayerNameFromRow(playerRow)
+    },
+    context = {
+      org_code = org.code,
+      org_id = org.id
+    },
+    after = {
+      grade_level = tonumber(grade.level),
+      grade_code = grade.code
+    }
+  })
+
+  return true, {
+    orgCode = org.code,
+    targetCitizenId = citizenid,
+    targetName = getPlayerNameFromRow(playerRow),
+    grade = tonumber(grade.level) or grade.level,
+    gradeLevel = tonumber(grade.level) or grade.level,
+    gradeCode = grade.code,
+    gradeName = grade.name
+  }
+end
+
+function MZOrgService.inviteOrgMemberByCitizenId(source, orgCode, targetCitizenId, options)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  targetCitizenId = limitString(targetCitizenId, 64)
+
+  if not src then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not targetCitizenId then return false, 'invalid_target' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    return false, 'player_not_loaded'
+  end
+
+  if tostring(actor.citizenid) == tostring(targetCitizenId) then
+    return false, 'self_target'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not canManageMembers(src, orgCode) then
+    logBlocked('org.member.invite.blocked', src, orgCode, targetCitizenId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local targetRow = getPlayerRowByCitizenId(targetCitizenId)
+  if not targetRow then return false, 'target_not_found' end
+  local existingMembership = MZOrgRepository.getPlayerMembership(targetCitizenId, org.id)
+  if existingMembership and asBool(existingMembership.active) then return false, 'already_member' end
+
+  local grade, gradeErr, grades = resolveGrade(org, options)
+  if not grade then return false, gradeErr or 'invalid_grade' end
+
+  local allowed, gradeBlock = validateGradeForActor(src, org, grade, grades)
+  if not allowed then
+    logBlocked('org.member.invite.blocked', src, orgCode, targetCitizenId, gradeBlock, {
+      desired_grade_level = tonumber(grade.level),
+      desired_grade_code = grade.code
+    })
+    return false, gradeBlock
+  end
+
+  local ok, dataOrErr = MZOrgService.addMember(targetCitizenId, orgCode, grade.level, {
+    is_primary = true,
+    duty = false
+  }, src)
+  if not ok then return false, dataOrErr end
+
+  logDetailed('orgs', 'org.member.invite', {
+    actor = makeActor(src),
+    target = {
+      type = 'player',
+      id = targetCitizenId,
+      citizenid = targetCitizenId,
+      name = getPlayerNameFromRow(targetRow)
+    },
+    context = {
+      org_code = org.code,
+      org_id = org.id
+    },
+    after = {
+      grade_level = tonumber(grade.level),
+      grade_code = grade.code
+    }
+  })
+
+  return true, dataOrErr
+end
+
+function MZOrgService.inviteOrgMember(source, orgCode, targetSource, options)
+  local target = MZPlayerService.getPlayer(tonumber(targetSource))
+  if not target or not target.citizenid then return false, 'target_not_found' end
+  return MZOrgService.inviteOrgMemberByCitizenId(source, orgCode, target.citizenid, options)
+end
+
+local function validateMemberAction(source, orgCode, targetCitizenId, permissionList)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  targetCitizenId = limitString(targetCitizenId, 64)
+  if not src then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not targetCitizenId then return false, 'invalid_target' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then return false, 'player_not_loaded' end
+  if tostring(actor.citizenid) == tostring(targetCitizenId) then return false, 'self_action' end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not (isOwner(src) or hasStaffManage(src) or hasAnyOrgCapability(src, orgCode, permissionList)) then
+    return false, 'forbidden'
+  end
+
+  local targetMembership = MZOrgRepository.getPlayerMembership(targetCitizenId, org.id)
+  if not targetMembership or not asBool(targetMembership.active) then return false, 'not_member' end
+
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local _, byLevel = buildGradeMap(grades)
+  local targetGrade = MZOrgRepository.getGradeById(targetMembership.grade_id)
+  local actorLevel = actorGradeLevel(src, orgCode)
+  local targetLevel = targetGrade and tonumber(targetGrade.level) or 0
+  local maxLevel = maxGradeLevel(grades) or targetLevel
+
+  if targetLevel >= maxLevel and not hasLeaderPermission(src, orgCode) then
+    return false, 'leader_permission_required'
+  end
+
+  if not isOwner(src) and not hasStaffManage(src) and (not actorLevel or actorLevel <= targetLevel) then
+    return false, 'target_higher_or_equal'
+  end
+
+  return true, {
+    source = src,
+    actor = actor,
+    org = org,
+    targetMembership = targetMembership,
+    targetGrade = targetGrade,
+    targetLevel = targetLevel,
+    actorLevel = actorLevel,
+    maxLevel = maxLevel,
+    grades = grades,
+    gradesByLevel = byLevel
+  }
+end
+
+function MZOrgService.removeOrgMemberSecure(source, orgCode, targetCitizenId)
+  local ok, ctxOrErr = validateMemberAction(source, orgCode, targetCitizenId, { 'members.remove', 'members.kick', 'manage.members' })
+  if not ok then return false, ctxOrErr == 'self_action' and 'self_remove' or ctxOrErr end
+  MZOrgRepository.removeMembership(targetCitizenId, ctxOrErr.org.id)
+  refreshOnlinePlayerByCitizenId(targetCitizenId)
+  logDetailed('orgs', 'org.member.remove', {
+    actor = makeActor(source),
+    target = { type = 'player', id = targetCitizenId, citizenid = targetCitizenId },
+    context = { org_code = ctxOrErr.org.code, org_id = ctxOrErr.org.id },
+    before = { grade_level = ctxOrErr.targetLevel }
+  })
+  return true, { orgCode = ctxOrErr.org.code, targetCitizenId = targetCitizenId, removed = true }
+end
+
+function MZOrgService.removeMember(citizenid, orgCode, actor)
+  return MZOrgService.removeOrgMemberSecure(actor, orgCode, citizenid)
+end
+
+function MZOrgService.promoteOrgMemberSecure(source, orgCode, targetCitizenId)
+  local ok, ctxOrErr = validateMemberAction(source, orgCode, targetCitizenId, { 'members.promote', 'manage.members' })
+  if not ok then return false, ctxOrErr end
+
+  local nextGrade = nil
+  for _, grade in ipairs(ctxOrErr.grades or {}) do
+    local level = tonumber(grade.level)
+    if level and level > ctxOrErr.targetLevel and (not nextGrade or level < tonumber(nextGrade.level)) then
+      nextGrade = grade
+    end
+  end
+
+  if not nextGrade then return false, 'max_grade' end
+  if tonumber(nextGrade.level) >= ctxOrErr.maxLevel and not hasLeaderPermission(source, orgCode) then
+    return false, 'leader_permission_required'
+  end
+  if not isOwner(source) and not hasStaffManage(source) and ctxOrErr.actorLevel and tonumber(nextGrade.level) >= ctxOrErr.actorLevel then
+    return false, 'promotion_above_actor'
+  end
+
+  MZOrgRepository.updateMembershipGrade(targetCitizenId, ctxOrErr.org.id, nextGrade.id)
+  refreshOnlinePlayerByCitizenId(targetCitizenId)
+  return true, {
+    orgCode = ctxOrErr.org.code,
+    targetCitizenId = targetCitizenId,
+    oldGrade = ctxOrErr.targetLevel,
+    newGrade = tonumber(nextGrade.level),
+    grade = tonumber(nextGrade.level),
+    gradeCode = nextGrade.code,
+    gradeName = nextGrade.name
+  }
+end
+
+function MZOrgService.demoteOrgMemberSecure(source, orgCode, targetCitizenId)
+  local ok, ctxOrErr = validateMemberAction(source, orgCode, targetCitizenId, { 'members.demote', 'manage.members' })
+  if not ok then return false, ctxOrErr end
+
+  local prevGrade = nil
+  for _, grade in ipairs(ctxOrErr.grades or {}) do
+    local level = tonumber(grade.level)
+    if level and level < ctxOrErr.targetLevel and (not prevGrade or level > tonumber(prevGrade.level)) then
+      prevGrade = grade
+    end
+  end
+
+  if not prevGrade then return false, 'min_grade' end
+  MZOrgRepository.updateMembershipGrade(targetCitizenId, ctxOrErr.org.id, prevGrade.id)
+  refreshOnlinePlayerByCitizenId(targetCitizenId)
+  return true, {
+    orgCode = ctxOrErr.org.code,
+    targetCitizenId = targetCitizenId,
+    oldGrade = ctxOrErr.targetLevel,
+    newGrade = tonumber(prevGrade.level),
+    grade = tonumber(prevGrade.level),
+    gradeCode = prevGrade.code,
+    gradeName = prevGrade.name
+  }
+end
+
+function MZOrgService.promote(citizenid, orgCode, actor)
+  return MZOrgService.promoteOrgMemberSecure(actor, orgCode, citizenid)
+end
+
+function MZOrgService.demote(citizenid, orgCode, actor)
+  return MZOrgService.demoteOrgMemberSecure(actor, orgCode, citizenid)
+end
+
+function MZOrgService.setDuty(citizenid, orgCode, duty, actor)
+  citizenid = limitString(citizenid, 64)
+  orgCode = limitString(orgCode, 64)
+  local org = orgCode and MZOrgRepository.getOrgByCode(orgCode) or nil
+  if not citizenid then return false, 'invalid_target' end
+  if not org then return false, 'invalid_org' end
+  if not MZOrgRepository.getPlayerMembership(citizenid, org.id) then return false, 'not_member' end
+  MZOrgRepository.setMembershipDuty(citizenid, org.id, duty)
+  refreshOnlinePlayerByCitizenId(citizenid)
+  return true, { orgCode = org.code, targetCitizenId = citizenid, duty = asBool(duty) }
+end
+
+function MZOrgService.setPrimary(citizenid, orgCode, actor)
+  citizenid = limitString(citizenid, 64)
+  orgCode = limitString(orgCode, 64)
+  local org = orgCode and MZOrgRepository.getOrgByCode(orgCode) or nil
+  if not citizenid then return false, 'invalid_target' end
+  if not org then return false, 'invalid_org' end
+  if not MZOrgRepository.getPlayerMembership(citizenid, org.id) then return false, 'not_member' end
+  MZOrgRepository.setPrimaryMembership(citizenid, org.type_code, org.id)
+  refreshOnlinePlayerByCitizenId(citizenid)
+  return true, { orgCode = org.code, targetCitizenId = citizenid, primary = true }
+end
+
+function MZOrgService.setGrade(citizenid, orgCode, gradeLevel, actor)
+  citizenid = limitString(citizenid, 64)
+  orgCode = limitString(orgCode, 64)
+  local org = orgCode and MZOrgRepository.getOrgByCode(orgCode) or nil
+  if not citizenid then return false, 'invalid_target' end
+  if not org then return false, 'invalid_org' end
+  local membership = MZOrgRepository.getPlayerMembership(citizenid, org.id)
+  if not membership then return false, 'not_member' end
+  local grade = MZOrgRepository.getGradeByLevel(org.id, tonumber(gradeLevel))
+  if not grade then return false, 'grade_not_found' end
+  MZOrgRepository.updateMembershipGrade(citizenid, org.id, grade.id)
+  refreshOnlinePlayerByCitizenId(citizenid)
+  return true, { orgCode = org.code, targetCitizenId = citizenid, grade = tonumber(grade.level), gradeCode = grade.code }
+end
+
+function MZOrgService.setLeaderByCitizenId(source, orgCode, targetCitizenId, options)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  targetCitizenId = limitString(targetCitizenId, 64)
+  options = type(options) == 'table' and options or {}
+
+  if not src then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not targetCitizenId then return false, 'invalid_target' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if tostring(actor.citizenid) == tostring(targetCitizenId) and not isOwner(src) then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'forbidden', {
+      self_target = true
+    })
+    return false, 'forbidden'
+  end
+
+  if not canStaffSetLeader(src, orgCode) then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local targetRow = getPlayerRowByCitizenId(targetCitizenId)
+  if not targetRow then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'target_not_found')
+    return false, 'target_not_found'
+  end
+
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local grade = topGrade(grades)
+  if not grade then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'top_grade_not_found')
+    return false, 'top_grade_not_found'
+  end
+
+  local beforeMembership = MZOrgRepository.getPlayerMembership(targetCitizenId, org.id)
+  local beforeGrade = beforeMembership and beforeMembership.grade_id and MZOrgRepository.getGradeById(beforeMembership.grade_id) or nil
+  local affectedOk = true
+
+  if beforeMembership and asBool(beforeMembership.active) then
+    MZOrgRepository.updateMembershipGrade(targetCitizenId, org.id, grade.id)
+    MZOrgRepository.setPrimaryMembership(targetCitizenId, org.type_code, org.id)
+  else
+    MZOrgRepository.setMembership(targetCitizenId, org.id, grade.id, true, false, nil)
+    MZOrgRepository.setPrimaryMembership(targetCitizenId, org.type_code, org.id)
+  end
+
+  local afterMembership = MZOrgRepository.getPlayerMembership(targetCitizenId, org.id)
+  if not afterMembership or tonumber(afterMembership.grade_id) ~= tonumber(grade.id) or not asBool(afterMembership.active) then
+    affectedOk = false
+  end
+
+  if not affectedOk then
+    logBlocked('org.member.set_leader.blocked', src, orgCode, targetCitizenId, 'set_leader_failed', {
+      top_grade_level = tonumber(grade.level),
+      top_grade_code = grade.code
+    })
+    return false, 'set_leader_failed'
+  end
+
+  refreshOnlinePlayerByCitizenId(targetCitizenId)
+
+  local reason = limitString(options.reason, 255)
+  logDetailed('orgs', 'org.member.set_leader', {
+    actor = makeActor(src),
+    target = {
+      type = 'player',
+      id = targetCitizenId,
+      citizenid = targetCitizenId,
+      name = getPlayerNameFromRow(targetRow)
+    },
+    context = {
+      org_code = org.code,
+      org_id = org.id
+    },
+    before = {
+      was_member = beforeMembership and asBool(beforeMembership.active) or false,
+      grade_level = beforeGrade and tonumber(beforeGrade.level) or nil,
+      grade_code = beforeGrade and beforeGrade.code or nil
+    },
+    after = {
+      grade_level = tonumber(grade.level),
+      grade_code = grade.code,
+      is_primary = true
+    },
+    meta = {
+      reason = reason,
+      top_grade_level = tonumber(grade.level),
+      top_grade_code = grade.code
+    }
+  })
+
+  return true, {
+    orgCode = org.code,
+    orgName = org.name,
+    targetCitizenId = targetCitizenId,
+    targetName = getPlayerNameFromRow(targetRow),
+    wasMember = beforeMembership and asBool(beforeMembership.active) or false,
+    oldGrade = beforeGrade and tonumber(beforeGrade.level) or nil,
+    oldGradeCode = beforeGrade and beforeGrade.code or nil,
+    grade = tonumber(grade.level),
+    gradeLevel = tonumber(grade.level),
+    gradeCode = grade.code,
+    gradeName = grade.name,
+    topGradeLevel = tonumber(grade.level),
+    topGradeCode = grade.code
+  }
+end
+
+function MZOrgService.listOrgGoals(source, filters)
+  filters = type(filters) == 'table' and filters or {}
+  local orgCode = limitString(filters.orgCode or filters.org_code, 64)
+  if orgCode then
+    local org = MZOrgRepository.getOrgByCode(orgCode)
+    if not org then return false, 'invalid_org' end
+    if not (isOwner(source) or hasStaffView(source) or hasAnyOrgCapability(source, orgCode, { 'goals.view', 'goals.manage', 'org.view' })) then
+      return false, 'forbidden'
+    end
+  elseif not isOwner(source) and not hasStaffView(source) then
+    return false, 'forbidden'
+  end
+
+  local rows = MZOrgRepository.listGoals({
+    orgCode = orgCode,
+    status = limitString(filters.status, 32),
+    type = limitString(filters.type, 32),
+    search = limitString(filters.search, 80),
+    limit = normalizeNumber(filters.limit, 50, 1, 100),
+    offset = normalizeNumber(filters.offset, 0, 0, 10000)
+  })
+
+  local out = {}
+  for _, row in ipairs(rows or {}) do out[#out + 1] = normalizeGoalRow(row) end
+  return out
+end
+
+function MZOrgService.getOrgGoal(source, goalId)
+  goalId = tonumber(goalId)
+  if not goalId then return nil end
+  local row = MZOrgRepository.getGoalById(goalId)
+  if not row then return nil end
+  if not (isOwner(source) or hasStaffView(source) or hasAnyOrgCapability(source, row.org_code, { 'goals.view', 'goals.manage', 'org.view' })) then
+    return nil
+  end
+  return normalizeGoalRow(row)
+end
+
+function MZOrgService.createOrgGoal(source, orgCode, payload)
+  orgCode = limitString(orgCode, 64)
+  payload = type(payload) == 'table' and payload or {}
+  if not orgCode then return false, 'invalid_org' end
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not (isOwner(source) or hasStaffManage(source) or hasAnyOrgCapability(source, orgCode, { 'goals.manage', 'manage.goals' })) then
+    return false, 'forbidden'
+  end
+
+  local title = limitString(payload.title, 120)
+  if not title then return false, 'invalid_title' end
+  local target = normalizeNumber(payload.target, 1, 1, 100000)
+  local actor = MZPlayerService.getPlayer(source)
+  local row = MZOrgRepository.createGoal(org, {
+    title = title,
+    description = limitString(payload.description, 1000),
+    type = limitString(payload.type, 32) or 'manual',
+    status = 'active',
+    target = target,
+    progress = 0,
+    starts_at = limitString(payload.startsAt or payload.starts_at, 32),
+    ends_at = limitString(payload.endsAt or payload.ends_at, 32),
+    created_by_citizenid = actor and actor.citizenid or nil,
+    created_by_name = getPlayerDisplayName(actor, source)
+  })
+
+  if not row then return false, 'create_failed' end
+  logDetailed('orgs', 'org.goal.create', {
+    actor = makeActor(source),
+    target = { type = 'org_goal', id = tostring(row.id) },
+    context = { org_code = orgCode },
+    after = { title = title, target = target, type = payload.type or 'manual' }
+  })
+  return true, normalizeGoalRow(row)
+end
+
+function MZOrgService.createRecruitment(source, orgCode, payload)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  payload = type(payload) == 'table' and payload or {}
+  local targetCitizenId = limitString(payload.citizenid or payload.targetCitizenId or payload.target_citizenid, 64)
+
+  if not src then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not targetCitizenId then return false, 'invalid_target' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then return false, 'player_not_loaded' end
+  if tostring(actor.citizenid) == tostring(targetCitizenId) then return false, 'self_target' end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  if not canManageRecruitment(src, orgCode) then
+    logBlocked('org.recruitment.create.blocked', src, orgCode, targetCitizenId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local targetRow = getPlayerRowByCitizenId(targetCitizenId)
+  if not targetRow then return false, 'target_not_found' end
+  local existingMembership = MZOrgRepository.getPlayerMembership(targetCitizenId, org.id)
+  if existingMembership and asBool(existingMembership.active) then return false, 'already_member' end
+  if MZOrgRepository.findPendingRecruitment(orgCode, targetCitizenId) then return false, 'already_pending' end
+
+  local grade = nil
+  local gradeErr = nil
+  if payload.desiredGradeLevel or payload.gradeLevel or payload.desiredGradeCode or payload.gradeCode then
+    grade, gradeErr = resolveGrade(org, {
+      gradeLevel = payload.desiredGradeLevel or payload.gradeLevel,
+      gradeCode = payload.desiredGradeCode or payload.gradeCode
+    })
+    if not grade then return false, gradeErr or 'invalid_grade' end
+    local allowed, block = validateGradeForActor(src, org, grade)
+    if not allowed then return false, block end
+  end
+
+  local row = MZOrgRepository.createRecruitmentApplication({
+    org_code = orgCode,
+    target_citizenid = targetCitizenId,
+    target_name = getPlayerNameFromRow(targetRow),
+    status = 'pending',
+    desired_grade_level = grade and tonumber(grade.level) or nil,
+    desired_grade_code = grade and grade.code or nil,
+    note = limitString(payload.note, 1000),
+    created_by_citizenid = actor.citizenid,
+    created_by_name = getPlayerDisplayName(actor, src),
+    metadata = {
+      created_source = src
+    }
+  })
+
+  if not row then return false, 'create_failed' end
+  logDetailed('orgs', 'org.recruitment.create', {
+    actor = makeActor(src),
+    target = { type = 'player', id = targetCitizenId, citizenid = targetCitizenId, name = getPlayerNameFromRow(targetRow) },
+    context = { org_code = orgCode, recruitment_id = row.id },
+    after = { status = 'pending', desired_grade_level = grade and tonumber(grade.level) or nil, desired_grade_code = grade and grade.code or nil }
+  })
+
+  return true, normalizeRecruitmentRow(row)
+end
+
+function MZOrgService.listRecruitment(source, orgCode, filters)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  filters = type(filters) == 'table' and filters or {}
+  if not src then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not MZOrgRepository.getOrgByCode(orgCode) then return false, 'invalid_org' end
+  if not canViewRecruitment(src, orgCode) then return false, 'forbidden' end
+
+  local rows = MZOrgRepository.listRecruitment({
+    orgCode = orgCode,
+    status = limitString(filters.status, 32),
+    search = limitString(filters.search, 80),
+    limit = normalizeNumber(filters.limit, 50, 1, 100),
+    offset = normalizeNumber(filters.offset, 0, 0, 10000)
+  })
+
+  local out = {}
+  for _, row in ipairs(rows or {}) do out[#out + 1] = normalizeRecruitmentRow(row) end
+  return out
+end
+
+function MZOrgService.getRecruitment(source, recruitmentId)
+  local src = normalizeSource(source)
+  local id = tonumber(recruitmentId)
+  if not src then return false, 'invalid_source' end
+  if not id then return false, 'invalid_recruitment' end
+
+  local row = MZOrgRepository.getRecruitmentById(id)
+  if not row then return false, 'recruitment_not_found' end
+  if not canViewRecruitment(src, row.org_code) then return false, 'forbidden' end
+  return normalizeRecruitmentRow(row)
+end
+
+function MZOrgService.approveRecruitment(source, recruitmentId, options)
+  local src = normalizeSource(source)
+  local id = tonumber(recruitmentId)
+  options = type(options) == 'table' and options or {}
+  if not src then return false, 'invalid_source' end
+  if not id then return false, 'invalid_recruitment' end
+
+  local row = MZOrgRepository.getRecruitmentById(id)
+  if not row then return false, 'recruitment_not_found' end
+  if row.status ~= 'pending' then return false, 'invalid_status' end
+
+  local org = MZOrgRepository.getOrgByCode(row.org_code)
+  if not org then return false, 'invalid_org' end
+  if not canManageRecruitment(src, row.org_code) then
+    logBlocked('org.recruitment.approve.blocked', src, row.org_code, row.target_citizenid, 'forbidden', { recruitment_id = id })
+    return false, 'forbidden'
+  end
+
+  local targetRow = getPlayerRowByCitizenId(row.target_citizenid)
+  if not targetRow then return false, 'target_not_found' end
+  local existingMembership = MZOrgRepository.getPlayerMembership(row.target_citizenid, org.id)
+  if existingMembership and asBool(existingMembership.active) then return false, 'already_member' end
+
+  local grade, gradeErr, grades = resolveGrade(org, {
+    gradeLevel = options.gradeLevel or options.grade_level or row.desired_grade_level,
+    gradeCode = options.gradeCode or options.grade_code or row.desired_grade_code
+  })
+  if not grade then return false, gradeErr or 'invalid_grade' end
+
+  local allowed, block = validateGradeForActor(src, org, grade, grades)
+  if not allowed then
+    logBlocked('org.recruitment.approve.blocked', src, row.org_code, row.target_citizenid, block, { recruitment_id = id })
+    return false, block
+  end
+
+  local addOk, addDataOrErr = MZOrgService.addMember(row.target_citizenid, row.org_code, grade.level, {
+    is_primary = true,
+    duty = false
+  }, src)
+  if not addOk then return false, addDataOrErr or 'approve_failed' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  local updated = MZOrgRepository.updateRecruitmentStatus(id, 'approved', {
+    reviewed_by_citizenid = actor and actor.citizenid or nil,
+    reviewed_by_name = getPlayerDisplayName(actor, src),
+    decision_note = limitString(options.note or options.decisionNote, 1000),
+    metadata = {
+      approved_grade_level = tonumber(grade.level),
+      approved_grade_code = grade.code
+    }
+  })
+
+  logDetailed('orgs', 'org.recruitment.approve', {
+    actor = makeActor(src),
+    target = { type = 'player', id = row.target_citizenid, citizenid = row.target_citizenid, name = getPlayerNameFromRow(targetRow) },
+    context = { org_code = row.org_code, recruitment_id = id },
+    before = { status = 'pending' },
+    after = { status = 'approved', grade_level = tonumber(grade.level), grade_code = grade.code }
+  })
+
+  return true, {
+    recruitment = normalizeRecruitmentRow(updated),
+    member = addDataOrErr
+  }
+end
+
+function MZOrgService.rejectRecruitment(source, recruitmentId, reason)
+  local src = normalizeSource(source)
+  local id = tonumber(recruitmentId)
+  if not src then return false, 'invalid_source' end
+  if not id then return false, 'invalid_recruitment' end
+
+  local row = MZOrgRepository.getRecruitmentById(id)
+  if not row then return false, 'recruitment_not_found' end
+  if row.status ~= 'pending' then return false, 'invalid_status' end
+  if not canManageRecruitment(src, row.org_code) then
+    logBlocked('org.recruitment.reject.blocked', src, row.org_code, row.target_citizenid, 'forbidden', { recruitment_id = id })
+    return false, 'forbidden'
+  end
+
+  local actor = MZPlayerService.getPlayer(src)
+  local updated = MZOrgRepository.updateRecruitmentStatus(id, 'rejected', {
+    reviewed_by_citizenid = actor and actor.citizenid or nil,
+    reviewed_by_name = getPlayerDisplayName(actor, src),
+    decision_note = limitString(reason, 1000),
+    metadata = {}
+  })
+
+  logDetailed('orgs', 'org.recruitment.reject', {
+    actor = makeActor(src),
+    target = { type = 'player', id = row.target_citizenid, citizenid = row.target_citizenid },
+    context = { org_code = row.org_code, recruitment_id = id },
+    before = { status = 'pending' },
+    after = { status = 'rejected' },
+    meta = { reason = limitString(reason, 1000) }
+  })
+
+  return true, normalizeRecruitmentRow(updated)
+end
+
+function MZOrgService.cancelRecruitment(source, recruitmentId, reason)
+  local src = normalizeSource(source)
+  local id = tonumber(recruitmentId)
+  if not src then return false, 'invalid_source' end
+  if not id then return false, 'invalid_recruitment' end
+
+  local row = MZOrgRepository.getRecruitmentById(id)
+  if not row then return false, 'recruitment_not_found' end
+  if row.status ~= 'pending' then return false, 'invalid_status' end
+  if not canManageRecruitment(src, row.org_code) then return false, 'forbidden' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  local updated = MZOrgRepository.updateRecruitmentStatus(id, 'cancelled', {
+    reviewed_by_citizenid = actor and actor.citizenid or nil,
+    reviewed_by_name = getPlayerDisplayName(actor, src),
+    decision_note = limitString(reason, 1000),
+    metadata = {}
+  })
+
+  logDetailed('orgs', 'org.recruitment.cancel', {
+    actor = makeActor(src),
+    target = { type = 'player', id = row.target_citizenid, citizenid = row.target_citizenid },
+    context = { org_code = row.org_code, recruitment_id = id },
+    before = { status = 'pending' },
+    after = { status = 'cancelled' },
+    meta = { reason = limitString(reason, 1000) }
+  })
+
+  return true, normalizeRecruitmentRow(updated)
+end
+
+function MZOrgService.createOrg(data, actor)
+  return false, 'not_implemented'
+end
+
+function MZOrgService.createGrade(orgCode, data, actor)
+  return false, 'not_implemented'
+end
+
+function MZOrgService.setOrgPermission(orgCode, permission, allow, actor)
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  MZOrgRepository.setPermission(org.id, nil, permission, allow)
+  return true
+end
+
+function MZOrgService.setGradePermission(orgCode, gradeLevel, permission, allow, actor)
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  local grade = MZOrgRepository.getGradeByLevel(org.id, tonumber(gradeLevel))
+  if not grade then return false, 'grade_not_found' end
+  MZOrgRepository.setPermission(org.id, grade.id, permission, allow)
+  return true
+end
+
+function MZOrgService.setPlayerPermission(citizenid, permission, allow, expiresAt, actor)
+  citizenid = limitString(citizenid, 64)
+  permission = limitString(permission, 128)
+  if not citizenid then return false, 'invalid_target' end
+  if not permission then return false, 'invalid_permission' end
+  MZOrgRepository.setPlayerOverride(citizenid, permission, allow, expiresAt)
+  return true
+end
+
+function MZOrgService.removePlayerPermission(citizenid, permission, actor)
+  citizenid = limitString(citizenid, 64)
+  permission = limitString(permission, 128)
+  if not citizenid then return false, 'invalid_target' end
+  if not permission then return false, 'invalid_permission' end
+  MZOrgRepository.removePlayerOverride(citizenid, permission)
+  return true
 end

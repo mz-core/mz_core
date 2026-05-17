@@ -34,8 +34,8 @@ local function canViewOrgAccount(source, orgCode)
     return true
   end
 
-  if MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.panel.open') == true
+  if MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
     or MZOrgService.hasGlobalPermission(source, 'staff.logs.view') == true then
     return true
   end
@@ -56,6 +56,7 @@ local function canManageOrgAccount(source, orgCode, capability)
 
   return MZOrgService.canOrg(source, orgCode, capability) == true
     or MZOrgService.canOrg(source, orgCode, 'account.manage') == true
+    or MZOrgService.canOrg(source, orgCode, 'manage.account') == true
 end
 
 local function normalizeReason(value)

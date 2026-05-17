@@ -360,6 +360,103 @@ function MZOrgRepository.listGoals(filters)
   return MySQL.query.await(sql, params) or {}
 end
 
+function MZOrgRepository.createRecruitmentApplication(data)
+  local insertId = MySQL.insert.await([[
+    INSERT INTO mz_org_recruitment (
+      org_code, target_citizenid, target_name, status,
+      desired_grade_level, desired_grade_code, note,
+      created_by_citizenid, created_by_name, metadata_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ]], {
+    data.org_code,
+    data.target_citizenid,
+    data.target_name,
+    data.status or 'pending',
+    data.desired_grade_level,
+    data.desired_grade_code,
+    data.note,
+    data.created_by_citizenid,
+    data.created_by_name,
+    MZUtils.jsonEncode(data.metadata or {})
+  })
+
+  return insertId and MZOrgRepository.getRecruitmentById(insertId) or nil
+end
+
+function MZOrgRepository.getRecruitmentById(id)
+  return MySQL.single.await([[
+    SELECT *
+    FROM mz_org_recruitment
+    WHERE id = ?
+    LIMIT 1
+  ]], { id })
+end
+
+function MZOrgRepository.findPendingRecruitment(orgCode, targetCitizenId)
+  return MySQL.single.await([[
+    SELECT *
+    FROM mz_org_recruitment
+    WHERE org_code = ? AND target_citizenid = ? AND status = 'pending'
+    ORDER BY id DESC
+    LIMIT 1
+  ]], { orgCode, targetCitizenId })
+end
+
+function MZOrgRepository.listRecruitment(filters)
+  filters = type(filters) == 'table' and filters or {}
+  local sql = 'SELECT * FROM mz_org_recruitment WHERE 1 = 1'
+  local params = {}
+
+  if filters.orgCode then
+    sql = sql .. ' AND org_code = ?'
+    params[#params + 1] = filters.orgCode
+  end
+
+  if filters.status then
+    sql = sql .. ' AND status = ?'
+    params[#params + 1] = filters.status
+  end
+
+  if filters.search then
+    sql = sql .. ' AND (target_citizenid LIKE ? OR target_name LIKE ? OR note LIKE ?)'
+    local like = '%' .. filters.search .. '%'
+    params[#params + 1] = like
+    params[#params + 1] = like
+    params[#params + 1] = like
+  end
+
+  sql = sql .. ' ORDER BY created_at DESC LIMIT ? OFFSET ?'
+  params[#params + 1] = tonumber(filters.limit) or 50
+  params[#params + 1] = tonumber(filters.offset) or 0
+
+  return MySQL.query.await(sql, params) or {}
+end
+
+function MZOrgRepository.updateRecruitmentStatus(id, status, data)
+  data = type(data) == 'table' and data or {}
+
+  MySQL.update.await([[
+    UPDATE mz_org_recruitment
+    SET status = ?,
+        reviewed_by_citizenid = ?,
+        reviewed_by_name = ?,
+        reviewed_at = NOW(),
+        decision_note = ?,
+        metadata_json = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  ]], {
+    status,
+    data.reviewed_by_citizenid,
+    data.reviewed_by_name,
+    data.decision_note,
+    MZUtils.jsonEncode(data.metadata or {}),
+    id
+  })
+
+  return MZOrgRepository.getRecruitmentById(id)
+end
+
 function MZOrgRepository.getPlayerOverrides(citizenid)
   return MySQL.query.await([[
     SELECT * FROM mz_player_permissions

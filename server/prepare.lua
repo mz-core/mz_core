@@ -372,6 +372,30 @@ local statements = {
     KEY idx_mz_org_goals_status (status)
   )]],
 
+  [[CREATE TABLE IF NOT EXISTS mz_org_recruitment (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    org_code VARCHAR(64) NOT NULL,
+    target_citizenid VARCHAR(64) NOT NULL,
+    target_name VARCHAR(120) NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'pending',
+    desired_grade_level INT NULL,
+    desired_grade_code VARCHAR(64) NULL,
+    note TEXT NULL,
+    created_by_citizenid VARCHAR(64) NULL,
+    created_by_name VARCHAR(120) NULL,
+    reviewed_by_citizenid VARCHAR(64) NULL,
+    reviewed_by_name VARCHAR(120) NULL,
+    reviewed_at DATETIME NULL,
+    decision_note TEXT NULL,
+    metadata_json LONGTEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_mz_org_recruitment_org_code (org_code),
+    KEY idx_mz_org_recruitment_target (target_citizenid),
+    KEY idx_mz_org_recruitment_status (status),
+    KEY idx_mz_org_recruitment_created_at (created_at)
+  )]],
+
   [[CREATE TABLE IF NOT EXISTS mz_logs (
     id INT AUTO_INCREMENT PRIMARY KEY,
     scope VARCHAR(32) NOT NULL,

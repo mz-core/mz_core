@@ -38,6 +38,30 @@ exports('CreateOrgGoal', function(source, orgCode, payload)
   return MZOrgService.createOrgGoal(source, orgCode, payload)
 end)
 
+exports('CreateOrgRecruitment', function(source, orgCode, payload)
+  return MZOrgService.createRecruitment(source, orgCode, payload)
+end)
+
+exports('ListOrgRecruitment', function(source, orgCode, filters)
+  return MZOrgService.listRecruitment(source, orgCode, filters)
+end)
+
+exports('GetOrgRecruitment', function(source, recruitmentId)
+  return MZOrgService.getRecruitment(source, recruitmentId)
+end)
+
+exports('ApproveOrgRecruitment', function(source, recruitmentId, options)
+  return MZOrgService.approveRecruitment(source, recruitmentId, options)
+end)
+
+exports('RejectOrgRecruitment', function(source, recruitmentId, reason)
+  return MZOrgService.rejectRecruitment(source, recruitmentId, reason)
+end)
+
+exports('CancelOrgRecruitment', function(source, recruitmentId, reason)
+  return MZOrgService.cancelRecruitment(source, recruitmentId, reason)
+end)
+
 exports('HasGradeOrAbove', function(source, orgCode, minLevel)
   return MZOrgService.hasGradeOrAbove(source, orgCode, minLevel)
 end)
@@ -74,6 +98,10 @@ exports('InviteOrgMember', function(source, orgCode, targetSource, options)
   return MZOrgService.inviteOrgMember(source, orgCode, targetSource, options)
 end)
 
+exports('InviteOrgMemberByCitizenId', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.inviteOrgMemberByCitizenId(source, orgCode, targetCitizenId, options)
+end)
+
 exports('RemoveMemberFromOrg', function(citizenid, orgCode, actor)
   return MZOrgService.removeMember(citizenid, orgCode, actor)
 end)
@@ -100,6 +128,10 @@ end)
 
 exports('SetOrgMemberGrade', function(citizenid, orgCode, gradeLevel, actor)
   return MZOrgService.setGrade(citizenid, orgCode, gradeLevel, actor)
+end)
+
+exports('SetOrgLeaderByCitizenId', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.setLeaderByCitizenId(source, orgCode, targetCitizenId, options)
 end)
 
 exports('PromoteOrgMember', function(citizenid, orgCode, actor)

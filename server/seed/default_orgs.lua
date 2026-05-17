@@ -343,13 +343,17 @@ local defaultOrgs = {
 
       [7] = {
         'account.view',
+        'account.deposit',
         'recruitment.manage',
+        'goals.manage',
         'manage.goals',
         'manage.team'
       },
 
       [8] = {
         'manage.members',
+        'account.withdraw',
+        'account.manage',
         'manage.account',
         'logs.view',
         'boss.actions'
@@ -358,13 +362,16 @@ local defaultOrgs = {
       [9] = {
         'manage.permissions',
         'org.settings',
+        'account.manage',
         'manage.account',
         'highcommand'
       },
 
       [10] = {
         'manage.permissions',
+        'account.manage',
         'manage.account',
+        'members.set_leader',
         'org.settings',
         'boss.actions',
         'command.full'
@@ -468,7 +475,9 @@ local defaultOrgs = {
       },
       [4] = {
         'manage.members',
+        'account.manage',
         'manage.account',
+        'members.set_leader',
         'boss.actions'
       }
     }
@@ -490,6 +499,7 @@ local defaultOrgs = {
     },
     grade_permissions = {
       [1] = {
+        'staff.orgs.view',
         'staff.report.view'
       },
       [2] = {
@@ -499,7 +509,9 @@ local defaultOrgs = {
       [3] = {
         'staff.ban',
         'staff.teleport',
-        'staff.orgs.manage'
+        'staff.logs.view',
+        'staff.orgs.manage',
+        'staff.orgs.set_leader'
       }
     }
   },
