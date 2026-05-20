@@ -78,6 +78,42 @@ exports('CreateOrgFromTemplate', function(source, payload)
   return MZOrgService.createOrgFromTemplate(source, payload)
 end)
 
+exports('UpdateOrgBasicInfo', function(source, orgCode, payload)
+  return MZOrgService.updateOrgBasicInfo(source, orgCode, payload)
+end)
+
+exports('CreateOrgGrade', function(source, orgCode, payload)
+  return MZOrgService.createOrgGrade(source, orgCode, payload)
+end)
+
+exports('UpdateOrgGradeBasic', function(source, orgCode, gradeId, payload)
+  return MZOrgService.updateOrgGradeBasic(source, orgCode, gradeId, payload)
+end)
+
+exports('ArchiveOrg', function(source, orgCode, reason)
+  return MZOrgService.archiveOrg(source, orgCode, reason)
+end)
+
+exports('ReactivateOrg', function(source, orgCode, reason)
+  return MZOrgService.reactivateOrg(source, orgCode, reason)
+end)
+
+exports('DisableOrgGrade', function(source, orgCode, gradeId, reason)
+  return MZOrgService.disableOrgGrade(source, orgCode, gradeId, reason)
+end)
+
+exports('ReactivateOrgGrade', function(source, orgCode, gradeId, reason)
+  return MZOrgService.reactivateOrgGrade(source, orgCode, gradeId, reason)
+end)
+
+exports('AddOrgGradePermission', function(source, orgCode, gradeId, permission, reason)
+  return MZOrgService.addOrgGradePermission(source, orgCode, gradeId, permission, reason)
+end)
+
+exports('RemoveOrgGradePermission', function(source, orgCode, gradeId, permission, reason)
+  return MZOrgService.removeOrgGradePermission(source, orgCode, gradeId, permission, reason)
+end)
+
 exports('CreateOrg', function(data, actor)
   return MZOrgService.createOrg(data, actor)
 end)

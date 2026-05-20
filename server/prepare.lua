@@ -204,6 +204,7 @@ local statements = {
     salary BIGINT NOT NULL DEFAULT 0,
     inherits_grade_id INT NULL,
     priority INT NOT NULL DEFAULT 0,
+    active TINYINT(1) NOT NULL DEFAULT 1,
     config_json LONGTEXT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -523,6 +524,7 @@ local function runPrepare()
     -- migração defensiva para bancos antigos
     ensureColumn('mz_inventory_items', 'instance_uid', 'instance_uid VARCHAR(64) NULL')
     ensureColumn('mz_player_vehicles', 'metadata_json', 'metadata_json LONGTEXT NULL')
+    ensureColumn('mz_org_grades', 'active', 'active TINYINT(1) NOT NULL DEFAULT 1')
 
     runPrepareQuery('ensure_mz_vehicle_world_state', [[
       CREATE TABLE IF NOT EXISTS mz_vehicle_world_state (

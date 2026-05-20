@@ -268,6 +268,293 @@ local function canCreateOrgs(source)
     or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
 end
 
+local function canUpdateOrgBasicInfo(source)
+  return isOwner(source)
+    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
+end
+
+local OfficialGradePermissions = {
+  -- Org geral
+  'org.view',
+
+  -- Membros
+  'members.view', 'members.invite', 'members.remove', 'members.promote',
+  'members.demote', 'members.set_leader', 'manage.members',
+
+  -- Banco
+  'account.view', 'account.deposit', 'account.withdraw', 'account.manage',
+  'manage.account',
+
+  -- Metas
+  'goals.view', 'goals.manage', 'manage.goals',
+
+  -- Recrutamento
+  'recruitment.view', 'recruitment.manage',
+
+  -- Logs
+  'logs.view',
+
+  -- Staff/admin
+  'staff.panel.open', 'staff.orgs.view', 'staff.orgs.manage',
+  'staff.orgs.create', 'staff.orgs.set_leader', 'staff.members.invite',
+  'staff.members.remove', 'staff.members.promote', 'staff.members.demote',
+  'staff.staff.manage', 'staff.logs.view',
+
+  -- Aliases legados e dominio dos seeds
+  'members.kick', 'members.suspend', 'account.transfer', 'manage.permissions',
+  'radio.use', 'tablet.open', 'mdt.open', 'storage.open', 'storage.deposit',
+  'storage.withdraw', 'storage.manage', 'armory.basic', 'vehicle.basic',
+  'vehicle.medium', 'vehicle.advanced', 'vehicle.manage', 'patrol.basic',
+  'patrol.lead', 'reports.approve', 'manage.team', 'boss.actions',
+  'org.settings', 'highcommand', 'command.full',
+
+  -- Staff legado/dominio
+  'staff.report.view', 'staff.kick', 'staff.spectate', 'staff.ban',
+  'staff.teleport', 'staff.players.manage',
+
+  -- VIP e dominios
+  'vip.chat.tag', 'vip.kit.bronze', 'vip.kit.silver', 'vip.kit.gold',
+  'ambulance.radio.use', 'ambulance.tablet.open', 'ambulance.medkit.basic',
+  'ambulance.revive.basic', 'ambulance.revive.advanced', 'ambulance.vehicle.basic',
+  'ambulance.manage.team', 'mechanic.tablet.open', 'mechanic.repair.basic',
+  'mechanic.repair.advanced', 'mechanic.tow.use', 'mechanic.manage.team',
+  'mechanic.boss.actions'
+}
+
+local OfficialGradePermissionSet = {}
+for _, permission in ipairs(OfficialGradePermissions) do
+  OfficialGradePermissionSet[permission] = true
+end
+
+local function normalizeOrgGradePermission(value)
+  value = limitString(value, 128)
+  if not value then return nil end
+  value = value:lower()
+  if not OfficialGradePermissionSet[value] then return nil end
+  return value
+end
+
+local function isStaffPermission(permission)
+  return type(permission) == 'string' and permission:match('^staff%.') ~= nil
+end
+
+local function validateGradePermissionChange(source, org, orgCode, permission)
+  if not permission then return false, 'invalid_permission' end
+
+  if isStaffPermission(permission) then
+    if tostring(org.type_code or '') ~= 'staff' then
+      return false, 'permission_not_allowed_for_org_type'
+    end
+
+    if not isOwner(source) then
+      return false, 'sensitive_permission_requires_owner'
+    end
+  end
+
+  if permission == 'members.set_leader' and not canStaffSetLeader(source, orgCode) then
+    return false, 'leader_permission_required'
+  end
+
+  return true
+end
+
+local function normalizeOrgBasicName(value)
+  value = limitString(value, 120)
+  if not value then return nil end
+  if #value < 2 then return nil end
+  return value
+end
+
+local function normalizeOrgBasicStatus(value, currentOrg)
+  value = limitString(value, 32)
+  if not value then
+    return {
+      status = (asBool(currentOrg.active) and (asBool(currentOrg.is_public) and 'public' or 'private') or 'inactive'),
+      is_public = asBool(currentOrg.is_public),
+      active = asBool(currentOrg.active)
+    }
+  end
+
+  value = value:lower()
+  if value == 'active' then value = 'private' end
+
+  if value == 'public' then
+    return { status = 'public', is_public = true, active = true }
+  end
+
+  if value == 'private' then
+    return { status = 'private', is_public = false, active = true }
+  end
+
+  if value == 'inactive' then
+    return { status = 'inactive', is_public = false, active = false }
+  end
+
+  return nil
+end
+
+local function logOrgUpdateBasicBlocked(source, orgCode, reason, meta)
+  logDetailed('orgs', 'org.update_basic.blocked', {
+    actor = makeActor(source),
+    target = {
+      type = 'org',
+      id = tostring(orgCode or 'unknown'),
+      code = orgCode
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
+end
+
+local function logOrgArchiveBlocked(action, source, orgCode, reason, meta)
+  logDetailed('orgs', action, {
+    actor = makeActor(source),
+    target = {
+      type = 'org',
+      id = tostring(orgCode or 'unknown'),
+      code = orgCode
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
+end
+
+local function logOrgGradeBlocked(action, source, orgCode, gradeId, reason, meta)
+  logDetailed('orgs', action, {
+    actor = makeActor(source),
+    target = {
+      type = 'org_grade',
+      id = tostring(gradeId or 'unknown')
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
+end
+
+local function logOrgGradePermissionBlocked(action, source, orgCode, gradeId, permission, reason, meta)
+  logDetailed('orgs', action, {
+    actor = makeActor(source),
+    target = {
+      type = 'org_grade_permission',
+      id = tostring(gradeId or 'unknown'),
+      permission = permission
+    },
+    context = {
+      org_code = orgCode
+    },
+    meta = {
+      reason = reason,
+      extra = meta or {}
+    }
+  })
+end
+
+local function directPermissionSnapshot(orgId, gradeId)
+  local out = {}
+  for _, row in ipairs(MZOrgRepository.listOrgGradePermissions(orgId, gradeId) or {}) do
+    out[#out + 1] = row.permission
+  end
+  table.sort(out)
+  return out
+end
+
+local function normalizeOrgGradeCode(value)
+  value = limitString(value, 64)
+  if not value then return nil end
+  value = value:lower():gsub('%s+', '_')
+  if #value < 2 or #value > 48 then return nil end
+  if not value:match('^[a-z0-9_-]+$') then return nil end
+  return value
+end
+
+local function normalizeOrgGradeName(value)
+  value = limitString(value, 120)
+  if not value then return nil end
+  if #value < 2 then return nil end
+  return value
+end
+
+local function normalizeOrgGradeLevel(value)
+  local level = tonumber(value)
+  if not level then return nil end
+  level = math.floor(level)
+  if level < 1 or level > 1000 then return nil end
+  return level
+end
+
+local function normalizeOrgGradeSalary(value)
+  local salary = tonumber(value)
+  if not salary then return nil end
+  salary = math.floor(salary)
+  if salary < 0 or salary > 100000000 then return nil end
+  return salary
+end
+
+local function normalizeOrgGradePriority(value, fallback)
+  local priority = tonumber(value)
+  if not priority then return fallback end
+  priority = math.floor(priority)
+  if priority < 0 then priority = 0 end
+  if priority > 1000 then priority = 1000 end
+  return priority
+end
+
+local function gradeSnapshot(grade, memberCount)
+  if not grade then return nil end
+  return {
+    id = tonumber(grade.id) or grade.id,
+    code = grade.code,
+    name = grade.name,
+    level = tonumber(grade.level) or 0,
+    salary = tonumber(grade.salary) or 0,
+    priority = tonumber(grade.priority) or 0,
+    active = grade.active == nil and true or asBool(grade.active),
+    inherits_grade_id = grade.inherits_grade_id and (tonumber(grade.inherits_grade_id) or grade.inherits_grade_id) or nil,
+    member_count = memberCount
+  }
+end
+
+local function getInheritanceGrade(orgId, value)
+  local level = normalizeOrgGradeLevel(value)
+  if not level then return nil, 'invalid_inheritance' end
+  local grade = MZOrgRepository.getGradeByLevel(orgId, level)
+  if not grade then return nil, 'invalid_inheritance' end
+  return grade
+end
+
+local function wouldCreateInheritanceCycle(orgId, gradeId, inheritsGradeId)
+  if not gradeId or not inheritsGradeId then return false end
+  local visited = {}
+  local currentId = tonumber(inheritsGradeId)
+  local targetId = tonumber(gradeId)
+
+  while currentId do
+    if currentId == targetId then return true end
+    if visited[currentId] then return true end
+    visited[currentId] = true
+
+    local grade = MZOrgRepository.getOrgGradeById(orgId, currentId)
+    currentId = grade and grade.inherits_grade_id and tonumber(grade.inherits_grade_id) or nil
+  end
+
+  return false
+end
+
 local OrgCreationTemplates = {
   job = {
     has_salary = true,
@@ -557,6 +844,7 @@ local function normalizeOrgRow(row)
     hasSharedAccount = asBool(row.has_shared_account),
     hasStorage = asBool(row.has_storage),
     active = asBool(row.active),
+    status = asBool(row.active) and (asBool(row.is_public) and 'public' or 'private') or 'inactive',
     config = MZUtils.jsonDecode(row.config_json, {}) or {}
   }
 end
@@ -795,7 +1083,7 @@ function MZOrgService.getOrgAccessModel(source, orgCode)
   if not org then return false, 'invalid_org' end
   if not canViewOrg(source, orgCode) then return false, 'forbidden' end
 
-  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local grades = MZOrgRepository.getGradesForOrg(org.id, hasStaffView(source))
   local permissions = MZOrgRepository.getPermissionsForOrg(org.id)
   local gradeMap = buildGradeMap(grades)
   local baseCapabilities = {}
@@ -810,6 +1098,7 @@ function MZOrgService.getOrgAccessModel(source, orgCode)
 
   for _, grade in ipairs(grades or {}) do
     local resolved = {}
+    local direct = {}
     for _, capability in ipairs(baseCapabilities) do resolved[capability] = true end
     collectInheritedPermissions(grade.id, gradeMap, permissions, resolved)
 
@@ -819,6 +1108,13 @@ function MZOrgService.getOrgAccessModel(source, orgCode)
     end
     table.sort(caps)
 
+    for _, permission in ipairs(permissions or {}) do
+      if tonumber(permission.grade_id) == tonumber(grade.id) and asBool(permission.allow) then
+        direct[#direct + 1] = permission.permission
+      end
+    end
+    table.sort(direct)
+
     local inherits = grade.inherits_grade_id and gradeMap[tonumber(grade.inherits_grade_id)] or nil
     gradeOut[#gradeOut + 1] = {
       id = grade.id,
@@ -826,9 +1122,13 @@ function MZOrgService.getOrgAccessModel(source, orgCode)
       code = grade.code,
       name = grade.name,
       salary = tonumber(grade.salary) or 0,
+      priority = tonumber(grade.priority) or 0,
+      active = grade.active == nil and true or asBool(grade.active),
+      inheritsGradeId = grade.inherits_grade_id and (tonumber(grade.inherits_grade_id) or grade.inherits_grade_id) or nil,
       inheritsLevel = inherits and tonumber(inherits.level) or nil,
       inheritsCode = inherits and inherits.code or nil,
-      capabilities = caps
+      capabilities = caps,
+      directCapabilities = direct
     }
   end
 
@@ -1774,6 +2074,943 @@ function MZOrgService.createOrgFromTemplate(source, payload)
     hasSharedAccount = hasSharedAccount,
     hasSalary = hasSalary,
     hasStorage = hasStorage
+  }
+end
+
+function MZOrgService.updateOrgBasicInfo(source, orgCode, payload)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  payload = type(payload) == 'table' and payload or {}
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgUpdateBasicBlocked(src, orgCode, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgUpdateBasicBlocked(src, nil, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgUpdateBasicBlocked(src, orgCode, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgUpdateBasicBlocked(src, orgCode, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local name = normalizeOrgBasicName(payload.name)
+  if not name then
+    logOrgUpdateBasicBlocked(src, orgCode, 'invalid_name')
+    return false, 'invalid_name'
+  end
+
+  local status = normalizeOrgBasicStatus(payload.status, org)
+  if not status then
+    logOrgUpdateBasicBlocked(src, orgCode, 'invalid_status', { requested_status = payload.status })
+    return false, 'invalid_status'
+  end
+
+  local reason = limitString(payload.reason, 255)
+  local before = {
+    name = org.name,
+    status = asBool(org.active) and (asBool(org.is_public) and 'public' or 'private') or 'inactive',
+    is_public = asBool(org.is_public),
+    has_salary = asBool(org.has_salary),
+    has_shared_account = asBool(org.has_shared_account),
+    has_storage = asBool(org.has_storage),
+    active = asBool(org.active)
+  }
+
+  local function boolPayload(primary, legacy, current)
+    if primary ~= nil then return asBool(primary) end
+    if legacy ~= nil then return asBool(legacy) end
+    return asBool(current)
+  end
+
+  local updateData = {
+    name = name,
+    is_public = status.is_public,
+    has_salary = boolPayload(payload.hasSalary, payload.has_salary, org.has_salary),
+    has_shared_account = boolPayload(payload.hasSharedAccount, payload.has_shared_account, org.has_shared_account),
+    has_storage = boolPayload(payload.hasStorage, payload.has_storage, org.has_storage),
+    active = status.active
+  }
+
+  local updated = MZOrgRepository.updateOrgBasicInfo(orgCode, updateData)
+  if not updated then
+    logOrgUpdateBasicBlocked(src, orgCode, 'update_org_failed')
+    return false, 'update_org_failed'
+  end
+
+  if updateData.has_shared_account and MZOrgAccountService and MZOrgAccountService.getBalance then
+    local accountOk, accountErr = MZOrgAccountService.getBalance(orgCode)
+    if accountOk ~= true then
+      logOrgUpdateBasicBlocked(src, orgCode, 'update_org_failed', { account_error = accountErr })
+      return false, 'update_org_failed'
+    end
+  end
+
+  local after = {
+    name = updated.name,
+    status = asBool(updated.active) and (asBool(updated.is_public) and 'public' or 'private') or 'inactive',
+    is_public = asBool(updated.is_public),
+    has_salary = asBool(updated.has_salary),
+    has_shared_account = asBool(updated.has_shared_account),
+    has_storage = asBool(updated.has_storage),
+    active = asBool(updated.active)
+  }
+
+  logDetailed('orgs', 'org.update_basic', {
+    actor = makeActor(src),
+    target = {
+      type = 'org',
+      id = tostring(updated.id),
+      code = orgCode,
+      name = updated.name
+    },
+    context = {
+      org_id = updated.id,
+      org_code = orgCode,
+      org_type = updated.type_code
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    org = normalizeOrgRow(updated),
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.createOrgGrade(source, orgCode, payload)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  payload = type(payload) == 'table' and payload or {}
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradeBlocked('org.grade.create.blocked', src, nil, nil, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local code = normalizeOrgGradeCode(payload.code)
+  if not code then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'invalid_code')
+    return false, 'invalid_code'
+  end
+
+  local name = normalizeOrgGradeName(payload.name)
+  if not name then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'invalid_name')
+    return false, 'invalid_name'
+  end
+
+  local level = normalizeOrgGradeLevel(payload.level)
+  if not level then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'invalid_level')
+    return false, 'invalid_level'
+  end
+
+  local salary = normalizeOrgGradeSalary(payload.salary or 0)
+  if not salary then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'invalid_salary')
+    return false, 'invalid_salary'
+  end
+
+  if MZOrgRepository.getGradeByCode(org.id, code, true) then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'grade_code_conflict', { code = code })
+    return false, 'grade_code_conflict'
+  end
+
+  if MZOrgRepository.getGradeByLevel(org.id, level, true) then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'grade_level_conflict', { level = level })
+    return false, 'grade_level_conflict'
+  end
+
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local currentTopLevel = maxGradeLevel(grades) or 0
+  if level > currentTopLevel and not canStaffSetLeader(src, orgCode) then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'leader_permission_required', {
+      requested_level = level,
+      current_top_level = currentTopLevel
+    })
+    return false, 'leader_permission_required'
+  end
+
+  local inheritsGradeId = nil
+  if payload.inheritsLevel ~= nil and tostring(payload.inheritsLevel) ~= '' then
+    local inherits, inheritErr = getInheritanceGrade(org.id, payload.inheritsLevel)
+    if not inherits then
+      logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, inheritErr or 'invalid_inheritance')
+      return false, inheritErr or 'invalid_inheritance'
+    end
+    inheritsGradeId = inherits.id
+  end
+
+  local priority = normalizeOrgGradePriority(payload.priority, level)
+  local reason = limitString(payload.reason, 255)
+  local grade = MZOrgRepository.createGrade(org.id, {
+    level = level,
+    code = code,
+    name = name,
+    salary = salary,
+    inherits_grade_id = inheritsGradeId,
+    priority = priority,
+    config = {}
+  })
+
+  if not grade then
+    logOrgGradeBlocked('org.grade.create.blocked', src, orgCode, nil, 'create_grade_failed')
+    return false, 'create_grade_failed'
+  end
+
+  local after = gradeSnapshot(grade, 0)
+  logDetailed('orgs', 'org.grade.create', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade',
+      id = tostring(grade.id),
+      code = code,
+      name = name
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    grade = after
+  }
+end
+
+function MZOrgService.updateOrgGradeBasic(source, orgCode, gradeId, payload)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  gradeId = tonumber(gradeId)
+  payload = type(payload) == 'table' and payload or {}
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradeBlocked('org.grade.update.blocked', src, nil, gradeId, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if not gradeId then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, nil, 'invalid_grade')
+    return false, 'invalid_grade'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local grade = MZOrgRepository.getOrgGradeById(org.id, gradeId)
+  if not grade then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'grade_not_found')
+    return false, 'grade_not_found'
+  end
+
+  if not asBool(grade.active) then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'grade_already_disabled')
+    return false, 'grade_already_disabled'
+  end
+
+  local name = normalizeOrgGradeName(payload.name)
+  if not name then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'invalid_name')
+    return false, 'invalid_name'
+  end
+
+  local level = normalizeOrgGradeLevel(payload.level)
+  if not level then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'invalid_level')
+    return false, 'invalid_level'
+  end
+
+  local salary = normalizeOrgGradeSalary(payload.salary or 0)
+  if not salary then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'invalid_salary')
+    return false, 'invalid_salary'
+  end
+
+  local levelConflict = MZOrgRepository.getGradeByLevel(org.id, level, true)
+  if levelConflict and tonumber(levelConflict.id) ~= tonumber(grade.id) then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'grade_level_conflict', { level = level })
+    return false, 'grade_level_conflict'
+  end
+
+  local grades = MZOrgRepository.getGradesForOrg(org.id)
+  local currentTop = topGrade(grades)
+  local currentTopLevel = currentTop and tonumber(currentTop.level) or 0
+  local oldLevel = tonumber(grade.level) or 0
+  local isCurrentTop = currentTop and tonumber(currentTop.id) == tonumber(grade.id)
+  local changesLeadership = (isCurrentTop and level ~= oldLevel) or (not isCurrentTop and level > currentTopLevel)
+
+  if changesLeadership and not canStaffSetLeader(src, orgCode) then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'leader_permission_required', {
+      requested_level = level,
+      current_top_level = currentTopLevel,
+      old_level = oldLevel
+    })
+    return false, 'leader_permission_required'
+  end
+
+  local inheritsGradeId = nil
+  if payload.inheritsLevel ~= nil and tostring(payload.inheritsLevel) ~= '' then
+    local inherits, inheritErr = getInheritanceGrade(org.id, payload.inheritsLevel)
+    if not inherits then
+      logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, inheritErr or 'invalid_inheritance')
+      return false, inheritErr or 'invalid_inheritance'
+    end
+
+    if tonumber(inherits.id) == tonumber(grade.id) then
+      logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'invalid_inheritance')
+      return false, 'invalid_inheritance'
+    end
+
+    if wouldCreateInheritanceCycle(org.id, grade.id, inherits.id) then
+      logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'inheritance_cycle')
+      return false, 'inheritance_cycle'
+    end
+
+    inheritsGradeId = inherits.id
+  end
+
+  local memberCount = MZOrgRepository.countMembersByGrade(org.id, grade.id)
+  local before = gradeSnapshot(grade, memberCount)
+  local priority = normalizeOrgGradePriority(payload.priority, level)
+  local reason = limitString(payload.reason, 255)
+  local updated = MZOrgRepository.updateOrgGradeBasic(org.id, grade.id, {
+    level = level,
+    name = name,
+    salary = salary,
+    inherits_grade_id = inheritsGradeId,
+    priority = priority
+  })
+
+  if not updated then
+    logOrgGradeBlocked('org.grade.update.blocked', src, orgCode, gradeId, 'update_grade_failed')
+    return false, 'update_grade_failed'
+  end
+
+  local after = gradeSnapshot(updated, memberCount)
+  logDetailed('orgs', 'org.grade.update', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade',
+      id = tostring(updated.id),
+      code = updated.code,
+      name = updated.name
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    grade = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.archiveOrg(source, orgCode, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgArchiveBlocked('org.archive.blocked', src, nil, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  if tostring(org.type_code or '') == 'staff' and not isOwner(src) then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'protected_org')
+    return false, 'protected_org'
+  end
+
+  if not asBool(org.active) then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'org_already_archived')
+    return false, 'org_already_archived'
+  end
+
+  local before = normalizeOrgRow(org)
+  local updated = MZOrgRepository.setOrgActive(orgCode, false)
+  if not updated then
+    logOrgArchiveBlocked('org.archive.blocked', src, orgCode, 'archive_org_failed')
+    return false, 'archive_org_failed'
+  end
+
+  local after = normalizeOrgRow(updated)
+  logDetailed('orgs', 'org.archive', {
+    actor = makeActor(src),
+    target = {
+      type = 'org',
+      id = tostring(updated.id),
+      code = orgCode,
+      name = updated.name
+    },
+    context = {
+      org_id = updated.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    org = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.reactivateOrg(source, orgCode, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, orgCode, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, nil, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, orgCode, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, orgCode, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  if asBool(org.active) then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, orgCode, 'org_already_active')
+    return false, 'org_already_active'
+  end
+
+  local before = normalizeOrgRow(org)
+  local updated = MZOrgRepository.setOrgActive(orgCode, true)
+  if not updated then
+    logOrgArchiveBlocked('org.reactivate.blocked', src, orgCode, 'reactivate_org_failed')
+    return false, 'reactivate_org_failed'
+  end
+
+  local after = normalizeOrgRow(updated)
+  logDetailed('orgs', 'org.reactivate', {
+    actor = makeActor(src),
+    target = {
+      type = 'org',
+      id = tostring(updated.id),
+      code = orgCode,
+      name = updated.name
+    },
+    context = {
+      org_id = updated.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    org = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.disableOrgGrade(source, orgCode, gradeId, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  gradeId = tonumber(gradeId)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, nil, gradeId, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if not gradeId then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, nil, 'invalid_grade')
+    return false, 'invalid_grade'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local grade = MZOrgRepository.getOrgGradeById(org.id, gradeId)
+  if not grade then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'grade_not_found')
+    return false, 'grade_not_found'
+  end
+
+  if not asBool(grade.active) then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'grade_already_disabled')
+    return false, 'grade_already_disabled'
+  end
+
+  local memberCount = MZOrgRepository.countMembersByGrade(org.id, grade.id)
+  if memberCount > 0 then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'grade_in_use', { member_count = memberCount })
+    return false, 'grade_in_use'
+  end
+
+  local currentTop = topGrade(MZOrgRepository.getGradesForOrg(org.id))
+  if currentTop and tonumber(currentTop.id) == tonumber(grade.id) then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'top_grade_protected')
+    return false, 'top_grade_protected'
+  end
+
+  local before = gradeSnapshot(grade, memberCount)
+  local updated = MZOrgRepository.setOrgGradeActive(org.id, grade.id, false)
+  if not updated then
+    logOrgGradeBlocked('org.grade.disable.blocked', src, orgCode, gradeId, 'disable_grade_failed')
+    return false, 'disable_grade_failed'
+  end
+
+  local after = gradeSnapshot(updated, memberCount)
+  logDetailed('orgs', 'org.grade.disable', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade',
+      id = tostring(updated.id),
+      code = updated.code,
+      name = updated.name
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    grade = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.reactivateOrgGrade(source, orgCode, gradeId, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  gradeId = tonumber(gradeId)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, nil, gradeId, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if not gradeId then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, nil, 'invalid_grade')
+    return false, 'invalid_grade'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local grade = MZOrgRepository.getOrgGradeById(org.id, gradeId)
+  if not grade then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'grade_not_found')
+    return false, 'grade_not_found'
+  end
+
+  if asBool(grade.active) then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'grade_already_active')
+    return false, 'grade_already_active'
+  end
+
+  local memberCount = MZOrgRepository.countMembersByGrade(org.id, grade.id)
+  local before = gradeSnapshot(grade, memberCount)
+  local updated = MZOrgRepository.setOrgGradeActive(org.id, grade.id, true)
+  if not updated then
+    logOrgGradeBlocked('org.grade.reactivate.blocked', src, orgCode, gradeId, 'reactivate_grade_failed')
+    return false, 'reactivate_grade_failed'
+  end
+
+  local after = gradeSnapshot(updated, memberCount)
+  logDetailed('orgs', 'org.grade.reactivate', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade',
+      id = tostring(updated.id),
+      code = updated.code,
+      name = updated.name
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason
+    }
+  })
+
+  return true, {
+    grade = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.addOrgGradePermission(source, orgCode, gradeId, permission, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  gradeId = tonumber(gradeId)
+  permission = normalizeOrgGradePermission(permission)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, nil, gradeId, permission, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if not gradeId then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, nil, permission, 'invalid_grade')
+    return false, 'invalid_grade'
+  end
+
+  if not permission then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, nil, 'invalid_permission')
+    return false, 'invalid_permission'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local grade = MZOrgRepository.getOrgGradeById(org.id, gradeId)
+  if not grade then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'grade_not_found')
+    return false, 'grade_not_found'
+  end
+
+  if not asBool(grade.active) then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'grade_inactive')
+    return false, 'grade_inactive'
+  end
+
+  local allowed, allowErr = validateGradePermissionChange(src, org, orgCode, permission)
+  if not allowed then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, allowErr)
+    return false, allowErr
+  end
+
+  local existing = MZOrgRepository.getOrgGradePermission(org.id, grade.id, permission)
+  if existing and asBool(existing.allow) then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'permission_already_exists')
+    return false, 'permission_already_exists'
+  end
+
+  local before = directPermissionSnapshot(org.id, grade.id)
+  local ok = MZOrgRepository.setPermission(org.id, grade.id, permission, true)
+  local after = directPermissionSnapshot(org.id, grade.id)
+  if not ok and not MZOrgRepository.getOrgGradePermission(org.id, grade.id, permission) then
+    logOrgGradePermissionBlocked('org.grade.permission.add.blocked', src, orgCode, gradeId, permission, 'add_permission_failed')
+    return false, 'add_permission_failed'
+  end
+
+  logDetailed('orgs', 'org.grade.permission.add', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade_permission',
+      id = tostring(grade.id),
+      code = grade.code,
+      name = grade.name,
+      permission = permission
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason,
+      permission = permission
+    }
+  })
+
+  return true, {
+    gradeId = grade.id,
+    permission = permission,
+    permissions = after,
+    before = before,
+    after = after
+  }
+end
+
+function MZOrgService.removeOrgGradePermission(source, orgCode, gradeId, permission, reason)
+  local src = normalizeSource(source)
+  orgCode = limitString(orgCode, 64)
+  gradeId = tonumber(gradeId)
+  permission = normalizeOrgGradePermission(permission)
+  reason = limitString(reason, 255)
+
+  if not src then return false, 'invalid_source' end
+
+  local actor = MZPlayerService.getPlayer(src)
+  if not actor or not actor.citizenid then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'player_not_loaded')
+    return false, 'player_not_loaded'
+  end
+
+  if not orgCode then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, nil, gradeId, permission, 'invalid_org')
+    return false, 'invalid_org'
+  end
+
+  if not gradeId then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, nil, permission, 'invalid_grade')
+    return false, 'invalid_grade'
+  end
+
+  if not permission then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, nil, 'invalid_permission')
+    return false, 'invalid_permission'
+  end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'org_not_found')
+    return false, 'org_not_found'
+  end
+
+  if not asBool(org.active) then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'org_archived')
+    return false, 'org_archived'
+  end
+
+  if not canUpdateOrgBasicInfo(src) then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'forbidden')
+    return false, 'forbidden'
+  end
+
+  local grade = MZOrgRepository.getOrgGradeById(org.id, gradeId)
+  if not grade then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'grade_not_found')
+    return false, 'grade_not_found'
+  end
+
+  if not asBool(grade.active) then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'grade_inactive')
+    return false, 'grade_inactive'
+  end
+
+  local allowed, allowErr = validateGradePermissionChange(src, org, orgCode, permission)
+  if not allowed then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, allowErr)
+    return false, allowErr
+  end
+
+  local existing = MZOrgRepository.getOrgGradePermission(org.id, grade.id, permission)
+  if not existing or not asBool(existing.allow) then
+    logOrgGradePermissionBlocked('org.grade.permission.remove.blocked', src, orgCode, gradeId, permission, 'permission_not_found')
+    return false, 'permission_not_found'
+  end
+
+  local before = directPermissionSnapshot(org.id, grade.id)
+  MZOrgRepository.setPermission(org.id, grade.id, permission, false)
+  local after = directPermissionSnapshot(org.id, grade.id)
+
+  logDetailed('orgs', 'org.grade.permission.remove', {
+    actor = makeActor(src),
+    target = {
+      type = 'org_grade_permission',
+      id = tostring(grade.id),
+      code = grade.code,
+      name = grade.name,
+      permission = permission
+    },
+    context = {
+      org_id = org.id,
+      org_code = orgCode
+    },
+    before = before,
+    after = after,
+    meta = {
+      reason = reason,
+      permission = permission
+    }
+  })
+
+  return true, {
+    gradeId = grade.id,
+    permission = permission,
+    permissions = after,
+    before = before,
+    after = after
   }
 end
 

@@ -76,11 +76,38 @@ function MZOrgRepository.createOrg(data)
   return insertId and MZOrgRepository.getOrgById(insertId) or nil
 end
 
+function MZOrgRepository.updateOrgBasicInfo(orgCode, data)
+  orgCode = tostring(orgCode or '')
+  if orgCode == '' or type(data) ~= 'table' then return nil end
+
+  MySQL.update.await([[
+    UPDATE mz_orgs
+    SET name = ?,
+        is_public = ?,
+        has_salary = ?,
+        has_shared_account = ?,
+        has_storage = ?,
+        active = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE code = ?
+  ]], {
+    data.name,
+    data.is_public and 1 or 0,
+    data.has_salary and 1 or 0,
+    data.has_shared_account and 1 or 0,
+    data.has_storage and 1 or 0,
+    data.active ~= false and 1 or 0,
+    orgCode
+  })
+
+  return MZOrgRepository.getOrgByCode(orgCode)
+end
+
 function MZOrgRepository.createGrade(orgId, data)
   local insertId = MySQL.insert.await([[
     INSERT INTO mz_org_grades (
-      org_id, level, code, name, salary, inherits_grade_id, priority, config_json
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      org_id, level, code, name, salary, inherits_grade_id, priority, active, config_json
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   ]], {
     orgId,
     data.level,
@@ -89,6 +116,7 @@ function MZOrgRepository.createGrade(orgId, data)
     data.salary or 0,
     data.inherits_grade_id,
     data.priority or data.level or 0,
+    data.active == false and 0 or 1,
     MZUtils.jsonEncode(data.config or {})
   })
 
@@ -99,12 +127,73 @@ function MZOrgRepository.getGradeById(gradeId)
   return MySQL.single.await('SELECT * FROM mz_org_grades WHERE id = ? LIMIT 1', { gradeId })
 end
 
-function MZOrgRepository.getGradeByLevel(orgId, level)
-  return MySQL.single.await('SELECT * FROM mz_org_grades WHERE org_id = ? AND level = ? LIMIT 1', { orgId, level })
+function MZOrgRepository.getOrgGradeById(orgId, gradeId)
+  return MySQL.single.await('SELECT * FROM mz_org_grades WHERE org_id = ? AND id = ? LIMIT 1', { orgId, gradeId })
 end
 
-function MZOrgRepository.getGradeByCode(orgId, code)
-  return MySQL.single.await('SELECT * FROM mz_org_grades WHERE org_id = ? AND code = ? LIMIT 1', { orgId, code })
+function MZOrgRepository.getGradeByLevel(orgId, level, includeInactive)
+  local sql = 'SELECT * FROM mz_org_grades WHERE org_id = ? AND level = ?'
+  if not includeInactive then sql = sql .. ' AND active = 1' end
+  return MySQL.single.await(sql .. ' LIMIT 1', { orgId, level })
+end
+
+function MZOrgRepository.getGradeByCode(orgId, code, includeInactive)
+  local sql = 'SELECT * FROM mz_org_grades WHERE org_id = ? AND code = ?'
+  if not includeInactive then sql = sql .. ' AND active = 1' end
+  return MySQL.single.await(sql .. ' LIMIT 1', { orgId, code })
+end
+
+function MZOrgRepository.updateOrgGradeBasic(orgId, gradeId, data)
+  MySQL.update.await([[
+    UPDATE mz_org_grades
+    SET level = ?,
+        name = ?,
+        salary = ?,
+        inherits_grade_id = ?,
+        priority = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE org_id = ? AND id = ?
+  ]], {
+    data.level,
+    data.name,
+    data.salary or 0,
+    data.inherits_grade_id,
+    data.priority or data.level or 0,
+    orgId,
+    gradeId
+  })
+
+  return MZOrgRepository.getOrgGradeById(orgId, gradeId)
+end
+
+function MZOrgRepository.countMembersByGrade(orgId, gradeId)
+  local row = MySQL.single.await([[
+    SELECT COUNT(1) AS total
+    FROM mz_player_orgs
+    WHERE org_id = ? AND grade_id = ? AND active = 1
+  ]], { orgId, gradeId })
+
+  return tonumber(row and row.total) or 0
+end
+
+function MZOrgRepository.setOrgActive(orgCode, active)
+  MySQL.update.await([[
+    UPDATE mz_orgs
+    SET active = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE code = ?
+  ]], { active and 1 or 0, orgCode })
+
+  return MZOrgRepository.getOrgByCode(orgCode)
+end
+
+function MZOrgRepository.setOrgGradeActive(orgId, gradeId, active)
+  MySQL.update.await([[
+    UPDATE mz_org_grades
+    SET active = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE org_id = ? AND id = ?
+  ]], { active and 1 or 0, orgId, gradeId })
+
+  return MZOrgRepository.getOrgGradeById(orgId, gradeId)
 end
 
 function MZOrgRepository.getPlayerMembership(citizenid, orgId)
@@ -124,7 +213,7 @@ function MZOrgRepository.getPlayerMemberships(citizenid)
     INNER JOIN mz_orgs o ON o.id = po.org_id
     INNER JOIN mz_org_types t ON t.id = o.type_id
     INNER JOIN mz_org_grades g ON g.id = po.grade_id
-    WHERE po.citizenid = ? AND po.active = 1
+    WHERE po.citizenid = ? AND po.active = 1 AND o.active = 1 AND g.active = 1
     ORDER BY po.is_primary DESC, g.level DESC
   ]], { citizenid }) or {}
 end
@@ -172,7 +261,7 @@ function MZOrgRepository.listMembersForOrg(orgId)
         WHEN g.level = (
           SELECT MAX(g2.level)
           FROM mz_org_grades g2
-          WHERE g2.org_id = po.org_id
+          WHERE g2.org_id = po.org_id AND g2.active = 1
         ) THEN 1
         ELSE 0
       END AS is_leader
@@ -195,6 +284,24 @@ function MZOrgRepository.getPermissionsForOrg(orgId)
   return MySQL.query.await('SELECT * FROM mz_org_permissions WHERE org_id = ? ORDER BY id ASC', { orgId }) or {}
 end
 
+function MZOrgRepository.getOrgGradePermission(orgId, gradeId, permission)
+  return MySQL.single.await([[
+    SELECT *
+    FROM mz_org_permissions
+    WHERE org_id = ? AND grade_id = ? AND permission = ?
+    LIMIT 1
+  ]], { orgId, gradeId, permission })
+end
+
+function MZOrgRepository.listOrgGradePermissions(orgId, gradeId)
+  return MySQL.query.await([[
+    SELECT *
+    FROM mz_org_permissions
+    WHERE org_id = ? AND grade_id = ? AND allow = 1
+    ORDER BY permission ASC
+  ]], { orgId, gradeId }) or {}
+end
+
 function MZOrgRepository.setPermission(orgId, gradeId, permission, allow)
   MySQL.insert.await([[
     INSERT INTO mz_org_permissions (org_id, grade_id, permission, allow)
@@ -210,8 +317,10 @@ function MZOrgRepository.removePermission(orgId, gradeId, permission)
   ]], { orgId, gradeId, gradeId, permission })
 end
 
-function MZOrgRepository.getGradesForOrg(orgId)
-  return MySQL.query.await('SELECT * FROM mz_org_grades WHERE org_id = ? ORDER BY level ASC', { orgId }) or {}
+function MZOrgRepository.getGradesForOrg(orgId, includeInactive)
+  local sql = 'SELECT * FROM mz_org_grades WHERE org_id = ?'
+  if not includeInactive then sql = sql .. ' AND active = 1' end
+  return MySQL.query.await(sql .. ' ORDER BY level ASC', { orgId }) or {}
 end
 
 function MZOrgRepository.setMembership(citizenid, orgId, gradeId, isPrimary, duty, expiresAt)
