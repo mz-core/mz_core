@@ -111,8 +111,11 @@ RegisterNetEvent('mz_core:vehicles:server:playerWorldReady', function()
   end
 
   SetTimeout(3000, function()
-    if GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
+    local cfg = Config and Config.VehicleWorld or {}
+    if cfg.restoreOnPlayerJoin == true and GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
       MZVehicleService.restoreWorldVehiclesForPlayer(src, 'player_world_ready')
+    elseif cfg.debug == true then
+      print(('[mz_vehicle_world] vehicle_restore_auto_disabled reason=player_world_ready source=%s'):format(tostring(src)))
     end
   end)
 end)

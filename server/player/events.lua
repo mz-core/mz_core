@@ -110,8 +110,11 @@ local function scheduleLoadPlayer(src, reason)
 
     CreateThread(function()
       Wait(5000)
-      if GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
+      local cfg = Config and Config.VehicleWorld or {}
+      if cfg.restoreOnPlayerJoin == true and GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
         MZVehicleService.restoreWorldVehiclesForPlayer(src, 'player_loaded')
+      elseif cfg.debug == true then
+        print(('[mz_vehicle_world] vehicle_restore_auto_disabled reason=player_loaded source=%s'):format(tostring(src)))
       end
     end)
 

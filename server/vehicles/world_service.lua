@@ -9,7 +9,9 @@ local WorldCache = {
 }
 
 local WorldSpawning = {
-  byPlate = {}
+  byPlate = {},
+  lastAttempt = {},
+  lastSuccess = {}
 }
 
 local ProximityCheckBySource = {}
@@ -62,23 +64,75 @@ local function safeGetNetworkIdFromEntity(entity)
   return tonumber(netId) or 0
 end
 
+local function getTimerMs()
+  if type(GetGameTimer) == 'function' then
+    local ok, timer = pcall(GetGameTimer)
+    if ok and tonumber(timer) then
+      return tonumber(timer)
+    end
+  end
+
+  return os.time() * 1000
+end
+
+local function getSpawnLockTimeoutMs()
+  return math.max(5000, tonumber(getWorldConfig().spawnLockTimeoutMs) or 20000)
+end
+
+local function getRecentSpawnCooldownMs()
+  return math.max(1000, tonumber(getWorldConfig().recentSpawnCooldownMs) or 8000)
+end
+
+local SpawnLockSeq = 0
+
 local function isPlateSpawning(plate)
   plate = normalizePlate(plate)
-  return plate ~= '' and WorldSpawning.byPlate[plate] == true
-end
-
-local function clearSpawningPlate(plate)
-  plate = normalizePlate(plate)
-  if plate ~= '' then
-    WorldSpawning.byPlate[plate] = nil
+  if plate == '' then
+    return false
   end
+
+  local lock = WorldSpawning.byPlate[plate]
+  if not lock then
+    return false
+  end
+
+  if type(lock) == 'table' then
+    local age = getTimerMs() - (tonumber(lock.at) or 0)
+    if age > getSpawnLockTimeoutMs() then
+      WorldSpawning.byPlate[plate] = nil
+      debugWorld(('spawn_lock_timeout plate=%s reason=%s age=%s'):format(
+        plate,
+        tostring(lock.reason or 'unknown'),
+        tostring(age)
+      ))
+      return false
+    end
+  end
+
+  return true, lock
 end
 
-local function clearSpawningPlateAfterError(plate, reason)
+local function clearSpawningPlate(plate, token)
   plate = normalizePlate(plate)
   if plate ~= '' then
+    local lock = WorldSpawning.byPlate[plate]
+    if token ~= nil and type(lock) == 'table' and lock.token ~= token then
+      return false
+    end
+
     WorldSpawning.byPlate[plate] = nil
-    logWorld(('spawn lock cleared after error %s %s'):format(plate, tostring(reason or 'unknown_error')))
+    return true
+  end
+
+  return false
+end
+
+local function clearSpawningPlateAfterError(plate, reason, token)
+  plate = normalizePlate(plate)
+  if plate ~= '' then
+    if clearSpawningPlate(plate, token) then
+      logWorld(('spawn lock cleared after error %s %s'):format(plate, tostring(reason or 'unknown_error')))
+    end
   end
 end
 
@@ -88,19 +142,72 @@ local function markSpawningPlate(plate, reason, timeoutMs)
     return false
   end
 
-  WorldSpawning.byPlate[plate] = true
+  SpawnLockSeq = SpawnLockSeq + 1
+  local token = ('%s:%s:%s'):format(plate, tostring(getTimerMs()), tostring(SpawnLockSeq))
+  local lock = {
+    at = getTimerMs(),
+    reason = tostring(reason or 'unknown'),
+    token = token
+  }
 
-  local timeout = tonumber(timeoutMs) or 30000
+  WorldSpawning.byPlate[plate] = lock
+  WorldSpawning.lastAttempt[plate] = lock.at
+  debugWorld(('spawn_lock_acquired plate=%s reason=%s'):format(plate, lock.reason))
+
+  local timeout = tonumber(timeoutMs) or getSpawnLockTimeoutMs()
   if type(SetTimeout) == 'function' and timeout > 0 then
     SetTimeout(timeout, function()
-      if WorldSpawning.byPlate[plate] == true then
+      local current = WorldSpawning.byPlate[plate]
+      if type(current) == 'table' and current.token == token then
         WorldSpawning.byPlate[plate] = nil
         debugWorld(('spawn lock timeout %s reason=%s'):format(plate, tostring(reason or 'unknown')))
       end
     end)
   end
 
-  return true
+  return true, lock
+end
+
+local function acquireSpawningPlate(plate, reason, actorSource)
+  plate = normalizePlate(plate)
+  if plate == '' then
+    return false, nil
+  end
+
+  local busy, lock = isPlateSpawning(plate)
+  if busy then
+    debugWorld(('spawn_lock_busy plate=%s reason=%s ownerReason=%s'):format(
+      plate,
+      tostring(reason or 'unknown'),
+      type(lock) == 'table' and tostring(lock.reason or 'unknown') or 'legacy'
+    ))
+    return false, lock
+  end
+
+  local ok, newLock = markSpawningPlate(plate, reason, getSpawnLockTimeoutMs())
+  if type(newLock) == 'table' then
+    newLock.source = tonumber(actorSource) or 0
+  end
+
+  return ok, newLock
+end
+
+local function markSpawnSuccess(plate)
+  plate = normalizePlate(plate)
+  if plate ~= '' then
+    WorldSpawning.lastSuccess[plate] = getTimerMs()
+  end
+end
+
+local function isRecentSpawn(plate)
+  plate = normalizePlate(plate)
+  local lastSuccess = tonumber(WorldSpawning.lastSuccess[plate] or 0) or 0
+  if plate == '' or lastSuccess <= 0 then
+    return false
+  end
+
+  local elapsed = getTimerMs() - lastSuccess
+  return elapsed >= 0 and elapsed < getRecentSpawnCooldownMs(), elapsed
 end
 
 local function cloneTable(value)
@@ -281,24 +388,24 @@ local function readEntityPlate(entity)
   return ''
 end
 
-local function findExistingWorldEntityByPlate(plate)
+local function findExistingWorldVehicleByPlate(plate)
   plate = normalizePlate(plate)
   if plate == '' or type(GetAllVehicles) ~= 'function' then
-    return 0
+    return 0, 0, 'scan_unavailable'
   end
 
   local ok, vehicles = pcall(GetAllVehicles)
   if not ok or type(vehicles) ~= 'table' then
-    return 0
+    return 0, 0, 'scan_failed'
   end
 
   for _, entity in ipairs(vehicles) do
     if safeDoesEntityExist(entity) and readEntityPlate(entity) == plate then
-      return entity
+      return entity, safeGetNetworkIdFromEntity(entity), 'plate_scan'
     end
   end
 
-  return 0
+  return 0, 0, 'not_found'
 end
 
 local function findAllVehiclesByPlate(plate)
@@ -320,6 +427,40 @@ local function findAllVehiclesByPlate(plate)
   end
 
   return found
+end
+
+local function cacheWorldEntityByPlate(plate, entity, reason)
+  plate = normalizePlate(plate)
+  if plate == '' or not safeDoesEntityExist(entity) then
+    return nil
+  end
+
+  local netId = safeGetNetworkIdFromEntity(entity)
+  local previous = WorldCache.byPlate[plate]
+  if previous and previous.net_id then
+    WorldCache.byNetId[tonumber(previous.net_id) or 0] = nil
+  end
+
+  WorldCache.byPlate[plate] = {
+    plate = plate,
+    net_id = netId,
+    entity = entity,
+    updated_at = os.time(),
+    source = tostring(reason or 'scan')
+  }
+
+  if netId > 0 then
+    WorldCache.byNetId[netId] = plate
+  end
+
+  debugWorld(('scan_found_existing plate=%s entity=%s netId=%s reason=%s'):format(
+    plate,
+    tostring(entity),
+    tostring(netId),
+    tostring(reason or 'scan')
+  ))
+
+  return WorldCache.byPlate[plate]
 end
 
 local function hasDriverOrPassengers(entity)
@@ -355,6 +496,8 @@ local function deduplicateVehiclesByPlate(plate, keepEntity)
     return 0
   end
 
+  debugWorld(('dedupe_scan plate=%s count=%d'):format(plate, #allEntities))
+
   local entityToKeep = nil
   if keepEntity and safeDoesEntityExist(keepEntity) and readEntityPlate(keepEntity) == plate then
     entityToKeep = keepEntity
@@ -377,18 +520,35 @@ local function deduplicateVehiclesByPlate(plate, keepEntity)
   end
 
   local deleted = 0
+  local occupied = 0
   for _, entity in ipairs(allEntities) do
+    if hasDriverOrPassengers(entity) then
+      occupied = occupied + 1
+    end
+
     if entity ~= entityToKeep then
       if hasDriverOrPassengers(entity) then
-        debugWorld(('skip delete duplicate %s reason=has_driver'):format(plate))
+        debugWorld(('dedupe_unsafe_multiple_occupied plate=%s entity=%s netId=%s'):format(
+          plate,
+          tostring(entity),
+          tostring(safeGetNetworkIdFromEntity(entity))
+        ))
       else
         if type(DeleteEntity) == 'function' then
           pcall(DeleteEntity, entity)
           deleted = deleted + 1
-          debugWorld(('delete duplicate %s count=%d'):format(plate, deleted))
+          debugWorld(('dedupe_delete_duplicate plate=%s entity=%s netId=%s'):format(
+            plate,
+            tostring(entity),
+            tostring(safeGetNetworkIdFromEntity(entity))
+          ))
         end
       end
     end
+  end
+
+  if occupied > 1 then
+    logWorld(('dedupe_unsafe_multiple_occupied plate=%s occupied=%d total=%d'):format(plate, occupied, #allEntities))
   end
 
   if deleted > 0 then
@@ -740,31 +900,48 @@ function MZVehicleWorldService.getCachedEntity(plate)
   plate = normalizePlate(plate)
   local cached = WorldCache.byPlate[plate]
   if not cached then
-    local existing = findExistingWorldEntityByPlate(plate)
+    local existing = findExistingWorldVehicleByPlate(plate)
     if existing ~= 0 then
-      local netId = safeGetNetworkIdFromEntity(existing)
-      WorldCache.byPlate[plate] = {
-        plate = plate,
-        net_id = netId,
-        entity = existing,
-        updated_at = os.time()
-      }
-      WorldCache.byNetId[netId] = plate
-      return existing, WorldCache.byPlate[plate]
+      cached = cacheWorldEntityByPlate(plate, existing, 'cache_miss_scan')
+      return existing, cached
     end
 
     return 0, nil
   end
 
-  local entity = getEntityFromNetId(cached.net_id)
-  if entity ~= 0 then
+  local entity = tonumber(cached.entity) or 0
+  if safeDoesEntityExist(entity) and readEntityPlate(entity) == plate then
+    local netId = safeGetNetworkIdFromEntity(entity)
+    if netId > 0 and tonumber(cached.net_id) ~= netId then
+      if cached.net_id then
+        WorldCache.byNetId[tonumber(cached.net_id) or 0] = nil
+      end
+      cached.net_id = netId
+      WorldCache.byNetId[netId] = plate
+    end
+    cached.updated_at = os.time()
+    debugWorld(('cache_hit plate=%s netId=%s'):format(plate, tostring(cached.net_id or 0)))
     return entity, cached
   end
 
-  logWorld(('clearing stale netId cache %s %s'):format(plate, tostring(cached.net_id or 0)))
+  entity = getEntityFromNetId(cached.net_id)
+  if entity ~= 0 and readEntityPlate(entity) == plate then
+    cached.entity = entity
+    cached.updated_at = os.time()
+    debugWorld(('cache_hit plate=%s netId=%s'):format(plate, tostring(cached.net_id or 0)))
+    return entity, cached
+  end
+
+  logWorld(('cache_stale plate=%s oldNetId=%s'):format(plate, tostring(cached.net_id or 0)))
   WorldCache.byPlate[plate] = nil
   if cached.net_id then
     WorldCache.byNetId[tonumber(cached.net_id) or 0] = nil
+  end
+
+  local existing = findExistingWorldVehicleByPlate(plate)
+  if existing ~= 0 then
+    cached = cacheWorldEntityByPlate(plate, existing, 'cache_stale_scan')
+    return existing, cached
   end
 
   return 0, nil
@@ -835,7 +1012,15 @@ function MZVehicleWorldService.registerEntity(vehicle, actorSource, netId)
     net_id = netId
   })
 
-  clearSpawningPlate(plate)
+  debugWorld(('outside_registered plate=%s netId=%s entity=%s'):format(plate, tostring(netId), tostring(entity)))
+
+  local spawnLock = WorldSpawning.byPlate[plate]
+  if type(spawnLock) == 'table' and tostring(spawnLock.reason or ''):find('fallback', 1, true) == nil then
+    debugWorld(('register_entity_kept_spawn_lock plate=%s reason=%s'):format(plate, tostring(spawnLock.reason or 'unknown')))
+  else
+    clearSpawningPlate(plate)
+  end
+
   return true, entity
 end
 
@@ -861,6 +1046,11 @@ function MZVehicleWorldService.registerOutVehicle(vehicle, actorSource, snapshot
   data.state = STATE_OUT
 
   local row = upsertWorldState(data)
+  debugWorld(('outside_registered plate=%s netId=%s entity=%s'):format(
+    normalizePlate(data.plate),
+    tostring(data.net_id or 0),
+    tostring(data.entity_handle or 0)
+  ))
   debugWorld(('withdraw/register %s %s'):format(tostring(data.plate or ''), tostring(data.model or '')))
   logWorldAction('vehicle_world_register_out', vehicle, actorSource, previous, row)
 
@@ -917,6 +1107,7 @@ function MZVehicleWorldService.clearWorldState(plate, actorSource)
   MZVehicleWorldService.clearCache(plate)
   clearSpawningPlate(plate)
   deleteUnoccupiedVehiclesByPlate(plate)
+  debugWorld(('outside_cleared plate=%s'):format(plate))
 
   logWorldAction('vehicle_world_clear', { plate = plate }, actorSource, before or {}, {})
   return true
@@ -1049,6 +1240,42 @@ local function setSpawnedVehicleState(entity, row)
   debugWorld(('lock state applied %s locked=%s'):format(plate, tostring(row.locked == true)))
 end
 
+local function attachExistingWorldVehicle(row, entity, reason, scanReason)
+  if not safeDoesEntityExist(entity) then
+    return nil
+  end
+
+  local plate = normalizePlate(row and row.plate)
+  if plate == '' then
+    return nil
+  end
+
+  deduplicateVehiclesByPlate(plate, entity)
+  setSpawnedVehicleState(entity, row)
+  local cached = cacheWorldEntityByPlate(plate, entity, scanReason or reason or 'existing')
+  local netId = cached and tonumber(cached.net_id) or safeGetNetworkIdFromEntity(entity)
+
+  row.net_id = tonumber(netId) or 0
+  row.entity_handle = tonumber(entity) or 0
+  upsertWorldState(row)
+
+  logWorld(('skip_spawn_existing plate=%s reason=%s entity=%s netId=%s'):format(
+    plate,
+    tostring(reason or 'restore'),
+    tostring(entity),
+    tostring(netId or 0)
+  ))
+
+  return {
+    plate = plate,
+    entity = entity,
+    net_id = netId,
+    already_spawned = true,
+    existing = true,
+    skipped = true
+  }
+end
+
 function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reason)
   row = type(row) == 'table' and row or nil
   if not row then
@@ -1061,36 +1288,78 @@ function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reas
   end
 
   reason = tostring(reason or 'restore')
+  debugWorld(('restore_attempt plate=%s reason=%s'):format(row.plate, reason))
 
-  if isPlateSpawning(row.plate) then
-    debugWorld(('spawn check lock_active plate=%s reason=%s'):format(row.plate, reason))
+  local lockOk, spawnLock = acquireSpawningPlate(row.plate, reason, actorSource)
+  if lockOk ~= true then
     logWorld(('skip spawn already spawning %s %s'):format(reason, row.plate))
     return true, {
       plate = row.plate,
+      status = 'busy',
       already_spawning = true,
+      skipped = true
+    }
+  end
+
+  local lockToken = type(spawnLock) == 'table' and spawnLock.token or nil
+  local recent, recentElapsed = isRecentSpawn(row.plate)
+  if recent then
+    local alreadySpawned, recentEntity = MZVehicleWorldService.IsPlateSpawned(row.plate)
+    if alreadySpawned then
+      local attached = attachExistingWorldVehicle(row, recentEntity, reason, 'recent_cache')
+      if attached then
+        clearSpawningPlate(row.plate, lockToken)
+        markSpawnSuccess(row.plate)
+        attached.status = 'existing'
+        return true, attached
+      end
+    end
+
+    local existingEntity = findExistingWorldVehicleByPlate(row.plate)
+    if existingEntity ~= 0 then
+      local attached = attachExistingWorldVehicle(row, existingEntity, reason, 'recent_scan')
+      if attached then
+        clearSpawningPlate(row.plate, lockToken)
+        markSpawnSuccess(row.plate)
+        attached.status = 'existing'
+        return true, attached
+      end
+    end
+
+    clearSpawningPlate(row.plate, lockToken)
+    debugWorld(('recent_spawn_skip plate=%s reason=%s elapsed=%s'):format(row.plate, reason, tostring(recentElapsed or 0)))
+    return true, {
+      plate = row.plate,
+      status = 'recent_spawn',
+      recent_spawn = true,
       skipped = true
     }
   end
 
   local alreadySpawned, entity = MZVehicleWorldService.IsPlateSpawned(row.plate)
   if alreadySpawned then
-    deduplicateVehiclesByPlate(row.plate, entity)
-    setSpawnedVehicleState(entity, row)
-    debugWorld(('spawn check already_exists plate=%s netId=%s'):format(row.plate, tostring(safeGetNetworkIdFromEntity(entity))))
-    logWorld(('skip spawn already spawned %s %s'):format(reason, row.plate))
-    return true, {
-      plate = row.plate,
-      entity = entity,
-      net_id = safeGetNetworkIdFromEntity(entity),
-      already_spawned = true,
-      skipped = true
-    }
+    local attached = attachExistingWorldVehicle(row, entity, reason, 'is_spawned')
+    if attached then
+      clearSpawningPlate(row.plate, lockToken)
+      markSpawnSuccess(row.plate)
+      attached.status = 'existing'
+      return true, attached
+    end
   end
 
-  debugWorld(('spawn check before_spawn plate=%s model=%s reason=%s'):format(row.plate, tostring(row.model), reason))
-  deduplicateVehiclesByPlate(row.plate)
+  local existingEntity = findExistingWorldVehicleByPlate(row.plate)
+  if existingEntity ~= 0 then
+    local attached = attachExistingWorldVehicle(row, existingEntity, reason, 'pre_spawn_scan')
+    if attached then
+      clearSpawningPlate(row.plate, lockToken)
+      markSpawnSuccess(row.plate)
+      attached.status = 'existing'
+      return true, attached
+    end
+  end
 
-  markSpawningPlate(row.plate, reason, 30000)
+  debugWorld(('spawn_new plate=%s model=%s reason=%s'):format(row.plate, tostring(row.model), reason))
+  deduplicateVehiclesByPlate(row.plate)
 
   logWorld(('respawn attempt %s %s %s %.3f %.3f %.3f'):format(
     reason,
@@ -1104,6 +1373,17 @@ function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reas
   local protectedOk, spawnOk, spawnResult = xpcall(function()
     if tostring(row.state or '') ~= STATE_OUT then
       return false, 'vehicle_not_out'
+    end
+
+    local existingBeforeCreate = findExistingWorldVehicleByPlate(row.plate)
+    if existingBeforeCreate ~= 0 then
+      local attached = attachExistingWorldVehicle(row, existingBeforeCreate, reason, 'locked_pre_create_scan')
+      clearSpawningPlate(row.plate, lockToken)
+      if attached then
+        markSpawnSuccess(row.plate)
+        attached.status = 'existing'
+        return true, attached
+      end
     end
 
     if row.destroyed == true and getWorldConfig().respawnDestroyed == false then
@@ -1175,25 +1455,27 @@ function MZVehicleWorldService.SpawnWorldVehicleFromState(row, actorSource, reas
       entity = spawnedEntity
     })
 
-    clearSpawningPlate(row.plate)
+    clearSpawningPlate(row.plate, lockToken)
+    markSpawnSuccess(row.plate)
     logWorld(('spawn success %s %s %s'):format(reason, row.plate, tostring(netId)))
     debugWorld(('finalize spawn %s locked=%s netId=%s'):format(row.plate, tostring(row.locked == true), tostring(netId)))
 
     return true, {
       plate = row.plate,
+      status = 'spawned',
       entity = spawnedEntity,
       net_id = netId
     }
   end, debug.traceback)
 
   if not protectedOk then
-    clearSpawningPlateAfterError(row.plate, 'runtime_error')
+    clearSpawningPlateAfterError(row.plate, 'runtime_error', lockToken)
     logWorld(('spawn failed %s %s %s'):format(reason, row.plate, tostring(spawnOk)))
     return false, 'spawn_error'
   end
 
   if spawnOk ~= true then
-    clearSpawningPlateAfterError(row.plate, spawnResult)
+    clearSpawningPlateAfterError(row.plate, spawnResult, lockToken)
     logWorld(('spawn failed %s %s %s'):format(reason, row.plate, tostring(spawnResult or 'spawn_failed')))
     return false, spawnResult or 'spawn_failed'
   end
@@ -1258,8 +1540,10 @@ function MZVehicleWorldService.RestoreOutVehiclesForPlayer(source, vehicles, rea
           out[#out + 1] = {
             plate = plate,
             ok = true,
+            status = type(spawnResultOrErr) == 'table' and spawnResultOrErr.status or nil,
             net_id = type(spawnResultOrErr) == 'table' and spawnResultOrErr.net_id or nil,
-            already_spawned = type(spawnResultOrErr) == 'table' and spawnResultOrErr.already_spawned == true
+            already_spawned = type(spawnResultOrErr) == 'table' and spawnResultOrErr.already_spawned == true,
+            skipped = type(spawnResultOrErr) == 'table' and spawnResultOrErr.skipped == true
           }
         else
           failed = failed + 1
@@ -1345,8 +1629,8 @@ function MZVehicleWorldService.EnsureWorldVehiclesNearPlayer(source, coords)
     end
 
     if not MZVehicleWorldService.IsPlateSpawned(row.plate) then
-      local spawnOk = MZVehicleWorldService.SpawnWorldVehicleFromState(row, source, 'proximity')
-      if spawnOk == true then
+      local spawnOk, spawnResult = MZVehicleWorldService.SpawnWorldVehicleFromState(row, source, 'proximity')
+      if spawnOk == true and (type(spawnResult) ~= 'table' or spawnResult.skipped ~= true) then
         spawned = spawned + 1
       end
     end

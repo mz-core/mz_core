@@ -206,6 +206,22 @@ local function getVehicleWorldConfig()
   return Config and Config.VehicleWorld or {}
 end
 
+local function isAutoRestoreReason(reason)
+  reason = tostring(reason or '')
+  return reason == 'player_loaded'
+    or reason == 'player_world_ready'
+    or reason == 'get_player_data'
+end
+
+local function shouldRestoreWorldVehicles(reason)
+  local cfg = getVehicleWorldConfig()
+  if isAutoRestoreReason(reason) and cfg.restoreOnPlayerJoin ~= true then
+    return false
+  end
+
+  return true
+end
+
 local function getGameTimerSafe()
   if type(GetGameTimer) == 'function' then
     return GetGameTimer()
@@ -1148,6 +1164,20 @@ function MZVehicleService.restoreWorldVehiclesForPlayer(source, reason)
     return false, 'player_not_loaded'
   end
 
+  if shouldRestoreWorldVehicles(reason) ~= true then
+    debugVehicleWorld(('vehicle_restore_auto_disabled source=%s reason=%s citizenid=%s'):format(
+      tostring(source),
+      reason,
+      tostring(player.citizenid or 'unknown')
+    ))
+    return true, {
+      restored = 0,
+      failed = 0,
+      skipped = true,
+      restore_disabled = true
+    }
+  end
+
   local debounceMs = tonumber(getVehicleWorldConfig().restoreDebounceMs) or 5000
 if reason ~= 'command' and tonumber(source) and tonumber(source) > 0 and debounceMs > 0 then
   local now = getGameTimerSafe()
@@ -1347,6 +1377,7 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
   end
 
   local vehicle = vehicleOrErr
+  plate = normalizePlate(vehicle.plate)
   expectedGarage = tostring(expectedGarage or '')
 
   if isImpoundedState(vehicle.state) then
@@ -1354,7 +1385,29 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
   end
 
   if normalizeVehicleState(vehicle.state) == STATE_OUT then
+    if getVehicleWorldConfig().blockDuplicateOutsideSpawn == true and MZVehicleWorldService and MZVehicleWorldService.IsPlateSpawned then
+      local exists = MZVehicleWorldService.IsPlateSpawned(plate)
+      debugVehicleWorld(('outside_check plate=%s state=out exists=%s'):format(plate, tostring(exists == true)))
+      if exists ~= true then
+        debugVehicleWorld(('outside_missing plate=%s source=%s'):format(plate, tostring(source)))
+        return false, 'vehicle_missing_outside'
+      end
+    end
+
     return false, 'vehicle_already_out'
+  end
+
+  if getVehicleWorldConfig().blockDuplicateOutsideSpawn == true and MZVehicleWorldService and MZVehicleWorldService.IsPlateSpawned then
+    local exists, existingEntity = MZVehicleWorldService.IsPlateSpawned(plate)
+    debugVehicleWorld(('outside_check plate=%s state=%s exists=%s'):format(
+      plate,
+      tostring(vehicle.state or ''),
+      tostring(exists == true)
+    ))
+    if exists == true then
+      debugVehicleWorld(('outside_spawn_blocked plate=%s entity=%s'):format(plate, tostring(existingEntity or 0)))
+      return false, 'vehicle_already_out'
+    end
   end
 
   if expectedGarage ~= '' and tostring(vehicle.garage or '') ~= expectedGarage then
@@ -1396,6 +1449,8 @@ function MZVehicleService.takeOutVehicle(source, plate, expectedGarage)
       props = updatedVehicle.props_json or {}
     })
   end
+
+  debugVehicleWorld(('manual_spawn_allowed plate=%s source=%s'):format(plate, tostring(source)))
 
   logVehicleAction('take_out_vehicle', updatedVehicle, source, beforeState, buildVehicleSnapshot(updatedVehicle), {
     expected_garage = expectedGarage ~= '' and expectedGarage or nil

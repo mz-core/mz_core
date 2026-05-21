@@ -126,7 +126,10 @@ Config.Payroll = {
 }
 
 Config.VehicleWorld = {
+  restoreOnPlayerJoin = false,
   enableProximityRespawn = false,
+  autoReturnMissingOutsideVehicle = false,
+  blockDuplicateOutsideSpawn = true,
   proximityRadius = 200.0,
   checkIntervalMs = 15000,
   maxRespawnsPerTick = 3,
