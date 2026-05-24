@@ -24,7 +24,7 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 | Player / identidade / sessao      | Validado com ressalvas | Load, unload, cache, sessao e posicao existem; multichar nao existe                            |
 | Orgs / grades / permissoes        | Validado               | Dominio forte e funcional no escopo atual                                                      |
 | Accounts / org accounts / payroll | Validado com ressalvas | Core funciona; payroll ainda nao e atomico                                                     |
-| Inventory multi-contexto          | Validado               | Main, personal stash, org stash, trunk, glovebox e world drop existem                          |
+| Inventory multi-contexto          | Validado               | Main, personal stash, org stash, house stash via grant, trunk, glovebox e world drop existem   |
 | Vehicles base                     | Validado com ressalvas | Ownership, acesso, estado, flow base e persistencia de veiculos fora da garagem existem         |
 | Logs estruturados                 | Validado com ressalvas | Existe padrao util, mas ainda pode ser refinado                                                |
 | Surface client minima             | Parcial                | Spawn base, cache client e runtime client de veiculos persistentes existem                     |
@@ -53,6 +53,32 @@ Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao 
 - `ox_lib`
 - `spawnmanager` para o spawn base atual
 
+## Contrato inventory house_stash
+
+O container de bau de casa usa a persistencia real do inventario em `mz_inventory_items`, sem tabela propria de itens no resource de casas.
+
+Fluxo esperado:
+
+1. Um resource server-side confiavel valida acesso ao bau.
+2. O resource chama `exports['mz_core']:CreateHouseStashAccessGrant(source, descriptor)`.
+3. O core retorna um descriptor `type = 'house_stash'` com token temporario.
+4. O client abre a UI com `exports['mz_inventory']:OpenTargetView(descriptor)`.
+5. O core so resolve o `house_stash` se o token existir, pertencer ao mesmo source e ainda estiver valido.
+
+Descriptor aceito pelo grant:
+
+```lua
+{
+  houseCode = 'casa_teste_01',
+  stashId = 'house:casa_teste_01',
+  label = 'Bau da Casa',
+  slots = 50,
+  weight = 100000
+}
+```
+
+O `houseCode` aceita letras, numeros, `_` e `-`. O `stashId` precisa seguir `house:<houseCode>`.
+
 ## Ordem recomendada de start
 
 ```cfg
@@ -78,6 +104,7 @@ ensure mz_clothing
 - orgs, grades, permissoes, memberships, duty, primary, promote e demote
 - dinheiro do player, org accounts e payroll com bloqueio de inconsistencias de shared account
 - inventory multi-contexto com regras de stack, metadata, peso e uso de item
+- contrato `house_stash` por grant temporario para resources server-side confiaveis, usado pelo `mz_houses`
 - vehicles base com ownership, acesso, garage, state, impound, release e persistencia de veiculos `out`
 - logs estruturados por dominio
 - exports, callbacks e eventos suficientes para consumir o core nativo

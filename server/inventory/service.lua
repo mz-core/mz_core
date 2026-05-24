@@ -6,11 +6,63 @@ local EquippedWeaponSourceByCitizenId = {}
 local PendingWeaponAmmoUpdatesBySource = {}
 local WeaponAmmoUpdateRateLimits = {}
 local UnauthorizedWeaponLogRateLimits = {}
+local InventoryContainerGrants = {}
 local PendingWeaponAmmoUpdateTtlMs = 10000
+local HouseStashGrantTtlSeconds = 15 * 60
+local HouseStashMaxSlots = 200
+local HouseStashMaxWeight = 1000000
 
 local enforceEquippedWeaponStillOwned
 local applyEquippedAmmoToMovingWeapon
 local cleanupInvalidHotbarRefsForPlayer
+
+local function trimString(value)
+  return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+local function normalizeHouseCode(value)
+  local code = trimString(value)
+  if code == '' or #code > 80 then
+    return nil
+  end
+
+  if not code:match('^[%w_-]+$') then
+    return nil
+  end
+
+  return code
+end
+
+local function normalizePositiveInteger(value, fallback, minValue, maxValue)
+  value = tonumber(value) or tonumber(fallback) or 0
+  value = math.floor(value)
+
+  minValue = tonumber(minValue) or 1
+  maxValue = tonumber(maxValue) or value
+
+  if value < minValue then value = minValue end
+  if value > maxValue then value = maxValue end
+
+  return value
+end
+
+local function createGrantToken(source, ownerId)
+  return ('house_stash:%s:%s:%s:%s'):format(
+    tostring(source or 0),
+    tostring(ownerId or ''):gsub('[^%w_:-]', ''),
+    tostring(os.time()),
+    tostring(math.random(100000, 999999))
+  )
+end
+
+local function cleanupExpiredInventoryContainerGrants()
+  local now = os.time()
+  for token, grant in pairs(InventoryContainerGrants) do
+    if type(grant) ~= 'table' or tonumber(grant.expiresAt) <= now then
+      InventoryContainerGrants[token] = nil
+    end
+  end
+end
 
 local function getItemDefinition(itemName)
   return MZItems and MZItems[itemName] or nil
@@ -153,6 +205,52 @@ local function getOrgStashContext(source, orgCode)
     player = orgData.player,
     membership = orgData.membership,
     org = orgData.org
+  }
+end
+
+local function getGrantedHouseStashContext(source, token)
+  token = trimString(token)
+  if token == '' then
+    return nil, 'invalid_container'
+  end
+
+  local grant = InventoryContainerGrants[token]
+  if type(grant) ~= 'table' then
+    return nil, 'container_access_denied'
+  end
+
+  if tonumber(grant.source) ~= tonumber(source) then
+    return nil, 'container_access_denied'
+  end
+
+  if tonumber(grant.expiresAt) <= os.time() then
+    InventoryContainerGrants[token] = nil
+    return nil, 'container_access_expired'
+  end
+
+  grant.expiresAt = os.time() + HouseStashGrantTtlSeconds
+
+  local player, err = getPlayerBySource(source)
+  if not player then
+    return nil, err
+  end
+
+  return {
+    label = grant.label,
+    ownerType = 'house',
+    ownerId = grant.ownerId,
+    inventoryType = MZConstants.InventoryTypes.STASH,
+    maxSlots = grant.maxSlots,
+    maxWeight = grant.maxWeight,
+    player = player,
+    house = {
+      code = grant.houseCode,
+      stash_id = grant.ownerId
+    },
+    grant = {
+      token = token,
+      expires_at = grant.expiresAt
+    }
   }
 end
 
@@ -512,6 +610,11 @@ local function buildInventoryContext(ctx, extra)
     if ctx.drop then
       context.drop_uid = tostring(ctx.drop.drop_uid or ctx.ownerId or '')
       context.coords = cloneTable(ctx.drop.coords_json or ctx.drop.coords or {})
+    end
+
+    if ctx.house then
+      context.house_code = tostring(ctx.house.code or '')
+      context.stash_id = tostring(ctx.house.stash_id or ctx.ownerId or '')
     end
   end
   return context
@@ -3321,6 +3424,7 @@ local PublicInventoryErrors = {
   cannot_stack = { code = 'cannot_stack', message = 'Items cannot be stacked together.' },
   no_free_slot = { code = 'no_free_slot', message = 'No free slot available.' },
   container_access_denied = { code = 'container_access_denied', message = 'Access to this container was denied.' },
+  container_access_expired = { code = 'container_access_denied', message = 'Access to this container expired.' },
   container_not_found = { code = 'container_not_found', message = 'Inventory container was not found.' },
   invalid_target = { code = 'invalid_target', message = 'Invalid inventory target.' },
   item_not_usable = { code = 'item_not_usable', message = 'Item is not usable.' },
@@ -3360,6 +3464,7 @@ local function mapPublicInventoryErrorCode(internalCode)
     vehicle_not_found = 'container_not_found',
     org_not_found = 'container_not_found',
     vehicle_access_denied = 'container_access_denied',
+    container_access_expired = 'container_access_denied',
     not_in_org = 'container_access_denied',
     org_membership_required = 'container_access_denied',
     org_duty_required = 'container_access_denied',
@@ -3480,6 +3585,15 @@ local function normalizePublicContainerDescriptor(descriptor)
     return normalized
   end
 
+  if containerType == 'house_stash' then
+    normalized.token = trimString(descriptor.token or descriptor.access_token or descriptor.grant_token)
+    if normalized.token == '' then
+      return nil, 'invalid_container'
+    end
+
+    return normalized
+  end
+
   return nil, 'invalid_container'
 end
 
@@ -3503,6 +3617,8 @@ local function resolvePublicContainerContext(source, descriptor)
     else
       ctx, err = getPersonalStashContext(source)
     end
+  elseif normalized.type == 'house_stash' then
+    ctx, err = getGrantedHouseStashContext(source, normalized.token)
   elseif normalized.type == 'drop' then
     ctx, err = getWorldDropContext(normalized.drop_uid)
   else
@@ -3593,6 +3709,8 @@ local function buildPublicContainerPayload(ctx, descriptor, rows, currentWeight)
       model = ctx.vehicle and tostring(ctx.vehicle.model or '') or nil,
       org_code = ctx.org and tostring(ctx.org.code or '') or descriptor.org_code,
       drop_uid = ctx.drop and tostring(ctx.drop.drop_uid or '') or descriptor.drop_uid,
+      house_code = ctx.house and tostring(ctx.house.code or '') or descriptor.house_code,
+      stash_id = ctx.house and tostring(ctx.house.stash_id or ctx.ownerId or '') or descriptor.stash_id,
       resolved_by = ctx.storage and tostring(ctx.storage.resolved_by or '') or nil,
       storage_category = ctx.storage and tostring(ctx.storage.category or '') or nil
     },
@@ -3717,7 +3835,7 @@ local function buildPublicTouchedSnapshots(source, descriptors)
         tostring(normalized.scope or ''),
         tostring(normalized.plate or ''),
         tostring(normalized.org_code or ''),
-        tostring(normalized.drop_uid or '')
+        tostring(normalized.drop_uid or '') .. '|' .. tostring(normalized.token or '')
       )
       if not dedupe[dedupeKey] then
         local ok, snapshotOrErr = getPublicInventorySnapshot(source, normalized)
@@ -3774,6 +3892,63 @@ function MZInventoryService.openPlayerInventory(source)
   return buildPublicInventorySuccess({
     snapshot = snapshotOrErr
   })
+end
+
+function MZInventoryService.createHouseStashAccessGrant(source, descriptor)
+  descriptor = type(descriptor) == 'table' and descriptor or {}
+  source = tonumber(source)
+  if not source or source <= 0 then
+    return false, 'invalid_source'
+  end
+
+  local player, playerErr = getPlayerBySource(source)
+  if not player then
+    return false, playerErr or 'player_not_loaded'
+  end
+
+  cleanupExpiredInventoryContainerGrants()
+
+  local houseCode = normalizeHouseCode(descriptor.houseCode or descriptor.house_code or descriptor.code)
+  if not houseCode then
+    return false, 'invalid_house'
+  end
+
+  local ownerId = trimString(descriptor.stashId or descriptor.stash_id or descriptor.id)
+  if ownerId == '' then
+    ownerId = ('house:%s'):format(houseCode)
+  end
+
+  local expectedOwnerId = ('house:%s'):format(houseCode)
+  if ownerId ~= expectedOwnerId then
+    return false, 'invalid_container'
+  end
+
+  local label = trimString(descriptor.label)
+  if label == '' then
+    label = ('Bau - %s'):format(houseCode)
+  end
+
+  local maxSlots = normalizePositiveInteger(descriptor.slots or descriptor.maxSlots or descriptor.max_slots, 50, 1, HouseStashMaxSlots)
+  local maxWeight = normalizePositiveInteger(descriptor.weight or descriptor.maxWeight or descriptor.max_weight, 100000, 1, HouseStashMaxWeight)
+  local token = createGrantToken(source, ownerId)
+
+  InventoryContainerGrants[token] = {
+    source = source,
+    houseCode = houseCode,
+    ownerId = ownerId,
+    label = label,
+    maxSlots = maxSlots,
+    maxWeight = maxWeight,
+    expiresAt = os.time() + HouseStashGrantTtlSeconds
+  }
+
+  return true, {
+    type = 'house_stash',
+    token = token,
+    house_code = houseCode,
+    stash_id = ownerId,
+    label = label
+  }
 end
 
 function MZInventoryService.openInventoryContainer(source, descriptor)

@@ -146,6 +146,10 @@ exports('OpenInventoryContainer', function(source, descriptor)
   return MZInventoryService.openInventoryContainer(source, descriptor)
 end)
 
+exports('CreateHouseStashAccessGrant', function(source, descriptor)
+  return MZInventoryService.createHouseStashAccessGrant(source, descriptor)
+end)
+
 exports('GetInventorySnapshot', function(source, descriptor)
   return MZInventoryService.getInventorySnapshot(source, descriptor)
 end)
