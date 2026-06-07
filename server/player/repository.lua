@@ -51,6 +51,13 @@ function MZPlayerRepository.updateCharinfo(citizenid, charinfo)
   })
 end
 
+function MZPlayerRepository.updatePhone(citizenid, phone)
+  MySQL.update.await('UPDATE mz_players SET phone = ? WHERE citizenid = ?', {
+    phone or '',
+    citizenid
+  })
+end
+
 function MZPlayerRepository.ensureAccount(citizenid)
   MySQL.insert.await([[
     INSERT INTO mz_player_accounts (citizenid, wallet, bank, dirty)
