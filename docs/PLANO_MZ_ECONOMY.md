@@ -231,7 +231,7 @@ Nao e obrigatorio criar `mz_playtime_sessions` separado se `mz_player_sessions` 
 | `/mzecon_rebuild_day [dia]` | Recalcula stats do dia |
 | `/mzecon_mark_transaction [id] [categoria]` | Corrige classificacao pontual |
 
-Todos devem exigir ACE especifica, por exemplo `mzcore.economy.manage` ou permissao equivalente no sistema de staff.
+Todos devem exigir permissao administrativa. No padrao atual do projeto, os comandos de economia devem ser restritos a membros de `group.mz_owner`.
 
 ## Relatorio diario minimo
 

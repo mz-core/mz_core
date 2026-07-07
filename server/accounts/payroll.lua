@@ -59,6 +59,27 @@ local function buildPayrollActor(actor)
   }
 end
 
+local ledgerSequence = 0
+
+local function nextPayrollLedgerRef(orgCode, citizenid)
+  ledgerSequence = ledgerSequence + 1
+  local stamp = type(GetGameTimer) == 'function' and GetGameTimer() or os.time()
+  return ('payroll:%s:%s:%s:%s'):format(
+    tostring(orgCode or 'unknown'),
+    tostring(citizenid or 'unknown'),
+    tostring(stamp),
+    tostring(ledgerSequence)
+  )
+end
+
+local function recordPayrollLedger(data)
+  if MZAccountService and type(MZAccountService.RecordEconomyTransactionSafe) == 'function' then
+    return MZAccountService.RecordEconomyTransactionSafe(data)
+  end
+
+  return false, 'ledger_service_unavailable'
+end
+
 local function getPlayerBankBalance(citizenid)
   local row = MySQL.single.await('SELECT bank FROM mz_player_accounts WHERE citizenid = ? LIMIT 1', { citizenid })
   if not row then
@@ -129,20 +150,76 @@ function MZPayrollService.payCitizen(citizenid, actor)
         )
 
         if orgAccount then
-          local balance = tonumber(orgAccount.balance) or 0
+          local balance = math.floor(tonumber(orgAccount.balance) or 0)
 
           if balance >= salary then
+            local orgBalanceBefore = balance
+            local orgBalanceAfter = orgBalanceBefore - salary
             MySQL.update.await(
               'UPDATE mz_org_accounts SET balance = balance - ? WHERE org_id = ?',
               { salary, membership.org_id }
             )
 
+            local paymentBankBefore = getPlayerBankBalance(citizenid)
             if bankBefore == nil then
-              bankBefore = getPlayerBankBalance(citizenid)
+              bankBefore = paymentBankBefore
             end
+
             local ok = addBankMoney(citizenid, salary)
             if ok then
-              bankAfter = getPlayerBankBalance(citizenid)
+              local paymentBankAfter = getPlayerBankBalance(citizenid)
+              bankAfter = paymentBankAfter
+
+              local externalRef = nextPayrollLedgerRef(membership.org_code, citizenid)
+              local payrollMetadata = {
+                operation = 'pay_salary',
+                org_id = tonumber(membership.org_id) or membership.org_id,
+                org_code = tostring(membership.org_code),
+                org_name = tostring(membership.org_name or ''),
+                grade_level = tonumber(membership.grade_level) or 0,
+                grade_name = tostring(membership.grade_name or ''),
+                salary = salary,
+                duty = asBool(membership.duty),
+                require_duty = requireDuty == true
+              }
+
+              recordPayrollLedger({
+                citizenid = tostring(citizenid),
+                license = tostring(playerRow.license or ''),
+                account = 'bank',
+                amount = salary,
+                balance_before = paymentBankBefore,
+                balance_after = paymentBankAfter,
+                direction = 'in',
+                category = 'salary',
+                reason = 'payroll_salary',
+                source_resource = 'mz_core',
+                source_type = 'payroll',
+                counts_as_income = true,
+                counts_as_expense = false,
+                related_org_code = tostring(membership.org_code),
+                external_ref = externalRef,
+                metadata = payrollMetadata
+              })
+
+              recordPayrollLedger({
+                account = 'org',
+                amount = salary,
+                balance_before = orgBalanceBefore,
+                balance_after = orgBalanceAfter,
+                direction = 'out',
+                category = 'salary_expense',
+                reason = 'payroll_salary_expense',
+                source_resource = 'mz_core',
+                source_type = 'payroll',
+                counts_as_income = false,
+                counts_as_expense = true,
+                related_citizenid = tostring(citizenid),
+                related_org_code = tostring(membership.org_code),
+                external_ref = externalRef,
+                metadata = payrollMetadata
+              })
+
               paid[#paid + 1] = {
                 org = membership.org_code,
                 amount = salary,

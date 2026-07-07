@@ -69,6 +69,27 @@ local function normalizeReason(value)
   return value
 end
 
+local ledgerSequence = 0
+
+local function nextLedgerRef(prefix, orgCode)
+  ledgerSequence = ledgerSequence + 1
+  local stamp = type(GetGameTimer) == 'function' and GetGameTimer() or os.time()
+  return ('%s:%s:%s:%s'):format(
+    tostring(prefix or 'org_account'),
+    tostring(orgCode or 'unknown'),
+    tostring(stamp),
+    tostring(ledgerSequence)
+  )
+end
+
+local function recordOrgLedger(data)
+  if MZAccountService and type(MZAccountService.RecordEconomyTransactionSafe) == 'function' then
+    return MZAccountService.RecordEconomyTransactionSafe(data)
+  end
+
+  return false, 'ledger_service_unavailable'
+end
+
 local function getPlayerDisplayName(player, source)
   if player and player.charinfo then
     local first = tostring(player.charinfo.firstname or ''):gsub('^%s+', ''):gsub('%s+$', '')
@@ -339,11 +360,25 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
     return false, 'insufficient_player_funds'
   end
 
+  local externalRef = nextLedgerRef('org_transfer', orgCode)
   local removeOk, removeErr = MZAccountService.removeMoney(source, 'bank', amount, {
     actorSource = source,
-    reason = reason or 'org_account_deposit',
+    reason = 'org_deposit',
+    category = 'org_transfer',
+    source_resource = 'mz_core',
+    source_type = 'org_account',
     sourceType = 'org_account',
-    sourceRef = orgCode
+    sourceRef = orgCode,
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    counts_as_income = false,
+    counts_as_expense = false,
+    data = {
+      operation = 'deposit',
+      user_reason = reason,
+      org_code = tostring(org.code),
+      player_source = source
+    }
   })
 
   if not removeOk then
@@ -362,9 +397,22 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
   if affected <= 0 then
     MZAccountService.addMoney(source, 'bank', amount, {
       actorSource = source,
-      reason = 'org_account_deposit_rollback',
+      reason = 'org_deposit_rollback',
+      category = 'org_transfer',
+      source_resource = 'mz_core',
+      source_type = 'org_account',
       sourceType = 'org_account',
-      sourceRef = orgCode
+      sourceRef = orgCode,
+      related_org_code = tostring(org.code),
+      external_ref = externalRef,
+      counts_as_income = false,
+      counts_as_expense = false,
+      data = {
+        operation = 'deposit_rollback',
+        user_reason = reason,
+        org_code = tostring(org.code),
+        player_source = source
+      }
     })
     logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, 'deposit_failed', { amount = amount })
     return false, 'deposit_failed'
@@ -379,6 +427,33 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
     amount = amount,
     reason = reason,
     transaction_id = txId
+  })
+
+  recordOrgLedger({
+    account = 'org',
+    amount = amount,
+    balance_before = balanceBefore,
+    balance_after = balanceAfter,
+    direction = 'transfer',
+    category = 'org_transfer',
+    reason = 'org_deposit',
+    source_resource = 'mz_core',
+    source_type = 'org_account',
+    counts_as_income = false,
+    counts_as_expense = false,
+    related_citizenid = tostring(actorPlayer.citizenid),
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    metadata = {
+      operation = 'deposit',
+      user_reason = reason,
+      org_id = tonumber(org.id) or org.id,
+      org_code = tostring(org.code),
+      player_source = source,
+      player_bank_before = playerBankBefore,
+      player_bank_after = playerBankBefore - amount,
+      transaction_id = txId
+    }
   })
 
   return true, {
@@ -425,6 +500,7 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
     return false, 'insufficient_org_funds'
   end
 
+  local externalRef = nextLedgerRef('org_transfer', orgCode)
   local affected = MySQL.update.await('UPDATE mz_org_accounts SET balance = balance - ? WHERE org_id = ? AND balance >= ?', {
     amount,
     org.id,
@@ -442,9 +518,22 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
   local playerBankBefore = math.floor(tonumber((actorPlayer.money or {}).bank) or 0)
   local addOk, addErr = MZAccountService.addMoney(source, 'bank', amount, {
     actorSource = source,
-    reason = reason or 'org_account_withdraw',
+    reason = 'org_withdraw',
+    category = 'org_transfer',
+    source_resource = 'mz_core',
+    source_type = 'org_account',
     sourceType = 'org_account',
-    sourceRef = orgCode
+    sourceRef = orgCode,
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    counts_as_income = false,
+    counts_as_expense = false,
+    data = {
+      operation = 'withdraw',
+      user_reason = reason,
+      org_code = tostring(org.code),
+      player_source = source
+    }
   })
 
   if not addOk then
@@ -466,6 +555,33 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
     amount = amount,
     reason = reason,
     transaction_id = txId
+  })
+
+  recordOrgLedger({
+    account = 'org',
+    amount = amount,
+    balance_before = balanceBefore,
+    balance_after = balanceAfter,
+    direction = 'transfer',
+    category = 'org_transfer',
+    reason = 'org_withdraw',
+    source_resource = 'mz_core',
+    source_type = 'org_account',
+    counts_as_income = false,
+    counts_as_expense = false,
+    related_citizenid = tostring(actorPlayer.citizenid),
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    metadata = {
+      operation = 'withdraw',
+      user_reason = reason,
+      org_id = tonumber(org.id) or org.id,
+      org_code = tostring(org.code),
+      player_source = source,
+      player_bank_before = playerBankBefore,
+      player_bank_after = playerBankBefore + amount,
+      transaction_id = txId
+    }
   })
 
   return true, {
@@ -542,6 +658,7 @@ function MZOrgAccountService.addBalance(orgCode, amount, actor, reason)
   end
 
   local newBalance = balance + amount
+  local externalRef = nextLedgerRef('admin_org_adjustment', orgCode)
 
   MySQL.update.await('UPDATE mz_org_accounts SET balance = ? WHERE org_id = ?', {
     newBalance, org.id
@@ -550,6 +667,29 @@ function MZOrgAccountService.addBalance(orgCode, amount, actor, reason)
   logOrgAccountAction('add_balance', org, actor, balance, newBalance, {
     amount = amount,
     reason = reason
+  })
+
+  recordOrgLedger({
+    account = 'org',
+    amount = amount,
+    balance_before = math.floor(tonumber(balance) or 0),
+    balance_after = math.floor(tonumber(newBalance) or 0),
+    direction = 'adjustment',
+    category = 'admin_org_adjustment',
+    reason = 'admin_org_add_balance',
+    source_resource = 'mz_core',
+    source_type = 'admin_command',
+    counts_as_income = false,
+    counts_as_expense = false,
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    metadata = {
+      operation = 'add_balance',
+      user_reason = normalizeReason(reason),
+      actor = tostring(actor or 'system'),
+      org_id = tonumber(org.id) or org.id,
+      org_code = tostring(org.code)
+    }
   })
 
   return true, newBalance
@@ -571,6 +711,7 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
   end
 
   local newBalance = balance - amount
+  local externalRef = nextLedgerRef('admin_org_adjustment', orgCode)
 
   MySQL.update.await('UPDATE mz_org_accounts SET balance = ? WHERE org_id = ?', {
     newBalance, org.id
@@ -579,6 +720,29 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
   logOrgAccountAction('remove_balance', org, actor, balance, newBalance, {
     amount = amount,
     reason = reason
+  })
+
+  recordOrgLedger({
+    account = 'org',
+    amount = amount,
+    balance_before = math.floor(tonumber(balance) or 0),
+    balance_after = math.floor(tonumber(newBalance) or 0),
+    direction = 'adjustment',
+    category = 'admin_org_adjustment',
+    reason = 'admin_org_remove_balance',
+    source_resource = 'mz_core',
+    source_type = 'admin_command',
+    counts_as_income = false,
+    counts_as_expense = false,
+    related_org_code = tostring(org.code),
+    external_ref = externalRef,
+    metadata = {
+      operation = 'remove_balance',
+      user_reason = normalizeReason(reason),
+      actor = tostring(actor or 'system'),
+      org_id = tonumber(org.id) or org.id,
+      org_code = tostring(org.code)
+    }
   })
 
   return true, newBalance

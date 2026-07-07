@@ -22,6 +22,87 @@ local function reply(message)
   print(('[mz_core] %s'):format(message))
 end
 
+local function replyPlayer(source, message)
+  TriggerClientEvent('chat:addMessage', source, {
+    color = { 255, 80, 80 },
+    args = { 'mz_core', tostring(message or '') }
+  })
+end
+
+local function joinReason(args, startIndex)
+  local parts = {}
+  for index = startIndex, #(args or {}) do
+    parts[#parts + 1] = tostring(args[index])
+  end
+
+  local reason = table.concat(parts, ' ')
+  reason = reason:gsub('^%s+', ''):gsub('%s+$', '')
+  if reason == '' then
+    return 'console_money_add'
+  end
+
+  return reason
+end
+
+RegisterCommand('mz_money_add', function(source, args)
+  if tonumber(source) ~= 0 then
+    return replyPlayer(source, 'Este comando so pode ser usado pelo console do servidor.')
+  end
+
+  args = type(args) == 'table' and args or {}
+
+  local targetArg = tostring(args[1] or '')
+  local accountArg = tostring(args[2] or '')
+  local amountArg = tostring(args[3] or '')
+
+  if targetArg == '' or accountArg == '' or amountArg == '' then
+    return reply('mz_money_add ERRO: uso mz_money_add <source> <wallet|bank|dirty|cash|money|black_money> <amount> [reason]')
+  end
+
+  local targetSource = tonumber(targetArg)
+  if not targetSource or targetSource <= 0 or math.floor(targetSource) ~= targetSource then
+    return reply('mz_money_add ERRO: neste MVP o target deve ser source online numerico')
+  end
+
+  local player = MZPlayerService.getPlayer(targetSource)
+  if not player or not player.citizenid then
+    return reply(('mz_money_add ERRO: target nao carregado no mz_core (%s)'):format(targetArg))
+  end
+
+  local normalizedAccount, accountErr = MZAccountService.NormalizeMoneyAccount(accountArg)
+  if not normalizedAccount then
+    return reply(('mz_money_add ERRO: %s'):format(accountErr or 'invalid_account'))
+  end
+
+  local amount = tonumber(amountArg)
+  if not amount or amount ~= amount or amount <= 0 or math.floor(amount) ~= amount then
+    return reply('mz_money_add ERRO: amount deve ser inteiro positivo')
+  end
+  amount = math.floor(amount)
+
+  local reason = joinReason(args, 4)
+  local ok, err = MZAccountService.addMoney(targetSource, normalizedAccount, amount, {
+    reason = reason,
+    category = 'admin_adjustment',
+    source_resource = 'mz_core',
+    source_type = 'console_command',
+    counts_as_income = false,
+    counts_as_expense = false,
+    data = {
+      command = 'mz_money_add',
+      target = targetArg,
+      account = normalizedAccount,
+      amount = amount
+    }
+  })
+
+  if not ok then
+    return reply(('mz_money_add ERRO: %s'):format(tostring(err or 'unknown')))
+  end
+
+  reply(('mz_money_add OK: target=%s account=%s amount=%s'):format(targetArg, normalizedAccount, amount))
+end, false)
+
 RegisterCommand('mzorg_balance', function(source, args)
   if not canUseAccountCommand(source) then
     return reply('Sem permissão.')

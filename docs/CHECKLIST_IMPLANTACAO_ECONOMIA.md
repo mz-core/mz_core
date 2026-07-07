@@ -11,7 +11,7 @@ Objetivo: checklist pratico para implantar `mz_economy` com seguranca, sem quebr
 - [ ] Se o legado estiver ativo, decidir entre desligar, isolar ou adaptar ao ledger.
 - [ ] Confirmar que `mz_core` inicia antes de recursos que usam dinheiro.
 - [ ] Confirmar que `mz_phone` atual, e nao o telefone legado, e o telefone oficial.
-- [ ] Definir ACE/permissao staff para economia, por exemplo `mzcore.economy.manage`.
+- [ ] Confirmar que owners/socios estao no grupo `group.mz_owner`.
 - [ ] Definir contas oficiais: `wallet`, `bank`, `dirty`.
 - [ ] Definir aliases aceitos: `cash`, `money`, `black_money`, se necessario.
 - [ ] Definir categorias oficiais de transacao.
@@ -60,21 +60,21 @@ Objetivo: checklist pratico para implantar `mz_economy` com seguranca, sem quebr
 
 ### Payroll
 
-- [ ] Payroll deixa de creditar banco direto ou registra ledger explicitamente.
-- [ ] Credito do jogador usa categoria `salary`.
-- [ ] Debito da org usa categoria `salary_expense`.
-- [ ] Salario conta como renda do jogador.
-- [ ] Salario nao conta como dinheiro criado se org foi debitada.
-- [ ] Payroll registra org de origem.
-- [ ] Payroll registra grade/cargo quando disponivel.
+- [x] Payroll deixa de creditar banco direto ou registra ledger explicitamente.
+- [x] Credito do jogador usa categoria `salary`.
+- [x] Debito da org usa categoria `salary_expense`.
+- [x] Salario conta como renda do jogador.
+- [x] Salario nao conta como dinheiro criado se org foi debitada.
+- [x] Payroll registra org de origem.
+- [x] Payroll registra grade/cargo quando disponivel.
 
 ### Org bank
 
-- [ ] Deposito player -> org registra `org_transfer`.
-- [ ] Saque org -> player registra `org_transfer`.
-- [ ] `AddOrgAccountBalance` registra `admin_org_adjustment`.
-- [ ] `RemoveOrgAccountBalance` registra `admin_org_adjustment`.
-- [ ] Comandos `mzorg_deposit` e `mzorg_withdraw` nao contam como renda.
+- [x] Deposito player -> org registra `org_transfer`.
+- [x] Saque org -> player registra `org_transfer`.
+- [x] `AddOrgAccountBalance` registra `admin_org_adjustment`.
+- [x] `RemoveOrgAccountBalance` registra `admin_org_adjustment`.
+- [x] Comandos `mzorg_deposit` e `mzorg_withdraw` nao contam como renda.
 
 ### QBCore bridge
 
@@ -96,32 +96,40 @@ Objetivo: checklist pratico para implantar `mz_economy` com seguranca, sem quebr
 
 ## Fase 4: playtime e ganho por hora
 
-- [ ] Usar `mz_player_sessions` como fonte primaria.
-- [ ] Criar agregacao diaria por jogador.
-- [ ] Dividir sessoes que passam da meia-noite.
-- [ ] Ignorar sessoes muito curtas se necessario.
-- [ ] Definir criterio de atividade real.
-- [ ] Criar `income_per_hour`.
-- [ ] Criar `expense_per_hour`.
-- [ ] Separar renda legal, ilegal, salario e unknown.
-- [ ] Criar comando para recalcular dia.
+- [x] Usar `mz_player_sessions` como fonte primaria.
+- [x] Criar agregacao diaria por jogador.
+- [x] Dividir sessoes que passam da meia-noite.
+- [x] Ignorar sessoes muito curtas se necessario.
+- [x] Definir criterio de atividade real.
+- [x] Criar `income_per_hour`.
+- [x] Criar `expense_per_hour`.
+- [x] Separar renda legal, ilegal, salario e unknown.
+- [x] Criar comando para recalcular dia.
 - [ ] Validar resultados com alguns jogadores reais.
 
 ## Fase 5: relatorios staff
 
-- [ ] Criar `/mzecon_report [dia]`.
-- [ ] Criar `/mzecon_player [id/citizenid] [dia]`.
-- [ ] Criar `/mzecon_sources [dia]`.
-- [ ] Criar `/mzecon_unknown [dia]`.
-- [ ] Criar `/mzecon_rebuild_day [dia]`.
-- [ ] Proteger comandos por ACE/permissao.
-- [ ] Mostrar total criado.
-- [ ] Mostrar total removido.
-- [ ] Mostrar total transferido.
-- [ ] Mostrar top fontes de renda.
-- [ ] Mostrar top gastos.
-- [ ] Mostrar ganho/hora medio.
-- [ ] Mostrar transacoes sem categoria.
+- [x] Criar `/mzecon_report [dia]`.
+- [x] Criar `/mzecon_player [id/citizenid] [dia]`.
+- [x] Criar `/mzecon_sources [dia]`.
+- [x] Criar `/mzecon_unknown [dia]`.
+- [x] Criar `/mzecon_rebuild_day [dia]`.
+- [x] Criar `/mzecon_daily [dia]`.
+- [x] Criar `/mzecon_top [dia] [tipo]`.
+- [x] Criar `/mzecon_health [dia]`.
+- [x] Criar `/mzecon_unknown_sources [dia] [limit]`.
+- [x] Criar `/mzecon_category_report [dia] [limit]`.
+- [x] Criar `/mzecon_suspicious [dia] [limit]`.
+- [x] Criar `/mzecon_player_tx [id/citizenid] [dia] [limit]`.
+- [x] Criar `/mzecon_source_tx [source_resource] [dia] [limit]`.
+- [x] Proteger comandos por ACE/permissao.
+- [x] Mostrar total criado.
+- [x] Mostrar total removido.
+- [x] Mostrar total transferido.
+- [x] Mostrar top fontes de renda.
+- [x] Mostrar top gastos.
+- [x] Mostrar ganho/hora medio.
+- [x] Mostrar transacoes sem categoria.
 
 ## Fase 6: preparar precos dinamicos
 
@@ -187,10 +195,16 @@ Objetivo: checklist pratico para implantar `mz_economy` com seguranca, sem quebr
 - [ ] Depositar dinheiro em org e confirmar `org_transfer`.
 - [ ] Sacar dinheiro de org e confirmar `org_transfer`.
 - [ ] Rodar payroll e confirmar `salary`.
-- [ ] Usar comando admin de saldo e confirmar `admin_adjustment`.
+- [ ] Usar comando admin de saldo de org e confirmar `admin_org_adjustment`.
 - [ ] Usar chamada antiga sem metadata e confirmar `unknown`.
 - [ ] Gerar relatorio diario.
 - [ ] Verificar ganho/hora de um jogador conhecido.
+- [ ] Rodar `/mzecon_health` e confirmar status/percentual unknown.
+- [ ] Rodar `/mzecon_unknown_sources` e confirmar fontes unknown.
+- [ ] Rodar `/mzecon_category_report` e confirmar categorias por direction.
+- [ ] Rodar `/mzecon_suspicious` e revisar anomalias simples.
+- [ ] Rodar `/mzecon_player_tx` para jogador conhecido.
+- [ ] Rodar `/mzecon_source_tx` para recurso conhecido.
 - [ ] Verificar que transferencias nao inflam renda.
 - [ ] Verificar que starter money nao conta como renda.
 - [ ] Verificar que relatorio funciona apos restart.
