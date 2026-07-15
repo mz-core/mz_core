@@ -8,10 +8,44 @@ function MZAccountRepository.updatePlayerMoney(citizenid, moneyType, amount)
   local allowed = { wallet = true, bank = true, dirty = true }
   if not allowed[moneyType] then return false end
 
-  MySQL.update.await(([[UPDATE mz_player_accounts SET %s = ? WHERE citizenid = ?]]):format(moneyType), {
+  local affected = MySQL.update.await(([[UPDATE mz_player_accounts SET %s = ? WHERE citizenid = ?]]):format(moneyType), {
     amount,
     citizenid
   })
 
-  return true
+  return affected ~= nil
+end
+
+function MZAccountRepository.transferPlayerMoney(citizenid, fromAccount, toAccount, fromAmount, toAmount)
+  local allowed = { wallet = true, bank = true, dirty = true }
+  if not allowed[fromAccount] or not allowed[toAccount] or fromAccount == toAccount then
+    return false
+  end
+
+  local affected = MySQL.update.await(([[
+    UPDATE mz_player_accounts
+    SET %s = ?, %s = ?
+    WHERE citizenid = ?
+  ]]):format(fromAccount, toAccount), {
+    fromAmount,
+    toAmount,
+    citizenid
+  })
+
+  return tonumber(affected) == 1
+end
+
+function MZAccountRepository.transferBankBetweenPlayers(senderCitizenId, senderAmount, targetCitizenId, targetAmount)
+  local ok = MySQL.transaction.await({
+    {
+      query = 'UPDATE mz_player_accounts SET bank = ? WHERE citizenid = ?',
+      parameters = { senderAmount, senderCitizenId }
+    },
+    {
+      query = 'UPDATE mz_player_accounts SET bank = ? WHERE citizenid = ?',
+      parameters = { targetAmount, targetCitizenId }
+    }
+  })
+
+  return ok == true
 end

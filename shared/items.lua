@@ -59,6 +59,18 @@ MZItems = {
     generateSerial = true
   },
 
+  bank_card = {
+    image = 'bank_card.png',
+    label = 'Cartao Bancario',
+    weight = 50,
+    stack = false,
+    unique = true,
+    usable = true,
+    closeOnUse = false,
+    bindOnReceive = true,
+    generateSerial = true
+  },
+
   weapon_pistol = {
     image = 'weapon_pistol.png',
     label = 'Pistola',

@@ -53,3 +53,11 @@ end)
 exports('RemoveMoney', function(source, moneyType, amount, metadata)
   return MZAccountService.removeMoney(source, moneyType, amount, withExportContext(metadata))
 end)
+
+exports('TransferMoneyBetweenAccounts', function(source, fromAccount, toAccount, amount, metadata)
+  return MZAccountService.transferMoneyBetweenAccounts(source, fromAccount, toAccount, amount, withExportContext(metadata))
+end)
+
+exports('TransferBankBetweenPlayers', function(source, targetCitizenIdOrSource, amount, metadata)
+  return MZAccountService.transferBankBetweenPlayers(source, targetCitizenIdOrSource, amount, withExportContext(metadata))
+end)

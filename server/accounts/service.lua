@@ -1,5 +1,8 @@
 MZAccountService = {}
 
+local AccountLocks = {}
+local LOCK_TIMEOUT_MS = 10000
+
 local MONEY_ACCOUNT_ALIASES = {
   cash = 'wallet',
   money = 'wallet',
@@ -44,6 +47,83 @@ local function cloneTable(value)
     out[key] = cloneTable(item)
   end
   return out
+end
+
+local function generateTransactionRef(prefix)
+  return ('%s-%s-%s-%06d'):format(
+    tostring(prefix or 'mzacc'),
+    tostring(os.time()),
+    tostring(type(GetGameTimer) == 'function' and GetGameTimer() or 0),
+    math.random(0, 999999)
+  )
+end
+
+local function normalizeLockKeys(keys)
+  local seen = {}
+  local out = {}
+
+  for _, value in ipairs(keys or {}) do
+    local key = tostring(value or '')
+    if key ~= '' and not seen[key] then
+      seen[key] = true
+      out[#out + 1] = key
+    end
+  end
+
+  table.sort(out)
+  return out
+end
+
+local function acquireAccountLocks(keys)
+  keys = normalizeLockKeys(keys)
+  local startedAt = type(GetGameTimer) == 'function' and GetGameTimer() or 0
+
+  while true do
+    local available = true
+    for _, key in ipairs(keys) do
+      if AccountLocks[key] then
+        available = false
+        break
+      end
+    end
+
+    if available then
+      for _, key in ipairs(keys) do
+        AccountLocks[key] = true
+      end
+      return true, keys
+    end
+
+    local now = type(GetGameTimer) == 'function' and GetGameTimer() or startedAt
+    if now - startedAt >= LOCK_TIMEOUT_MS then
+      return false, 'account_busy'
+    end
+
+    Wait(0)
+  end
+end
+
+local function releaseAccountLocks(keys)
+  for _, key in ipairs(keys or {}) do
+    AccountLocks[key] = nil
+  end
+end
+
+local function withAccountLocks(keys, handler)
+  local acquired, lockKeysOrErr = acquireAccountLocks(keys)
+  if not acquired then
+    return false, lockKeysOrErr
+  end
+
+  local results = table.pack(pcall(handler))
+  releaseAccountLocks(lockKeysOrErr)
+
+  if results[1] ~= true then
+    print(('[mz_core][accounts] locked operation failed: %s'):format(tostring(results[2])))
+    return false, 'database_error'
+  end
+
+  return table.unpack(results, 2, results.n)
 end
 
 local function getInvokingResourceSafe()
@@ -364,98 +444,246 @@ function MZAccountService.getMoney(source)
   return player.money
 end
 
-function MZAccountService.setMoney(source, moneyType, amount, options)
+local function persistSingleMoneyChange(source, moneyType, nextAmount, options, direction, ledgerAmount)
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, 'player_not_loaded' end
 
-  options = normalizeServiceOptions(options)
+  local ok, detailOrErr = withAccountLocks({ player.citizenid }, function()
+    player = MZPlayerService.getPlayer(source)
+    if not player then return false, 'player_not_loaded' end
 
-  local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
-  if not normalizedMoneyType then return false, moneyTypeErr end
-  moneyType = normalizedMoneyType
+    local currentAmount = math.floor(tonumber((player.money or {})[moneyType]) or 0)
+    local resolvedAmount = type(nextAmount) == 'function' and nextAmount(currentAmount) or nextAmount
+    if resolvedAmount == nil then return false, 'not_enough_money' end
 
-  if type(amount) ~= 'number' or amount < 0 then
-    return false, 'invalid_amount'
-  end
+    resolvedAmount = math.floor(tonumber(resolvedAmount) or -1)
+    if resolvedAmount < 0 then return false, 'invalid_amount' end
 
-  local nextAmount = math.floor(amount)
-  local currentAmount = math.floor(tonumber((player.money or {})[moneyType]) or 0)
+    local persisted = MZAccountRepository.updatePlayerMoney(player.citizenid, moneyType, resolvedAmount)
+    if not persisted then return false, 'database_error' end
 
-  local ok = MZAccountRepository.updatePlayerMoney(player.citizenid, moneyType, nextAmount)
-  if not ok then return false, 'invalid_money_type' end
+    player.money = player.money or {}
+    player.money[moneyType] = resolvedAmount
+    return true, {
+      player = player,
+      before = currentAmount,
+      after = resolvedAmount
+    }
+  end)
 
-  player.money[moneyType] = nextAmount
+  if not ok then return false, detailOrErr end
 
-  logMoneyChange('set_money', player, moneyType, currentAmount, nextAmount, nextAmount - currentAmount, options)
+  local detail = detailOrErr
+  local delta = detail.after - detail.before
+  logMoneyChange('set_money', detail.player, moneyType, detail.before, detail.after, delta, options)
 
-  local delta = nextAmount - currentAmount
   if delta ~= 0 then
-    local ledgerDirection = 'adjustment'
-    local ledgerAmount = math.abs(delta)
-
-    if options and options.__ledgerFromWrapper == true then
-      ledgerDirection = options.__ledgerDirection or ledgerDirection
-      ledgerAmount = tonumber(options.__ledgerAmount) or ledgerAmount
-    end
-
-    recordLedgerChange(player, moneyType, currentAmount, nextAmount, ledgerDirection, ledgerAmount, options)
+    recordLedgerChange(
+      detail.player,
+      moneyType,
+      detail.before,
+      detail.after,
+      direction or 'adjustment',
+      math.floor(tonumber(ledgerAmount) or math.abs(delta)),
+      options
+    )
   end
 
   return true
+end
+
+function MZAccountService.setMoney(source, moneyType, amount, options)
+  local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
+  if not normalizedMoneyType then return false, moneyTypeErr end
+  if type(amount) ~= 'number' or amount < 0 then return false, 'invalid_amount' end
+
+  options = normalizeServiceOptions(options)
+  local direction = options.__ledgerFromWrapper == true and options.__ledgerDirection or 'adjustment'
+  local ledgerAmount = options.__ledgerFromWrapper == true and options.__ledgerAmount or nil
+  return persistSingleMoneyChange(source, normalizedMoneyType, math.floor(amount), options, direction, ledgerAmount)
 end
 
 function MZAccountService.addMoney(source, moneyType, amount, options)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then return false, 'player_not_loaded' end
-
   local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
   if not normalizedMoneyType then return false, moneyTypeErr end
-  moneyType = normalizedMoneyType
-
   if type(amount) ~= 'number' or amount <= 0 then return false, 'invalid_amount' end
 
   local value = math.floor(amount)
-  local current = math.floor(tonumber((player.money or {})[moneyType]) or 0)
-
   options = normalizeServiceOptions(options)
   options.reason = options.reason or 'add_money'
-  options.__ledgerFromWrapper = true
-  options.__ledgerDirection = 'in'
-  options.__ledgerAmount = value
 
-  local ok, err = MZAccountService.setMoney(source, moneyType, current + value, options)
-  if not ok then
-    return false, err
-  end
-
-  return true
+  return persistSingleMoneyChange(source, normalizedMoneyType, function(current)
+    return current + value
+  end, options, 'in', value)
 end
 
 function MZAccountService.removeMoney(source, moneyType, amount, options)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then return false, 'player_not_loaded' end
-
   local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
   if not normalizedMoneyType then return false, moneyTypeErr end
-  moneyType = normalizedMoneyType
-
   if type(amount) ~= 'number' or amount <= 0 then return false, 'invalid_amount' end
 
   local value = math.floor(amount)
-  local current = math.floor(tonumber((player.money or {})[moneyType]) or 0)
-
-  if current < value then return false, 'not_enough_money' end
-
   options = normalizeServiceOptions(options)
   options.reason = options.reason or 'remove_money'
-  options.__ledgerFromWrapper = true
-  options.__ledgerDirection = 'out'
-  options.__ledgerAmount = value
 
-  local ok, err = MZAccountService.setMoney(source, moneyType, current - value, options)
-  if not ok then
-    return false, err
+  return persistSingleMoneyChange(source, normalizedMoneyType, function(current)
+    if current < value then return nil end
+    return current - value
+  end, options, 'out', value)
+end
+
+function MZAccountService.transferMoneyBetweenAccounts(source, fromAccount, toAccount, amount, options)
+  local player = MZPlayerService.getPlayer(source)
+  if not player then return { ok = false, error = 'player_not_loaded' } end
+
+  local fromNormalized, fromErr = MZAccountService.NormalizeMoneyAccount(fromAccount)
+  if not fromNormalized then return { ok = false, error = fromErr } end
+
+  local toNormalized, toErr = MZAccountService.NormalizeMoneyAccount(toAccount)
+  if not toNormalized then return { ok = false, error = toErr } end
+  if fromNormalized == toNormalized then return { ok = false, error = 'same_account' } end
+
+  amount = math.floor(tonumber(amount) or 0)
+  if amount <= 0 then return { ok = false, error = 'invalid_amount' } end
+
+  options = normalizeServiceOptions(options)
+  options.external_ref = trim(options.external_ref or options.externalRef)
+  if options.external_ref == '' then
+    options.external_ref = generateTransactionRef('mzacc-own')
   end
 
-  return true
+  local ok, detailOrErr = withAccountLocks({ player.citizenid }, function()
+    player = MZPlayerService.getPlayer(source)
+    if not player then return false, 'player_not_loaded' end
+
+    local fromBefore = math.floor(tonumber((player.money or {})[fromNormalized]) or 0)
+    local toBefore = math.floor(tonumber((player.money or {})[toNormalized]) or 0)
+    if fromBefore < amount then return false, 'not_enough_money' end
+
+    local fromAfter = fromBefore - amount
+    local toAfter = toBefore + amount
+    local persisted = MZAccountRepository.transferPlayerMoney(
+      player.citizenid,
+      fromNormalized,
+      toNormalized,
+      fromAfter,
+      toAfter
+    )
+    if not persisted then return false, 'database_error' end
+
+    player.money[fromNormalized] = fromAfter
+    player.money[toNormalized] = toAfter
+    return true, {
+      player = player,
+      fromBefore = fromBefore,
+      fromAfter = fromAfter,
+      toBefore = toBefore,
+      toAfter = toAfter
+    }
+  end)
+
+  if not ok then return { ok = false, error = detailOrErr } end
+
+  local detail = detailOrErr
+  logMoneyChange('transfer_between_accounts_out', detail.player, fromNormalized, detail.fromBefore, detail.fromAfter, -amount, options)
+  logMoneyChange('transfer_between_accounts_in', detail.player, toNormalized, detail.toBefore, detail.toAfter, amount, options)
+  recordLedgerChange(detail.player, fromNormalized, detail.fromBefore, detail.fromAfter, 'out', amount, options)
+  recordLedgerChange(detail.player, toNormalized, detail.toBefore, detail.toAfter, 'in', amount, options)
+
+  return {
+    ok = true,
+    balances = cloneTable(detail.player.money),
+    transactionRef = options.external_ref
+  }
+end
+
+function MZAccountService.transferBankBetweenPlayers(source, target, amount, options)
+  local sender = MZPlayerService.getPlayer(source)
+  if not sender then return { ok = false, error = 'player_not_loaded' } end
+
+  local targetSource = tonumber(target)
+  local recipient
+  if targetSource and targetSource > 0 then
+    recipient = MZPlayerService.getPlayer(targetSource)
+  else
+    recipient = MZPlayerService.getPlayerByCitizenId(tostring(target or ''))
+    targetSource = recipient and recipient.source or nil
+  end
+
+  if not recipient or not targetSource then return { ok = false, error = 'recipient_offline' } end
+  if tostring(sender.citizenid) == tostring(recipient.citizenid) then
+    return { ok = false, error = 'self_transfer' }
+  end
+
+  amount = math.floor(tonumber(amount) or 0)
+  if amount <= 0 then return { ok = false, error = 'invalid_amount' } end
+
+  options = normalizeServiceOptions(options)
+  local fee = math.floor(tonumber(options.fee) or 0)
+  if fee < 0 then return { ok = false, error = 'invalid_fee' } end
+  local totalCost = amount + fee
+
+  options.external_ref = trim(options.external_ref or options.externalRef)
+  if options.external_ref == '' then
+    options.external_ref = generateTransactionRef('mzacc-transfer')
+  end
+  options.related_citizenid = tostring(recipient.citizenid)
+  options.data = type(options.data) == 'table' and options.data or {}
+  options.data.fee = fee
+  options.data.transfer_amount = amount
+
+  local ok, detailOrErr = withAccountLocks({ sender.citizenid, recipient.citizenid }, function()
+    sender = MZPlayerService.getPlayer(source)
+    recipient = MZPlayerService.getPlayer(targetSource)
+    if not sender or not recipient then return false, 'recipient_offline' end
+
+    local senderBefore = math.floor(tonumber((sender.money or {}).bank) or 0)
+    local recipientBefore = math.floor(tonumber((recipient.money or {}).bank) or 0)
+    if senderBefore < totalCost then return false, 'not_enough_money' end
+
+    local senderAfter = senderBefore - totalCost
+    local recipientAfter = recipientBefore + amount
+    local persisted = MZAccountRepository.transferBankBetweenPlayers(
+      sender.citizenid,
+      senderAfter,
+      recipient.citizenid,
+      recipientAfter
+    )
+    if not persisted then return false, 'database_error' end
+
+    sender.money.bank = senderAfter
+    recipient.money.bank = recipientAfter
+    return true, {
+      sender = sender,
+      recipient = recipient,
+      senderBefore = senderBefore,
+      senderAfter = senderAfter,
+      recipientBefore = recipientBefore,
+      recipientAfter = recipientAfter
+    }
+  end)
+
+  if not ok then return { ok = false, error = detailOrErr } end
+
+  local detail = detailOrErr
+  logMoneyChange('transfer_bank_out', detail.sender, 'bank', detail.senderBefore, detail.senderAfter, -totalCost, options)
+  recordLedgerChange(detail.sender, 'bank', detail.senderBefore, detail.senderAfter, 'out', totalCost, options)
+
+  local recipientOptions = cloneTable(options)
+  recipientOptions.related_citizenid = tostring(detail.sender.citizenid)
+  recipientOptions.reason = options.recipient_reason or options.reason
+  logMoneyChange('transfer_bank_in', detail.recipient, 'bank', detail.recipientBefore, detail.recipientAfter, amount, recipientOptions)
+  recordLedgerChange(detail.recipient, 'bank', detail.recipientBefore, detail.recipientAfter, 'in', amount, recipientOptions)
+
+  return {
+    ok = true,
+    balances = {
+      sender = detail.senderAfter,
+      recipient = detail.recipientAfter
+    },
+    targetSource = targetSource,
+    targetCitizenId = tostring(detail.recipient.citizenid),
+    transactionRef = options.external_ref,
+    fee = fee
+  }
 end
