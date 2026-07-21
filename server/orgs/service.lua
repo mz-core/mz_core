@@ -1353,6 +1353,33 @@ function MZOrgService.removeMember(citizenid, orgCode, actor)
   return MZOrgService.removeOrgMemberSecure(actor, orgCode, citizenid)
 end
 
+-- Caminho administrativo interno usado somente pelo comando protegido no
+-- console. Nao e exportado e nao transforma source=0 em bypass dos endpoints
+-- seguros usados por jogadores/resources.
+function MZOrgService.removeMemberFromConsole(citizenid, orgCode, actor)
+  if tonumber(actor) ~= 0 then return false, 'forbidden' end
+  citizenid = limitString(citizenid, 64)
+  orgCode = limitString(orgCode, 64)
+  if not citizenid then return false, 'invalid_target' end
+  if not orgCode then return false, 'invalid_org' end
+
+  local org = MZOrgRepository.getOrgByCode(orgCode)
+  if not org then return false, 'invalid_org' end
+  local membership = MZOrgRepository.getPlayerMembership(citizenid, org.id)
+  if not membership or not asBool(membership.active) then return false, 'not_member' end
+
+  MZOrgRepository.removeMembership(citizenid, org.id)
+  refreshOnlinePlayerByCitizenId(citizenid)
+  logDetailed('orgs', 'org.member.remove', {
+    actor = makeActor(0),
+    target = { type = 'player', id = citizenid, citizenid = citizenid },
+    context = { org_code = org.code, org_id = org.id },
+    before = { grade_id = tonumber(membership.grade_id) or membership.grade_id },
+    meta = { command = 'mzorg_remove', console = true }
+  })
+  return true, { orgCode = org.code, targetCitizenId = citizenid, removed = true }
+end
+
 function MZOrgService.promoteOrgMemberSecure(source, orgCode, targetCitizenId)
   local ok, ctxOrErr = validateMemberAction(source, orgCode, targetCitizenId, { 'members.promote', 'manage.members' })
   if not ok then return false, ctxOrErr end

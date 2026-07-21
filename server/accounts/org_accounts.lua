@@ -1,5 +1,7 @@
 MZOrgAccountService = {}
 
+local MAX_SAFE_INTEGER = 9007199254740991
+
 local function asBool(value)
   if value == true then return true end
   if value == false or value == nil then return false end
@@ -233,6 +235,228 @@ local function logOrgAccountAction(action, org, actor, beforeBalance, afterBalan
   })
 end
 
+local function actorCitizenId(actor)
+  if type(actor) ~= 'number' then return nil end
+  local player = MZPlayerService.getPlayer(actor)
+  return player and player.citizenid and tostring(player.citizenid) or nil
+end
+
+local function orgLedgerMetadata(org, reason, category, sourceType, extra)
+  local options = {
+    reason = reason,
+    category = category,
+    source_resource = 'mz_core',
+    source_type = sourceType,
+    sourceType = sourceType,
+    related_org_code = tostring(org.code),
+    external_ref = nextLedgerRef(category, org.code),
+    data = {
+      channel = 'org'
+    }
+  }
+  for key, value in pairs(type(extra) == 'table' and extra or {}) do
+    options.data[key] = value
+  end
+  return MZAccountService.NormalizeFinancialLedgerOptionsInternal(options, {
+    category = category,
+    reason = reason,
+    sourceType = sourceType,
+    sourceResource = 'mz_core'
+  }), options
+end
+
+local function persistOrgBalanceChange(org, nextAmount, actor, operation, reason)
+  return MZAccountService.WithFinancialLocksInternal({ ('org:%s'):format(org.id) }, function()
+    local row = MySQL.single.await('SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1', { org.id })
+    if not row then return false, 'org_account_missing' end
+
+    local beforeBalance = math.floor(tonumber(row.balance) or 0)
+    local afterBalance = type(nextAmount) == 'function' and nextAmount(beforeBalance) or nextAmount
+    if afterBalance == nil then return false, 'insufficient_funds' end
+    afterBalance = math.floor(tonumber(afterBalance) or -1)
+    if afterBalance < 0 or afterBalance > MAX_SAFE_INTEGER then return false, 'invalid_amount' end
+
+    local delta = afterBalance - beforeBalance
+    local metadata, options = orgLedgerMetadata(
+      org,
+      operation,
+      'admin_org_adjustment',
+      'admin_command',
+      { user_reason = normalizeReason(reason), actor = tostring(actor or 'system') }
+    )
+    local correlationId = MZAccountService.GenerateFinancialTransactionRefInternal('mzacc-org-adjust')
+    local outbox
+    if delta ~= 0 then
+      local outboxErr
+      outbox, outboxErr = MZAccountService.BuildFinancialOutboxInternal({
+        correlationId = correlationId,
+        eventType = 'org_account_adjustment',
+        allowMissingSourceCitizenId = true,
+        sourceCitizenId = actorCitizenId(actor),
+        account = 'org',
+        amount = math.abs(delta),
+        fee = 0,
+        reason = metadata.reason,
+        ledgerMetadata = metadata,
+        options = options,
+        entries = {
+          MZAccountService.BuildFinancialLedgerEntryInternal(
+            1, nil, 'org', 'adjustment', math.abs(delta), beforeBalance, afterBalance, metadata
+          )
+        }
+      })
+      if outbox == false then return false, outboxErr end
+    end
+
+    if not MZAccountRepository.updateOrgMoneyWithOutbox(org.id, afterBalance, outbox) then
+      return false, 'database_error'
+    end
+
+    return true, {
+      before = beforeBalance,
+      after = afterBalance,
+      amount = math.abs(delta),
+      direction = 'adjustment',
+      metadata = metadata,
+      outboxPersisted = type(outbox) == 'table'
+    }
+  end)
+end
+
+local function persistOrgPlayerTransfer(source, org, amount, operation, userReason)
+  local player = MZPlayerService.getPlayer(source)
+  if not player or not player.citizenid then return false, 'player_not_loaded' end
+
+  return MZAccountService.WithFinancialLocksInternal({
+    tostring(player.citizenid),
+    ('org:%s'):format(org.id)
+  }, function()
+    player = MZPlayerService.getPlayer(source)
+    if not player or not player.citizenid then return false, 'player_not_loaded' end
+
+    local row = MySQL.single.await('SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1', { org.id })
+    if not row then return false, 'org_account_missing' end
+
+    local playerBefore = math.floor(tonumber((player.money or {}).bank) or 0)
+    local orgBefore = math.floor(tonumber(row.balance) or 0)
+    local playerAfter, orgAfter
+    if operation == 'deposit' then
+      if playerBefore < amount then return false, 'insufficient_player_funds' end
+      if orgBefore > MAX_SAFE_INTEGER - amount then return false, 'amount_overflow' end
+      playerAfter = playerBefore - amount
+      orgAfter = orgBefore + amount
+    else
+      if orgBefore < amount then return false, 'insufficient_org_funds' end
+      if playerBefore > MAX_SAFE_INTEGER - amount then return false, 'amount_overflow' end
+      playerAfter = playerBefore + amount
+      orgAfter = orgBefore - amount
+    end
+
+    local externalRef = nextLedgerRef('org_transfer', org.code)
+    local common = {
+      category = 'org_transfer',
+      source_resource = 'mz_core',
+      source_type = 'org_account',
+      sourceType = 'org_account',
+      related_org_code = tostring(org.code),
+      external_ref = externalRef,
+      counts_as_income = false,
+      counts_as_expense = false,
+      data = { channel = 'org', operation = operation, user_reason = userReason }
+    }
+    local playerOptions = {}
+    for key, value in pairs(common) do playerOptions[key] = value end
+    playerOptions.reason = operation == 'deposit' and 'org_deposit' or 'org_withdraw'
+    local playerMetadata = MZAccountService.NormalizeFinancialLedgerOptionsInternal(playerOptions, {})
+
+    local orgOptions = {}
+    for key, value in pairs(common) do orgOptions[key] = value end
+    orgOptions.reason = playerOptions.reason
+    orgOptions.related_citizenid = tostring(player.citizenid)
+    local orgMetadata = MZAccountService.NormalizeFinancialLedgerOptionsInternal(orgOptions, {})
+
+    local entries
+    if operation == 'deposit' then
+      entries = {
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          1, player.citizenid, 'bank', 'out', amount, playerBefore, playerAfter, playerMetadata
+        ),
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          2, nil, 'org', 'in', amount, orgBefore, orgAfter, orgMetadata
+        )
+      }
+    else
+      entries = {
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          1, nil, 'org', 'out', amount, orgBefore, orgAfter, orgMetadata
+        ),
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          2, player.citizenid, 'bank', 'in', amount, playerBefore, playerAfter, playerMetadata
+        )
+      }
+    end
+
+    local outbox, outboxErr = MZAccountService.BuildFinancialOutboxInternal({
+      correlationId = MZAccountService.GenerateFinancialTransactionRefInternal('mzacc-org-transfer'),
+      eventType = 'org_transfer',
+      sourceCitizenId = player.citizenid,
+      account = 'multi',
+      amount = amount,
+      fee = 0,
+      reason = playerMetadata.reason,
+      ledgerMetadata = playerMetadata,
+      options = playerOptions,
+      entries = entries
+    })
+    if outbox == false then return false, outboxErr end
+
+    if not MZAccountRepository.transferPlayerBankAndOrg(
+      player.citizenid, playerAfter, org.id, orgAfter, outbox
+    ) then
+      return false, 'database_error'
+    end
+
+    player.money = player.money or {}
+    player.money.bank = playerAfter
+    return true, {
+      player = player,
+      playerBefore = playerBefore,
+      playerAfter = playerAfter,
+      orgBefore = orgBefore,
+      orgAfter = orgAfter,
+      externalRef = externalRef,
+      playerMetadata = playerMetadata,
+      orgMetadata = orgMetadata,
+      outboxPersisted = type(outbox) == 'table'
+    }
+  end)
+end
+
+local function recordLegacyOrgTransfer(detail, org, amount, operation)
+  local deposit = operation == 'deposit'
+  recordOrgLedger({
+    citizenid = tostring(detail.player.citizenid),
+    license = tostring(detail.player.license or ''),
+    account = 'bank', amount = amount,
+    balance_before = detail.playerBefore, balance_after = detail.playerAfter,
+    direction = deposit and 'out' or 'in', category = 'org_transfer',
+    reason = deposit and 'org_deposit' or 'org_withdraw',
+    source_resource = 'mz_core', source_type = 'org_account',
+    counts_as_income = false, counts_as_expense = false,
+    related_org_code = tostring(org.code), external_ref = detail.externalRef
+  })
+  recordOrgLedger({
+    account = 'org', amount = amount,
+    balance_before = detail.orgBefore, balance_after = detail.orgAfter,
+    direction = deposit and 'in' or 'out', category = 'org_transfer',
+    reason = deposit and 'org_deposit' or 'org_withdraw',
+    source_resource = 'mz_core', source_type = 'org_account',
+    counts_as_income = false, counts_as_expense = false,
+    related_citizenid = tostring(detail.player.citizenid),
+    related_org_code = tostring(org.code), external_ref = detail.externalRef
+  })
+end
+
 function MZOrgAccountService.getBalance(orgCode)
   local org = getOrgByCode(orgCode)
   if not org then
@@ -270,23 +494,33 @@ function MZOrgAccountService.setBalance(orgCode, amount, actor)
   amount = math.floor(tonumber(amount) or 0)
   if amount < 0 then amount = 0 end
 
-  local beforeBalance = 0
-  local existingRow = MySQL.single.await('SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1', { org.id })
-  if existingRow then
-    beforeBalance = math.floor(tonumber(existingRow.balance) or 0)
-  end
-
   MySQL.insert.await([[
     INSERT INTO mz_org_accounts (org_id, balance)
-    VALUES (?, ?)
-    ON DUPLICATE KEY UPDATE balance = VALUES(balance)
-  ]], { org.id, amount })
+    VALUES (?, 0)
+    ON DUPLICATE KEY UPDATE org_id = org_id
+  ]], { org.id })
 
-  logOrgAccountAction('set_balance', org, actor, beforeBalance, amount, {
+  local ok, detailOrErr = persistOrgBalanceChange(org, amount, actor, 'admin_org_set_balance')
+  if not ok then return false, detailOrErr end
+  local detail = detailOrErr
+
+  logOrgAccountAction('set_balance', org, actor, detail.before, detail.after, {
     amount = amount
   })
 
-  return true, amount
+  if detail.amount > 0 and detail.outboxPersisted ~= true then
+    recordOrgLedger({
+      account = 'org', amount = detail.amount,
+      balance_before = detail.before, balance_after = detail.after,
+      direction = detail.direction, category = detail.metadata.category,
+      reason = detail.metadata.reason, source_resource = detail.metadata.source_resource,
+      source_type = detail.metadata.source_type, counts_as_income = false,
+      counts_as_expense = false, related_org_code = tostring(org.code),
+      external_ref = detail.metadata.external_ref
+    })
+  end
+
+  return true, detail.after
 end
 
 function MZOrgAccountService.getAccountReadOnly(source, orgCode)
@@ -351,114 +585,28 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
     return false, 'forbidden'
   end
 
-  local playerBankBefore = math.floor(tonumber((actorPlayer.money or {}).bank) or 0)
-  if playerBankBefore < amount then
-    logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, 'insufficient_player_funds', {
-      amount = amount,
-      player_bank_before = playerBankBefore
-    })
-    return false, 'insufficient_player_funds'
+  local persisted, detailOrErr = persistOrgPlayerTransfer(source, org, amount, 'deposit', reason)
+  if not persisted then
+    logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, detailOrErr, { amount = amount })
+    return false, detailOrErr
   end
-
-  local externalRef = nextLedgerRef('org_transfer', orgCode)
-  local removeOk, removeErr = MZAccountService.removeMoney(source, 'bank', amount, {
-    actorSource = source,
-    reason = 'org_deposit',
-    category = 'org_transfer',
-    source_resource = 'mz_core',
-    source_type = 'org_account',
-    sourceType = 'org_account',
-    sourceRef = orgCode,
-    related_org_code = tostring(org.code),
-    external_ref = externalRef,
-    counts_as_income = false,
-    counts_as_expense = false,
-    data = {
-      operation = 'deposit',
-      user_reason = reason,
-      org_code = tostring(org.code),
-      player_source = source
-    }
+  local detail = detailOrErr
+  local txId = recordOrgAccountTransaction(org, 'deposit', amount, detail.orgBefore, detail.orgAfter, detail.player, source, reason, {
+    player_bank_before = detail.playerBefore,
+    player_bank_after = detail.playerAfter
   })
 
-  if not removeOk then
-    local err = removeErr == 'not_enough_money' and 'insufficient_player_funds' or (removeErr or 'deposit_failed')
-    logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, err, { amount = amount })
-    return false, err
-  end
-
-  local balanceBefore = math.floor(tonumber(balanceOrErr) or 0)
-  local balanceAfter = balanceBefore + amount
-  local affected = MySQL.update.await('UPDATE mz_org_accounts SET balance = ? WHERE org_id = ?', {
-    balanceAfter,
-    org.id
-  }) or 0
-
-  if affected <= 0 then
-    MZAccountService.addMoney(source, 'bank', amount, {
-      actorSource = source,
-      reason = 'org_deposit_rollback',
-      category = 'org_transfer',
-      source_resource = 'mz_core',
-      source_type = 'org_account',
-      sourceType = 'org_account',
-      sourceRef = orgCode,
-      related_org_code = tostring(org.code),
-      external_ref = externalRef,
-      counts_as_income = false,
-      counts_as_expense = false,
-      data = {
-        operation = 'deposit_rollback',
-        user_reason = reason,
-        org_code = tostring(org.code),
-        player_source = source
-      }
-    })
-    logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, 'deposit_failed', { amount = amount })
-    return false, 'deposit_failed'
-  end
-
-  local txId = recordOrgAccountTransaction(org, 'deposit', amount, balanceBefore, balanceAfter, actorPlayer, source, reason, {
-    player_bank_before = playerBankBefore,
-    player_bank_after = playerBankBefore - amount
-  })
-
-  logOrgAccountAction('org.account.deposit', org, source, balanceBefore, balanceAfter, {
+  logOrgAccountAction('org.account.deposit', org, source, detail.orgBefore, detail.orgAfter, {
     amount = amount,
     reason = reason,
     transaction_id = txId
   })
 
-  recordOrgLedger({
-    account = 'org',
-    amount = amount,
-    balance_before = balanceBefore,
-    balance_after = balanceAfter,
-    direction = 'transfer',
-    category = 'org_transfer',
-    reason = 'org_deposit',
-    source_resource = 'mz_core',
-    source_type = 'org_account',
-    counts_as_income = false,
-    counts_as_expense = false,
-    related_citizenid = tostring(actorPlayer.citizenid),
-    related_org_code = tostring(org.code),
-    external_ref = externalRef,
-    metadata = {
-      operation = 'deposit',
-      user_reason = reason,
-      org_id = tonumber(org.id) or org.id,
-      org_code = tostring(org.code),
-      player_source = source,
-      player_bank_before = playerBankBefore,
-      player_bank_after = playerBankBefore - amount,
-      transaction_id = txId
-    }
-  })
+  if detail.outboxPersisted ~= true then recordLegacyOrgTransfer(detail, org, amount, 'deposit') end
 
   return true, {
     orgCode = tostring(org.code),
-    balance = balanceAfter,
+    balance = detail.orgAfter,
     currency = 'R$',
     transactionId = txId
   }
@@ -491,102 +639,28 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
     return false, 'forbidden'
   end
 
-  local balanceBefore = math.floor(tonumber(balanceOrErr) or 0)
-  if balanceBefore < amount then
-    logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, 'insufficient_org_funds', {
-      amount = amount,
-      balance_before = balanceBefore
-    })
-    return false, 'insufficient_org_funds'
+  local persisted, detailOrErr = persistOrgPlayerTransfer(source, org, amount, 'withdraw', reason)
+  if not persisted then
+    logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, detailOrErr, { amount = amount })
+    return false, detailOrErr
   end
-
-  local externalRef = nextLedgerRef('org_transfer', orgCode)
-  local affected = MySQL.update.await('UPDATE mz_org_accounts SET balance = balance - ? WHERE org_id = ? AND balance >= ?', {
-    amount,
-    org.id,
-    amount
-  }) or 0
-
-  if affected <= 0 then
-    logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, 'insufficient_org_funds', {
-      amount = amount,
-      balance_before = balanceBefore
-    })
-    return false, 'insufficient_org_funds'
-  end
-
-  local playerBankBefore = math.floor(tonumber((actorPlayer.money or {}).bank) or 0)
-  local addOk, addErr = MZAccountService.addMoney(source, 'bank', amount, {
-    actorSource = source,
-    reason = 'org_withdraw',
-    category = 'org_transfer',
-    source_resource = 'mz_core',
-    source_type = 'org_account',
-    sourceType = 'org_account',
-    sourceRef = orgCode,
-    related_org_code = tostring(org.code),
-    external_ref = externalRef,
-    counts_as_income = false,
-    counts_as_expense = false,
-    data = {
-      operation = 'withdraw',
-      user_reason = reason,
-      org_code = tostring(org.code),
-      player_source = source
-    }
+  local detail = detailOrErr
+  local txId = recordOrgAccountTransaction(org, 'withdraw', amount, detail.orgBefore, detail.orgAfter, detail.player, source, reason, {
+    player_bank_before = detail.playerBefore,
+    player_bank_after = detail.playerAfter
   })
 
-  if not addOk then
-    MySQL.update.await('UPDATE mz_org_accounts SET balance = balance + ? WHERE org_id = ?', {
-      amount,
-      org.id
-    })
-    logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, addErr or 'withdraw_failed', { amount = amount })
-    return false, 'withdraw_failed'
-  end
-
-  local balanceAfter = balanceBefore - amount
-  local txId = recordOrgAccountTransaction(org, 'withdraw', amount, balanceBefore, balanceAfter, actorPlayer, source, reason, {
-    player_bank_before = playerBankBefore,
-    player_bank_after = playerBankBefore + amount
-  })
-
-  logOrgAccountAction('org.account.withdraw', org, source, balanceBefore, balanceAfter, {
+  logOrgAccountAction('org.account.withdraw', org, source, detail.orgBefore, detail.orgAfter, {
     amount = amount,
     reason = reason,
     transaction_id = txId
   })
 
-  recordOrgLedger({
-    account = 'org',
-    amount = amount,
-    balance_before = balanceBefore,
-    balance_after = balanceAfter,
-    direction = 'transfer',
-    category = 'org_transfer',
-    reason = 'org_withdraw',
-    source_resource = 'mz_core',
-    source_type = 'org_account',
-    counts_as_income = false,
-    counts_as_expense = false,
-    related_citizenid = tostring(actorPlayer.citizenid),
-    related_org_code = tostring(org.code),
-    external_ref = externalRef,
-    metadata = {
-      operation = 'withdraw',
-      user_reason = reason,
-      org_id = tonumber(org.id) or org.id,
-      org_code = tostring(org.code),
-      player_source = source,
-      player_bank_before = playerBankBefore,
-      player_bank_after = playerBankBefore + amount,
-      transaction_id = txId
-    }
-  })
+  if detail.outboxPersisted ~= true then recordLegacyOrgTransfer(detail, org, amount, 'withdraw') end
 
   return true, {
     orgCode = tostring(org.code),
-    balance = balanceAfter,
+    balance = detail.orgAfter,
     currency = 'R$',
     transactionId = txId
   }
@@ -657,23 +731,23 @@ function MZOrgAccountService.addBalance(orgCode, amount, actor, reason)
     return false, 'invalid_amount'
   end
 
-  local newBalance = balance + amount
-  local externalRef = nextLedgerRef('admin_org_adjustment', orgCode)
+  local changed, detailOrErr = persistOrgBalanceChange(org, function(current)
+    if current > MAX_SAFE_INTEGER - amount then return nil end
+    return current + amount
+  end, actor, 'admin_org_add_balance', reason)
+  if not changed then return false, detailOrErr == 'insufficient_funds' and 'amount_overflow' or detailOrErr end
+  local detail = detailOrErr
 
-  MySQL.update.await('UPDATE mz_org_accounts SET balance = ? WHERE org_id = ?', {
-    newBalance, org.id
-  })
-
-  logOrgAccountAction('add_balance', org, actor, balance, newBalance, {
+  logOrgAccountAction('add_balance', org, actor, detail.before, detail.after, {
     amount = amount,
     reason = reason
   })
 
-  recordOrgLedger({
+  if detail.outboxPersisted ~= true then recordOrgLedger({
     account = 'org',
     amount = amount,
-    balance_before = math.floor(tonumber(balance) or 0),
-    balance_after = math.floor(tonumber(newBalance) or 0),
+    balance_before = detail.before,
+    balance_after = detail.after,
     direction = 'adjustment',
     category = 'admin_org_adjustment',
     reason = 'admin_org_add_balance',
@@ -682,7 +756,7 @@ function MZOrgAccountService.addBalance(orgCode, amount, actor, reason)
     counts_as_income = false,
     counts_as_expense = false,
     related_org_code = tostring(org.code),
-    external_ref = externalRef,
+    external_ref = detail.metadata.external_ref,
     metadata = {
       operation = 'add_balance',
       user_reason = normalizeReason(reason),
@@ -690,9 +764,9 @@ function MZOrgAccountService.addBalance(orgCode, amount, actor, reason)
       org_id = tonumber(org.id) or org.id,
       org_code = tostring(org.code)
     }
-  })
+  }) end
 
-  return true, newBalance
+  return true, detail.after
 end
 
 function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
@@ -710,23 +784,23 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
     return false, 'insufficient_funds'
   end
 
-  local newBalance = balance - amount
-  local externalRef = nextLedgerRef('admin_org_adjustment', orgCode)
+  local changed, detailOrErr = persistOrgBalanceChange(org, function(current)
+    if current < amount then return nil end
+    return current - amount
+  end, actor, 'admin_org_remove_balance', reason)
+  if not changed then return false, detailOrErr end
+  local detail = detailOrErr
 
-  MySQL.update.await('UPDATE mz_org_accounts SET balance = ? WHERE org_id = ?', {
-    newBalance, org.id
-  })
-
-  logOrgAccountAction('remove_balance', org, actor, balance, newBalance, {
+  logOrgAccountAction('remove_balance', org, actor, detail.before, detail.after, {
     amount = amount,
     reason = reason
   })
 
-  recordOrgLedger({
+  if detail.outboxPersisted ~= true then recordOrgLedger({
     account = 'org',
     amount = amount,
-    balance_before = math.floor(tonumber(balance) or 0),
-    balance_after = math.floor(tonumber(newBalance) or 0),
+    balance_before = detail.before,
+    balance_after = detail.after,
     direction = 'adjustment',
     category = 'admin_org_adjustment',
     reason = 'admin_org_remove_balance',
@@ -735,7 +809,7 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
     counts_as_income = false,
     counts_as_expense = false,
     related_org_code = tostring(org.code),
-    external_ref = externalRef,
+    external_ref = detail.metadata.external_ref,
     metadata = {
       operation = 'remove_balance',
       user_reason = normalizeReason(reason),
@@ -743,9 +817,9 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
       org_id = tonumber(org.id) or org.id,
       org_code = tostring(org.code)
     }
-  })
+  }) end
 
-  return true, newBalance
+  return true, detail.after
 end
 
 exports('GetOrgAccountBalance', function(orgCode)

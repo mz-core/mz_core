@@ -17,6 +17,36 @@ Config.StarterMoney = {
   dirty = 0
 }
 
+-- Fase 3 / P3-D: escrita e dispatcher permanecem desligados por padrão.
+-- O dispatcher processa somente a outbox; nunca altera saldo.
+Config.FinancialOutbox = {
+  enabled = false,
+  writesEnabled = false,
+  schemaVersion = 1,
+  dispatcher = {
+    enabled = false,
+    pollMs = 1000,
+    batchSize = 25,
+    leaseSeconds = 30,
+    maxAttempts = 10,
+    backoffBaseSeconds = 5,
+    backoffMaxSeconds = 900,
+    jitterPercent = 20
+  },
+  administration = {
+    enabled = false,
+    ace = 'mz_core.financial_outbox.manage',
+    command = 'mz_core_outbox',
+    allowApply = false,
+    applyEnableConvar = 'mz_core_p3e_reprocess_apply',
+    previewTtlSeconds = 120,
+    confirmationPhrase = 'REPROCESS_DEAD_LETTER',
+    pendingSlaSeconds = 300,
+    processedRetentionDays = 90,
+    reportLimit = 50
+  }
+}
+
 Config.Player = {
   defaultMetadata = {
     hunger = 100,

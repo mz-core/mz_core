@@ -6,6 +6,13 @@ MZCoreState.seedOk = false
 MZCoreState.ready = false
 MZCoreState.prepareStage = 'file_loaded'
 MZCoreState.prepareError = nil
+MZCoreState.financialOutbox = {
+  schemaVersion = 1,
+  schemaReady = false,
+  enabled = Config and Config.FinancialOutbox and Config.FinancialOutbox.enabled == true,
+  writesEnabled = false,
+  dispatcherEnabled = false
+}
 
 print('[mz_core][prepare] file loaded')
 
@@ -153,6 +160,55 @@ local statements = {
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uq_mz_player_accounts_citizenid (citizenid)
   )]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_account_idempotency (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    source_resource VARCHAR(100) NOT NULL,
+    actor_citizenid VARCHAR(64) NOT NULL,
+    idempotency_key VARCHAR(64) NOT NULL,
+    operation VARCHAR(32) NOT NULL,
+    request_fingerprint VARCHAR(255) NOT NULL,
+    correlation_id VARCHAR(128) NOT NULL,
+    result_json LONGTEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_account_idempotency_scope (source_resource, actor_citizenid, idempotency_key),
+    UNIQUE KEY uq_mz_account_idempotency_correlation (correlation_id),
+    KEY idx_mz_account_idempotency_created_at (created_at)
+  )]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_financial_outbox (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    correlation_id VARCHAR(128) NOT NULL,
+    idempotency_key VARCHAR(64) NULL,
+    event_type VARCHAR(64) NOT NULL,
+    source_citizenid VARCHAR(64) NULL,
+    target_citizenid VARCHAR(64) NULL,
+    account VARCHAR(32) NOT NULL,
+    amount BIGINT UNSIGNED NOT NULL,
+    fee BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    reason VARCHAR(128) NOT NULL,
+    source_resource VARCHAR(100) NOT NULL,
+    source_channel VARCHAR(32) NOT NULL,
+    payload_version SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+    metadata_json LONGTEXT NOT NULL,
+    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+    attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    claim_token VARCHAR(64) NULL,
+    claimed_at TIMESTAMP NULL DEFAULT NULL,
+    lease_expires_at TIMESTAMP NULL DEFAULT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    processed_at TIMESTAMP NULL DEFAULT NULL,
+    last_error VARCHAR(255) NULL,
+    UNIQUE KEY uq_mz_financial_outbox_correlation (correlation_id),
+    UNIQUE KEY uq_mz_financial_outbox_idempotency_scope (
+      source_resource, source_citizenid, idempotency_key
+    ),
+    KEY idx_mz_financial_outbox_dispatch (status, next_retry_at, id),
+    KEY idx_mz_financial_outbox_lease (lease_expires_at, status),
+    KEY idx_mz_financial_outbox_created (created_at),
+    KEY idx_mz_financial_outbox_source (source_resource, created_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
 
   [[CREATE TABLE IF NOT EXISTS mz_player_sessions (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -458,6 +514,65 @@ local function ensureColumn(tableName, columnName, definition)
   )
 end
 
+local function validateTableStructure(tableName, requiredColumns, requiredIndexes)
+  local label = ('validate_schema_%s'):format(tostring(tableName))
+  MZCoreState.prepareStage = label
+  print(('[mz_core][prepare] running %s'):format(label))
+
+  local tableRow = MySQL.single.await([[
+    SELECT ENGINE AS engine, TABLE_COLLATION AS table_collation
+    FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_name = ?
+    LIMIT 1
+  ]], { tableName })
+
+  if not tableRow then
+    error(('[%s] table_missing'):format(label), 0)
+  end
+
+  if tostring(tableRow.engine or ''):lower() ~= 'innodb' then
+    error(('[%s] engine_invalid:%s'):format(label, tostring(tableRow.engine)), 0)
+  end
+
+  if not tostring(tableRow.table_collation or ''):lower():find('^utf8mb4_') then
+    error(('[%s] charset_invalid:%s'):format(label, tostring(tableRow.table_collation)), 0)
+  end
+
+  local columnRows = MySQL.query.await([[
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = DATABASE() AND table_name = ?
+  ]], { tableName }) or {}
+  local columns = {}
+  for _, row in ipairs(columnRows) do
+    columns[tostring(row.column_name or ''):lower()] = true
+  end
+
+  for _, columnName in ipairs(requiredColumns or {}) do
+    if columns[tostring(columnName):lower()] ~= true then
+      error(('[%s] column_missing:%s'):format(label, tostring(columnName)), 0)
+    end
+  end
+
+  local indexRows = MySQL.query.await([[
+    SELECT DISTINCT index_name
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE() AND table_name = ?
+  ]], { tableName }) or {}
+  local indexes = {}
+  for _, row in ipairs(indexRows) do
+    indexes[tostring(row.index_name or ''):lower()] = true
+  end
+
+  for _, indexName in ipairs(requiredIndexes or {}) do
+    if indexes[tostring(indexName):lower()] ~= true then
+      error(('[%s] index_missing:%s'):format(label, tostring(indexName)), 0)
+    end
+  end
+
+  return true
+end
+
 local function runPrepare()
   MZCoreState.prepareStage = 'enter'
   MZCoreState.prepareEnteredXpcall = false
@@ -515,6 +630,39 @@ local function runPrepare()
     for index, statement in ipairs(statements) do
       runPrepareQuery(('statement_%03d'):format(index), statement)
     end
+
+    validateTableStructure('mz_financial_outbox', {
+      'id', 'correlation_id', 'idempotency_key', 'event_type',
+      'source_citizenid', 'target_citizenid', 'account', 'amount', 'fee',
+      'reason', 'source_resource', 'source_channel', 'payload_version',
+      'metadata_json', 'status', 'attempts', 'next_retry_at', 'claim_token',
+      'claimed_at', 'lease_expires_at', 'created_at', 'processed_at', 'last_error'
+    }, {
+      'PRIMARY', 'uq_mz_financial_outbox_correlation',
+      'uq_mz_financial_outbox_idempotency_scope',
+      'idx_mz_financial_outbox_dispatch', 'idx_mz_financial_outbox_lease',
+      'idx_mz_financial_outbox_created', 'idx_mz_financial_outbox_source'
+    })
+    MZCoreState.financialOutbox.schemaReady = true
+    MZCoreState.financialOutbox.schemaVersion = tonumber(
+      Config and Config.FinancialOutbox and Config.FinancialOutbox.schemaVersion
+    ) or 1
+    MZCoreState.financialOutbox.enabled = Config
+      and Config.FinancialOutbox
+      and Config.FinancialOutbox.enabled == true
+      or false
+    MZCoreState.financialOutbox.writesEnabled = MZCoreState.financialOutbox.enabled == true
+      and Config.FinancialOutbox.writesEnabled == true
+    MZCoreState.financialOutbox.dispatcherEnabled = MZCoreState.financialOutbox.enabled == true
+      and type(Config.FinancialOutbox.dispatcher) == 'table'
+      and Config.FinancialOutbox.dispatcher.enabled == true
+      or false
+    print(('[mz_core][outbox] schema ready version=%s enabled=%s writes=%s dispatcher=%s'):format(
+      tostring(MZCoreState.financialOutbox.schemaVersion),
+      tostring(MZCoreState.financialOutbox.enabled),
+      tostring(MZCoreState.financialOutbox.writesEnabled),
+      tostring(MZCoreState.financialOutbox.dispatcherEnabled)
+    ))
 
     ensureColumn('mz_players', 'pos_x', 'pos_x DOUBLE NOT NULL DEFAULT 0')
     ensureColumn('mz_players', 'pos_y', 'pos_y DOUBLE NOT NULL DEFAULT 0')

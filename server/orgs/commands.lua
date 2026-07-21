@@ -123,7 +123,12 @@ RegisterCommand('mzorg_remove', function(source, args)
     return reply(source, 'Uso: mzorg_remove [citizenid] [org]')
   end
 
-  local ok, err = exports['mz_core']:RemoveMemberFromOrg(citizenid, orgCode, source)
+  local ok, err
+  if tonumber(source) == 0 then
+    ok, err = MZOrgService.removeMemberFromConsole(citizenid, orgCode, 0)
+  else
+    ok, err = exports['mz_core']:RemoveMemberFromOrg(citizenid, orgCode, source)
+  end
   if not ok then
     return reply(source, ('Erro: %s'):format(err or 'unknown'))
   end

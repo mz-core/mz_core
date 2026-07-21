@@ -80,34 +80,8 @@ local function recordPayrollLedger(data)
   return false, 'ledger_service_unavailable'
 end
 
-local function getPlayerBankBalance(citizenid)
-  local row = MySQL.single.await('SELECT bank FROM mz_player_accounts WHERE citizenid = ? LIMIT 1', { citizenid })
-  if not row then
-    return nil
-  end
-
-  return math.floor(tonumber(row.bank) or 0)
-end
-
-local function addBankMoney(citizenid, amount)
-  local row = MySQL.single.await('SELECT * FROM mz_player_accounts WHERE citizenid = ? LIMIT 1', { citizenid })
-  if not row then
-    return false, 'account_not_found'
-  end
-
-  local newBank = math.floor((tonumber(row.bank) or 0) + amount)
-
-  MySQL.update.await('UPDATE mz_player_accounts SET bank = ? WHERE citizenid = ?', {
-    newBank, citizenid
-  })
-
-  local online = MZPlayerService.getPlayerByCitizenId(citizenid)
-  if online and online.money then
-    online.money.bank = newBank
-  end
-
-  return true, newBank
-end
+local persistPayrollPayment
+local recordLegacyPayroll
 
 function MZPayrollService.payCitizen(citizenid, actor)
   local playerRow = MZPlayerRepository.getByCitizenId(citizenid)
@@ -144,94 +118,27 @@ function MZPayrollService.payCitizen(citizenid, actor)
           goto continue_membership
         end
 
-        local orgAccount = MySQL.single.await(
-          'SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1',
-          { membership.org_id }
+        local paidOk, detailOrErr = persistPayrollPayment(
+          citizenid, membership, salary, playerRow, requireDuty
         )
-
-        if orgAccount then
-          local balance = math.floor(tonumber(orgAccount.balance) or 0)
-
-          if balance >= salary then
-            local orgBalanceBefore = balance
-            local orgBalanceAfter = orgBalanceBefore - salary
-            MySQL.update.await(
-              'UPDATE mz_org_accounts SET balance = balance - ? WHERE org_id = ?',
-              { salary, membership.org_id }
-            )
-
-            local paymentBankBefore = getPlayerBankBalance(citizenid)
-            if bankBefore == nil then
-              bankBefore = paymentBankBefore
-            end
-
-            local ok = addBankMoney(citizenid, salary)
-            if ok then
-              local paymentBankAfter = getPlayerBankBalance(citizenid)
-              bankAfter = paymentBankAfter
-
-              local externalRef = nextPayrollLedgerRef(membership.org_code, citizenid)
-              local payrollMetadata = {
-                operation = 'pay_salary',
-                org_id = tonumber(membership.org_id) or membership.org_id,
-                org_code = tostring(membership.org_code),
-                org_name = tostring(membership.org_name or ''),
-                grade_level = tonumber(membership.grade_level) or 0,
-                grade_name = tostring(membership.grade_name or ''),
-                salary = salary,
-                duty = asBool(membership.duty),
-                require_duty = requireDuty == true
-              }
-
-              recordPayrollLedger({
-                citizenid = tostring(citizenid),
-                license = tostring(playerRow.license or ''),
-                account = 'bank',
-                amount = salary,
-                balance_before = paymentBankBefore,
-                balance_after = paymentBankAfter,
-                direction = 'in',
-                category = 'salary',
-                reason = 'payroll_salary',
-                source_resource = 'mz_core',
-                source_type = 'payroll',
-                counts_as_income = true,
-                counts_as_expense = false,
-                related_org_code = tostring(membership.org_code),
-                external_ref = externalRef,
-                metadata = payrollMetadata
-              })
-
-              recordPayrollLedger({
-                account = 'org',
-                amount = salary,
-                balance_before = orgBalanceBefore,
-                balance_after = orgBalanceAfter,
-                direction = 'out',
-                category = 'salary_expense',
-                reason = 'payroll_salary_expense',
-                source_resource = 'mz_core',
-                source_type = 'payroll',
-                counts_as_income = false,
-                counts_as_expense = true,
-                related_citizenid = tostring(citizenid),
-                related_org_code = tostring(membership.org_code),
-                external_ref = externalRef,
-                metadata = payrollMetadata
-              })
-
-              paid[#paid + 1] = {
-                org = membership.org_code,
-                amount = salary,
-                source = 'org_account'
-              }
-            end
+        if paidOk then
+          local detail = detailOrErr
+          if bankBefore == nil then bankBefore = detail.bankBefore end
+          bankAfter = detail.bankAfter
+          if detail.outboxPersisted ~= true then
+            recordLegacyPayroll(citizenid, membership, salary, detail)
           end
+          paid[#paid + 1] = {
+            org = membership.org_code,
+            amount = salary,
+            source = 'org_account',
+            replayed = detail.replayed == true
+          }
         else
           skipped[#skipped + 1] = {
             org = membership.org_code,
             amount = salary,
-            reason = 'org_account_missing'
+            reason = detailOrErr or 'payment_failed'
           }
         end
       end
@@ -288,6 +195,152 @@ function MZPayrollService.payCitizen(citizenid, actor)
   end
 
   return true, paid
+end
+
+persistPayrollPayment = function(citizenid, membership, salary, playerRow, requireDuty)
+  return MZAccountService.WithFinancialLocksInternal({
+    tostring(citizenid),
+    ('org:%s'):format(membership.org_id)
+  }, function()
+    local playerAccount = MySQL.single.await(
+      'SELECT bank FROM mz_player_accounts WHERE citizenid = ? LIMIT 1',
+      { citizenid }
+    )
+    local orgAccount = MySQL.single.await(
+      'SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1',
+      { membership.org_id }
+    )
+    if not playerAccount then return false, 'account_not_found' end
+    if not orgAccount then return false, 'org_account_missing' end
+
+    local bankBefore = math.floor(tonumber(playerAccount.bank) or 0)
+    local orgBefore = math.floor(tonumber(orgAccount.balance) or 0)
+    local intervalMinutes = math.max(1, math.floor(tonumber(Config.Payroll and Config.Payroll.intervalMinutes) or 30))
+    local payrollBucket = math.floor(os.time() / (intervalMinutes * 60))
+    local idempotencyKey = ('payroll_%s_%d'):format(tostring(membership.org_id), payrollBucket)
+    local requestFingerprint = ('org=%s;citizen=%s;salary=%d;bucket=%d'):format(
+      tostring(membership.org_id), tostring(citizenid), salary, payrollBucket
+    )
+    local existing = MZAccountRepository.getIdempotentOperation('mz_core', citizenid, idempotencyKey)
+    if existing then
+      if tostring(existing.operation or '') ~= 'payroll_payment'
+          or tostring(existing.request_fingerprint or '') ~= requestFingerprint then
+        return false, 'idempotency_conflict'
+      end
+      return true, {
+        bankBefore = bankBefore, bankAfter = bankBefore,
+        orgBefore = orgBefore, orgAfter = orgBefore,
+        externalRef = tostring(existing.correlation_id or ''),
+        outboxPersisted = true, replayed = true,
+        license = tostring(playerRow.license or '')
+      }
+    end
+    if orgBefore < salary then return false, 'insufficient_org_funds' end
+    if bankBefore > 9007199254740991 - salary then return false, 'amount_overflow' end
+
+    local bankAfter = bankBefore + salary
+    local orgAfter = orgBefore - salary
+    local externalRef = nextPayrollLedgerRef(membership.org_code, citizenid)
+    local commonData = {
+      channel = 'payroll',
+      operation = 'pay_salary',
+      org_id = tonumber(membership.org_id) or membership.org_id,
+      org_code = tostring(membership.org_code),
+      grade_level = tonumber(membership.grade_level) or 0,
+      salary = salary,
+      duty = asBool(membership.duty),
+      require_duty = requireDuty == true
+    }
+    local playerOptions = {
+      reason = 'payroll_salary', category = 'salary',
+      source_resource = 'mz_core', source_type = 'payroll',
+      sourceType = 'payroll', related_org_code = tostring(membership.org_code),
+      external_ref = externalRef, counts_as_income = true, counts_as_expense = false,
+      data = commonData
+    }
+    local orgOptions = {
+      reason = 'payroll_salary_expense', category = 'salary_expense',
+      source_resource = 'mz_core', source_type = 'payroll',
+      sourceType = 'payroll', related_citizenid = tostring(citizenid),
+      related_org_code = tostring(membership.org_code), external_ref = externalRef,
+      counts_as_income = false, counts_as_expense = true, data = commonData
+    }
+    local playerMetadata = MZAccountService.NormalizeFinancialLedgerOptionsInternal(playerOptions, {})
+    local orgMetadata = MZAccountService.NormalizeFinancialLedgerOptionsInternal(orgOptions, {})
+    local correlationId = MZAccountService.GenerateFinancialTransactionRefInternal('mzacc-payroll')
+    local idempotency = {
+      sourceResource = 'mz_core', actorCitizenId = tostring(citizenid),
+      key = idempotencyKey, operation = 'payroll_payment',
+      fingerprint = requestFingerprint, correlationId = correlationId,
+      resultJson = json.encode({ ok = true, correlationId = correlationId, replayed = false })
+    }
+    local outbox, outboxErr = MZAccountService.BuildFinancialOutboxInternal({
+      correlationId = correlationId,
+      idempotency = idempotency,
+      eventType = 'payroll_payment',
+      sourceCitizenId = citizenid,
+      account = 'multi', amount = salary, fee = 0,
+      reason = playerMetadata.reason, ledgerMetadata = playerMetadata,
+      options = playerOptions,
+      entries = {
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          1, nil, 'org', 'out', salary, orgBefore, orgAfter, orgMetadata
+        ),
+        MZAccountService.BuildFinancialLedgerEntryInternal(
+          2, citizenid, 'bank', 'in', salary, bankBefore, bankAfter, playerMetadata
+        )
+      }
+    })
+    if outbox == false then return false, outboxErr end
+
+    if not MZAccountRepository.transferPlayerBankAndOrg(
+      citizenid, bankAfter, membership.org_id, orgAfter, outbox, idempotency
+    ) then
+      local replay = MZAccountRepository.getIdempotentOperation('mz_core', citizenid, idempotencyKey)
+      if replay and tostring(replay.operation or '') == 'payroll_payment'
+          and tostring(replay.request_fingerprint or '') == requestFingerprint then
+        return true, {
+          bankBefore = bankBefore, bankAfter = bankBefore,
+          orgBefore = orgBefore, orgAfter = orgBefore,
+          externalRef = tostring(replay.correlation_id or ''),
+          outboxPersisted = true, replayed = true,
+          license = tostring(playerRow.license or '')
+        }
+      end
+      return false, 'database_error'
+    end
+
+    local online = MZPlayerService.getPlayerByCitizenId(citizenid)
+    if online and online.money then online.money.bank = bankAfter end
+    return true, {
+      bankBefore = bankBefore, bankAfter = bankAfter,
+      orgBefore = orgBefore, orgAfter = orgAfter,
+      externalRef = externalRef, outboxPersisted = type(outbox) == 'table',
+      playerMetadata = playerMetadata, orgMetadata = orgMetadata,
+      license = tostring(playerRow.license or '')
+    }
+  end)
+end
+
+recordLegacyPayroll = function(citizenid, membership, salary, detail)
+  recordPayrollLedger({
+    citizenid = tostring(citizenid), license = detail.license,
+    account = 'bank', amount = salary,
+    balance_before = detail.bankBefore, balance_after = detail.bankAfter,
+    direction = 'in', category = 'salary', reason = 'payroll_salary',
+    source_resource = 'mz_core', source_type = 'payroll',
+    counts_as_income = true, counts_as_expense = false,
+    related_org_code = tostring(membership.org_code), external_ref = detail.externalRef
+  })
+  recordPayrollLedger({
+    account = 'org', amount = salary,
+    balance_before = detail.orgBefore, balance_after = detail.orgAfter,
+    direction = 'out', category = 'salary_expense', reason = 'payroll_salary_expense',
+    source_resource = 'mz_core', source_type = 'payroll',
+    counts_as_income = false, counts_as_expense = true,
+    related_citizenid = tostring(citizenid), related_org_code = tostring(membership.org_code),
+    external_ref = detail.externalRef
+  })
 end
 
 function MZPayrollService.payOnlinePlayers()

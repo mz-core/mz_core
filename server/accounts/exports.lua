@@ -33,7 +33,9 @@ local function withExportContext(metadata)
     out = {}
   end
 
-  out.__invokingResource = out.__invokingResource or getInvokingResourceSafe() or 'unknown'
+  -- O escopo de idempotência/outbox deve vir do runtime server-side. Um
+  -- resource chamador não pode escolher outro namespace pelo metadata.
+  out.__invokingResource = getInvokingResourceSafe() or 'unknown'
   out.__legacyExport = metadata == nil
   return out
 end
@@ -60,4 +62,10 @@ end)
 
 exports('TransferBankBetweenPlayers', function(source, targetCitizenIdOrSource, amount, metadata)
   return MZAccountService.transferBankBetweenPlayers(source, targetCitizenIdOrSource, amount, withExportContext(metadata))
+end)
+
+exports('GetOperationResult', function(source, idempotencyKey, operation)
+  return MZAccountService.getOperationResult(
+    source, idempotencyKey, operation, withExportContext(nil)
+  )
 end)

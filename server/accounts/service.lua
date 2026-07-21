@@ -2,6 +2,18 @@ MZAccountService = {}
 
 local AccountLocks = {}
 local LOCK_TIMEOUT_MS = 10000
+local MAX_SAFE_INTEGER = 9007199254740991
+local FINANCIAL_OUTBOX_PAYLOAD_MAX_BYTES = 32768
+
+local FINANCIAL_OUTBOX_CHANNELS = {
+  atm = true,
+  branch = true,
+  system = true,
+  resource = true,
+  admin = true,
+  payroll = true,
+  org = true
+}
 
 local MONEY_ACCOUNT_ALIASES = {
   cash = 'wallet',
@@ -239,6 +251,295 @@ local function normalizeServiceOptions(options)
   }
 end
 
+local function buildIdempotencyContext(options, actorCitizenId, operation)
+  options = type(options) == 'table' and options or {}
+  local key = trim(options.idempotency_key or options.idempotencyKey)
+  if key == '' then return nil end
+  if #key < 16 or #key > 64 or not key:match('^[%w_-]+$') then
+    return false, 'invalid_idempotency_key'
+  end
+
+  local sourceResource = trim(options.__invokingResource)
+  if sourceResource == '' or sourceResource == 'unknown' or #sourceResource > 100 then
+    return false, 'invalid_idempotency_scope'
+  end
+
+  return {
+    sourceResource = sourceResource,
+    actorCitizenId = tostring(actorCitizenId),
+    key = key,
+    operation = tostring(operation)
+  }
+end
+
+local function recoverIdempotentResult(idempotency, fingerprint)
+  if type(idempotency) ~= 'table' then return nil, nil, false end
+  local row = MZAccountRepository.getIdempotentOperation(
+    idempotency.sourceResource,
+    idempotency.actorCitizenId,
+    idempotency.key
+  )
+  if not row then return nil, nil, false end
+  if tostring(row.operation or '') ~= idempotency.operation then
+    return nil, 'idempotency_conflict', true
+  end
+  if fingerprint and tostring(row.request_fingerprint or '') ~= tostring(fingerprint) then
+    return nil, 'idempotency_conflict', true
+  end
+
+  local decodedOk, stored = pcall(json.decode, tostring(row.result_json or ''))
+  if not decodedOk or type(stored) ~= 'table' then
+    return nil, 'database_error', true
+  end
+  stored.ok = true
+  stored.transactionRef = tostring(row.correlation_id or stored.transactionRef or '')
+  stored.correlationId = stored.transactionRef
+  stored.replayed = true
+  return stored, nil, true
+end
+
+local function encodeIdempotentResult(idempotency, fingerprint, correlationId, result)
+  idempotency.fingerprint = tostring(fingerprint)
+  idempotency.correlationId = tostring(correlationId)
+  idempotency.resultJson = json.encode(result)
+  return idempotency
+end
+
+-- Consulta autenticada e read-only do resultado persistido. O escopo do
+-- resource vem de GetInvokingResource no export, nunca do payload chamador.
+function MZAccountService.getOperationResult(source, idempotencyKey, operation, options)
+  source = tonumber(source)
+  if not source or source <= 0 then return { ok = false, error = 'invalid_source' } end
+  local player = MZPlayerService.getPlayer(source)
+  if not player then return { ok = false, error = 'player_not_loaded' } end
+
+  idempotencyKey = trim(idempotencyKey)
+  operation = trim(operation)
+  if #idempotencyKey < 16 or #idempotencyKey > 64
+      or not idempotencyKey:match('^[%w_-]+$') then
+    return { ok = false, error = 'invalid_idempotency_key' }
+  end
+  if operation == '' or #operation > 64 or not operation:match('^[%w_%-]+$') then
+    return { ok = false, error = 'invalid_operation' }
+  end
+
+  options = type(options) == 'table' and options or {}
+  local sourceResource = trim(options.__invokingResource)
+  if sourceResource == '' or sourceResource == 'unknown' or #sourceResource > 100 then
+    return { ok = false, error = 'invalid_idempotency_scope' }
+  end
+
+  local row = MZAccountRepository.getIdempotentOperation(
+    sourceResource, tostring(player.citizenid), idempotencyKey
+  )
+  if not row then return { ok = false, error = 'operation_not_found' } end
+  if tostring(row.operation or '') ~= operation then
+    return { ok = false, error = 'idempotency_conflict' }
+  end
+
+  local decodedOk, stored = pcall(json.decode, tostring(row.result_json or ''))
+  if not decodedOk or type(stored) ~= 'table' then
+    return { ok = false, error = 'database_error' }
+  end
+  return {
+    ok = true,
+    found = true,
+    operation = operation,
+    correlationId = tostring(row.correlation_id or ''),
+    result = stored
+  }
+end
+
+local function financialOutboxWritesEnabled()
+  return MZCoreState
+    and type(MZCoreState.financialOutbox) == 'table'
+    and MZCoreState.financialOutbox.schemaReady == true
+    and MZCoreState.financialOutbox.enabled == true
+    and MZCoreState.financialOutbox.writesEnabled == true
+end
+
+local function boundedOutboxText(value, maxLength, field, allowEmpty)
+  local text = trim(value)
+  if text == '' and allowEmpty ~= true then
+    return nil, ('outbox_invalid_%s'):format(field)
+  end
+  if #text > maxLength then
+    return nil, ('outbox_invalid_%s'):format(field)
+  end
+  return text
+end
+
+local function resolveOutboxContext(options, idempotency, ledgerMetadata)
+  options = type(options) == 'table' and options or {}
+  ledgerMetadata = type(ledgerMetadata) == 'table' and ledgerMetadata or {}
+
+  local sourceResource = trim(
+    type(idempotency) == 'table' and idempotency.sourceResource
+      or options.__invokingResource
+  )
+  if sourceResource == '' then sourceResource = 'mz_core' end
+  if #sourceResource > 100 then return nil, 'outbox_invalid_source_resource' end
+
+  local rawChannel = ''
+  if type(options.data) == 'table' then rawChannel = trim(options.data.channel):lower() end
+  if rawChannel == '' then
+    local sourceTypeChannel = trim(ledgerMetadata.source_type):lower()
+    if FINANCIAL_OUTBOX_CHANNELS[sourceTypeChannel] == true then
+      rawChannel = sourceTypeChannel
+    elseif sourceResource == 'mz_core' then
+      rawChannel = 'system'
+    else
+      rawChannel = 'resource'
+    end
+  end
+  if FINANCIAL_OUTBOX_CHANNELS[rawChannel] ~= true then
+    return nil, 'outbox_invalid_source_channel'
+  end
+
+  return {
+    sourceResource = sourceResource,
+    sourceChannel = rawChannel
+  }
+end
+
+local function buildFinancialOutbox(args)
+  if not financialOutboxWritesEnabled() then return nil end
+  args = type(args) == 'table' and args or {}
+
+  local correlationId, correlationErr = boundedOutboxText(
+    args.correlationId, 128, 'correlation_id'
+  )
+  if not correlationId then return false, correlationErr end
+
+  local eventType, eventErr = boundedOutboxText(args.eventType, 64, 'event_type')
+  if not eventType then return false, eventErr end
+
+  local reason, reasonErr = boundedOutboxText(args.reason, 128, 'reason')
+  if not reason then return false, reasonErr end
+
+  local account, accountErr = boundedOutboxText(args.account, 32, 'account')
+  if not account then return false, accountErr end
+
+  local amount = tonumber(args.amount)
+  local fee = tonumber(args.fee) or 0
+  if not amount or amount % 1 ~= 0 or amount <= 0 or amount > MAX_SAFE_INTEGER then
+    return false, 'outbox_invalid_amount'
+  end
+  if fee % 1 ~= 0 or fee < 0 or fee > MAX_SAFE_INTEGER then
+    return false, 'outbox_invalid_fee'
+  end
+
+  local sourceCitizenId
+  if args.allowMissingSourceCitizenId == true and trim(args.sourceCitizenId) == '' then
+    sourceCitizenId = nil
+  else
+    local sourceErr
+    sourceCitizenId, sourceErr = boundedOutboxText(
+      args.sourceCitizenId, 64, 'source_citizenid'
+    )
+    if not sourceCitizenId then return false, sourceErr end
+  end
+
+  local targetCitizenId = trim(args.targetCitizenId)
+  if #targetCitizenId > 64 then return false, 'outbox_invalid_target_citizenid' end
+  if targetCitizenId == '' then targetCitizenId = nil end
+
+  local ledgerMetadata = type(args.ledgerMetadata) == 'table' and args.ledgerMetadata or {}
+  local context, contextErr = resolveOutboxContext(args.options, args.idempotency, ledgerMetadata)
+  if not context then return false, contextErr end
+
+  if type(args.entries) ~= 'table' or #args.entries < 1 or #args.entries > 8 then
+    return false, 'outbox_invalid_entries'
+  end
+
+  local envelope = {
+    version = 1,
+    operation = eventType,
+    correlationId = correlationId,
+    entries = args.entries,
+    context = {
+      sourceResource = context.sourceResource,
+      sourceChannel = context.sourceChannel,
+      sourceType = trim(ledgerMetadata.source_type),
+      category = trim(ledgerMetadata.category)
+    }
+  }
+
+  local encodedOk, metadataJson = pcall(json.encode, envelope)
+  if not encodedOk or type(metadataJson) ~= 'string' or metadataJson == '' then
+    return false, 'outbox_payload_encode_failed'
+  end
+  if #metadataJson > FINANCIAL_OUTBOX_PAYLOAD_MAX_BYTES then
+    return false, 'outbox_payload_too_large'
+  end
+
+  local idempotencyKey = type(args.idempotency) == 'table'
+    and trim(args.idempotency.key)
+    or ''
+  if idempotencyKey == '' then idempotencyKey = nil end
+
+  return {
+    correlationId = correlationId,
+    idempotencyKey = idempotencyKey,
+    eventType = eventType,
+    sourceCitizenId = sourceCitizenId,
+    targetCitizenId = targetCitizenId,
+    account = account,
+    amount = math.floor(amount),
+    fee = math.floor(fee),
+    reason = reason,
+    sourceResource = context.sourceResource,
+    sourceChannel = context.sourceChannel,
+    payloadVersion = 1,
+    metadataJson = metadataJson
+  }
+end
+
+local function ledgerEntry(leg, citizenid, account, direction, amount, beforeAmount, afterAmount, metadata)
+  metadata = type(metadata) == 'table' and metadata or {}
+  local relatedCitizenId = trim(metadata.related_citizenid)
+  if relatedCitizenId == '' then relatedCitizenId = nil end
+
+  return {
+    leg = leg,
+    citizenid = citizenid ~= nil and tostring(citizenid) or '',
+    account = tostring(account),
+    direction = tostring(direction),
+    amount = math.floor(tonumber(amount) or 0),
+    balanceBefore = math.floor(tonumber(beforeAmount) or 0),
+    balanceAfter = math.floor(tonumber(afterAmount) or 0),
+    category = tostring(metadata.category or 'unknown'),
+    reason = tostring(metadata.reason or 'legacy_call'),
+    relatedCitizenid = relatedCitizenId,
+    relatedOrgCode = trim(metadata.related_org_code) ~= '' and trim(metadata.related_org_code) or nil,
+    externalRef = trim(metadata.external_ref) ~= '' and trim(metadata.external_ref) or nil,
+    countsAsIncome = metadata.counts_as_income == true,
+    countsAsExpense = metadata.counts_as_expense == true
+  }
+end
+
+-- Contratos internos server-side usados pelos produtores do proprio mz_core.
+-- Nao sao exports, eventos de rede ou callbacks NUI.
+function MZAccountService.BuildFinancialOutboxInternal(args)
+  return buildFinancialOutbox(args)
+end
+
+function MZAccountService.BuildFinancialLedgerEntryInternal(...)
+  return ledgerEntry(...)
+end
+
+function MZAccountService.NormalizeFinancialLedgerOptionsInternal(options, defaults)
+  return normalizeLedgerOptions(options, defaults)
+end
+
+function MZAccountService.GenerateFinancialTransactionRefInternal(prefix)
+  return generateTransactionRef(prefix)
+end
+
+function MZAccountService.WithFinancialLocksInternal(keys, handler)
+  return withAccountLocks(keys, handler)
+end
+
 local function logLedgerFailure(player, action, error, detail)
   local message = ('RecordTransaction failed action=%s citizenid=%s error=%s detail=%s'):format(
     tostring(action or 'unknown'),
@@ -444,47 +745,140 @@ function MZAccountService.getMoney(source)
   return player.money
 end
 
-local function persistSingleMoneyChange(source, moneyType, nextAmount, options, direction, ledgerAmount)
+local function persistSingleMoneyChange(source, moneyType, nextAmount, options, direction, ledgerAmount, operation)
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, 'player_not_loaded' end
+
+  operation = tostring(operation or 'set_money')
+  local idempotency, idempotencyErr = buildIdempotencyContext(options, player.citizenid, operation)
+  if idempotency == false then return false, idempotencyErr end
+
+  local requestedAmount = operation == 'set_money'
+    and math.floor(tonumber(nextAmount) or 0)
+    or math.floor(tonumber(ledgerAmount) or 0)
+  local requestFingerprint = ('account=%s;amount=%d'):format(moneyType, requestedAmount)
+  local correlationId = generateTransactionRef(('mzacc-%s'):format(operation:gsub('_money$', '')))
 
   local ok, detailOrErr = withAccountLocks({ player.citizenid }, function()
     player = MZPlayerService.getPlayer(source)
     if not player then return false, 'player_not_loaded' end
+
+    if idempotency then
+      local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+      if found then
+        if not stored then return false, storedErr end
+        return true, { replayedResult = stored }
+      end
+    end
 
     local currentAmount = math.floor(tonumber((player.money or {})[moneyType]) or 0)
     local resolvedAmount = type(nextAmount) == 'function' and nextAmount(currentAmount) or nextAmount
     if resolvedAmount == nil then return false, 'not_enough_money' end
 
     resolvedAmount = math.floor(tonumber(resolvedAmount) or -1)
-    if resolvedAmount < 0 then return false, 'invalid_amount' end
+    if resolvedAmount < 0 or resolvedAmount > MAX_SAFE_INTEGER then return false, 'invalid_amount' end
 
-    local persisted = MZAccountRepository.updatePlayerMoney(player.citizenid, moneyType, resolvedAmount)
-    if not persisted then return false, 'database_error' end
+    local delta = resolvedAmount - currentAmount
+    local resolvedDirection = direction or 'adjustment'
+    local resolvedLedgerAmount = math.abs(delta)
+    local ledgerMetadata = normalizeLedgerOptions(options, {
+      category = resolvedDirection == 'adjustment' and 'admin_adjustment' or 'unknown',
+      reason = operation,
+      sourceType = 'core_legacy',
+      sourceResource = 'mz_core'
+    })
+    local outbox
+    if delta ~= 0 then
+      local outboxErr
+      outbox, outboxErr = buildFinancialOutbox({
+        correlationId = correlationId,
+        idempotency = idempotency,
+        eventType = operation,
+        sourceCitizenId = player.citizenid,
+        account = moneyType,
+        amount = resolvedLedgerAmount,
+        fee = 0,
+        reason = ledgerMetadata.reason,
+        ledgerMetadata = ledgerMetadata,
+        options = options,
+        entries = {
+          ledgerEntry(
+            1,
+            player.citizenid,
+            moneyType,
+            resolvedDirection,
+            resolvedLedgerAmount,
+            currentAmount,
+            resolvedAmount,
+            ledgerMetadata
+          )
+        }
+      })
+      if outbox == false then return false, outboxErr end
+    end
+
+    local persisted
+    if idempotency then
+      local storedResult = {
+        ok = true,
+        transactionRef = correlationId,
+        correlationId = correlationId,
+        replayed = false
+      }
+      persisted = MZAccountRepository.updatePlayerMoneyIdempotent(
+        player.citizenid,
+        moneyType,
+        resolvedAmount,
+        encodeIdempotentResult(idempotency, requestFingerprint, correlationId, storedResult),
+        outbox
+      )
+    elseif type(outbox) == 'table' then
+      persisted = MZAccountRepository.updatePlayerMoneyWithOutbox(
+        player.citizenid,
+        moneyType,
+        resolvedAmount,
+        outbox
+      )
+    else
+      persisted = MZAccountRepository.updatePlayerMoney(player.citizenid, moneyType, resolvedAmount)
+    end
+
+    if not persisted then
+      if idempotency then
+        local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+        if found and stored then return true, { replayedResult = stored } end
+        if found then return false, storedErr end
+      end
+      return false, 'database_error'
+    end
 
     player.money = player.money or {}
     player.money[moneyType] = resolvedAmount
     return true, {
       player = player,
       before = currentAmount,
-      after = resolvedAmount
+      after = resolvedAmount,
+      direction = resolvedDirection,
+      ledgerAmount = resolvedLedgerAmount,
+      outboxPersisted = type(outbox) == 'table'
     }
   end)
 
   if not ok then return false, detailOrErr end
 
   local detail = detailOrErr
+  if detail.replayedResult then return true end
   local delta = detail.after - detail.before
-  logMoneyChange('set_money', detail.player, moneyType, detail.before, detail.after, delta, options)
+  logMoneyChange(operation, detail.player, moneyType, detail.before, detail.after, delta, options)
 
-  if delta ~= 0 then
+  if delta ~= 0 and detail.outboxPersisted ~= true then
     recordLedgerChange(
       detail.player,
       moneyType,
       detail.before,
       detail.after,
-      direction or 'adjustment',
-      math.floor(tonumber(ledgerAmount) or math.abs(delta)),
+      detail.direction,
+      detail.ledgerAmount,
       options
     )
   end
@@ -495,18 +889,26 @@ end
 function MZAccountService.setMoney(source, moneyType, amount, options)
   local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
   if not normalizedMoneyType then return false, moneyTypeErr end
-  if type(amount) ~= 'number' or amount < 0 then return false, 'invalid_amount' end
+  if type(amount) ~= 'number' or amount ~= amount or amount == math.huge
+      or amount == -math.huge or amount % 1 ~= 0 or amount < 0 or amount > MAX_SAFE_INTEGER then
+    return false, 'invalid_amount'
+  end
 
   options = normalizeServiceOptions(options)
   local direction = options.__ledgerFromWrapper == true and options.__ledgerDirection or 'adjustment'
   local ledgerAmount = options.__ledgerFromWrapper == true and options.__ledgerAmount or nil
-  return persistSingleMoneyChange(source, normalizedMoneyType, math.floor(amount), options, direction, ledgerAmount)
+  return persistSingleMoneyChange(
+    source, normalizedMoneyType, math.floor(amount), options, direction, ledgerAmount, 'set_money'
+  )
 end
 
 function MZAccountService.addMoney(source, moneyType, amount, options)
   local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
   if not normalizedMoneyType then return false, moneyTypeErr end
-  if type(amount) ~= 'number' or amount <= 0 then return false, 'invalid_amount' end
+  if type(amount) ~= 'number' or amount ~= amount or amount == math.huge
+      or amount == -math.huge or amount % 1 ~= 0 or amount <= 0 or amount > MAX_SAFE_INTEGER then
+    return false, 'invalid_amount'
+  end
 
   local value = math.floor(amount)
   options = normalizeServiceOptions(options)
@@ -514,13 +916,16 @@ function MZAccountService.addMoney(source, moneyType, amount, options)
 
   return persistSingleMoneyChange(source, normalizedMoneyType, function(current)
     return current + value
-  end, options, 'in', value)
+  end, options, 'in', value, 'add_money')
 end
 
 function MZAccountService.removeMoney(source, moneyType, amount, options)
   local normalizedMoneyType, moneyTypeErr = MZAccountService.NormalizeMoneyAccount(moneyType)
   if not normalizedMoneyType then return false, moneyTypeErr end
-  if type(amount) ~= 'number' or amount <= 0 then return false, 'invalid_amount' end
+  if type(amount) ~= 'number' or amount ~= amount or amount == math.huge
+      or amount == -math.huge or amount % 1 ~= 0 or amount <= 0 or amount > MAX_SAFE_INTEGER then
+    return false, 'invalid_amount'
+  end
 
   local value = math.floor(amount)
   options = normalizeServiceOptions(options)
@@ -529,7 +934,7 @@ function MZAccountService.removeMoney(source, moneyType, amount, options)
   return persistSingleMoneyChange(source, normalizedMoneyType, function(current)
     if current < value then return nil end
     return current - value
-  end, options, 'out', value)
+  end, options, 'out', value, 'remove_money')
 end
 
 function MZAccountService.transferMoneyBetweenAccounts(source, fromAccount, toAccount, amount, options)
@@ -544,32 +949,110 @@ function MZAccountService.transferMoneyBetweenAccounts(source, fromAccount, toAc
   if fromNormalized == toNormalized then return { ok = false, error = 'same_account' } end
 
   amount = math.floor(tonumber(amount) or 0)
-  if amount <= 0 then return { ok = false, error = 'invalid_amount' } end
+  if amount <= 0 or amount > MAX_SAFE_INTEGER then return { ok = false, error = 'invalid_amount' } end
 
   options = normalizeServiceOptions(options)
+  local idempotency, idempotencyErr = buildIdempotencyContext(
+    options,
+    player.citizenid,
+    'transfer_between_accounts'
+  )
+  if idempotency == false then return { ok = false, error = idempotencyErr } end
   options.external_ref = trim(options.external_ref or options.externalRef)
   if options.external_ref == '' then
     options.external_ref = generateTransactionRef('mzacc-own')
   end
 
+  local requestFingerprint = ('from=%s;to=%s;amount=%d'):format(fromNormalized, toNormalized, amount)
+
   local ok, detailOrErr = withAccountLocks({ player.citizenid }, function()
     player = MZPlayerService.getPlayer(source)
     if not player then return false, 'player_not_loaded' end
 
+    if idempotency then
+      local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+      if found then
+        if not stored then return false, storedErr end
+        return true, { replayedResult = stored }
+      end
+    end
+
     local fromBefore = math.floor(tonumber((player.money or {})[fromNormalized]) or 0)
     local toBefore = math.floor(tonumber((player.money or {})[toNormalized]) or 0)
     if fromBefore < amount then return false, 'not_enough_money' end
+    if toBefore < 0 or toBefore > MAX_SAFE_INTEGER - amount then return false, 'amount_overflow' end
 
     local fromAfter = fromBefore - amount
     local toAfter = toBefore + amount
-    local persisted = MZAccountRepository.transferPlayerMoney(
-      player.citizenid,
-      fromNormalized,
-      toNormalized,
-      fromAfter,
-      toAfter
-    )
-    if not persisted then return false, 'database_error' end
+    local ledgerMetadata = normalizeLedgerOptions(options, {
+      category = 'unknown',
+      reason = 'transfer_between_accounts',
+      sourceType = 'core_legacy',
+      sourceResource = 'mz_core'
+    })
+    local outbox, outboxErr = buildFinancialOutbox({
+      correlationId = options.external_ref,
+      idempotency = idempotency,
+      eventType = 'transfer_between_accounts',
+      sourceCitizenId = player.citizenid,
+      account = 'multi',
+      amount = amount,
+      fee = 0,
+      reason = ledgerMetadata.reason,
+      ledgerMetadata = ledgerMetadata,
+      options = options,
+      entries = {
+        ledgerEntry(1, player.citizenid, fromNormalized, 'out', amount, fromBefore, fromAfter, ledgerMetadata),
+        ledgerEntry(2, player.citizenid, toNormalized, 'in', amount, toBefore, toAfter, ledgerMetadata)
+      }
+    })
+    if outbox == false then return false, outboxErr end
+
+    local financialResult = {
+      ok = true,
+      balances = cloneTable(player.money),
+      transactionRef = options.external_ref,
+      correlationId = options.external_ref,
+      replayed = false
+    }
+    financialResult.balances[fromNormalized] = fromAfter
+    financialResult.balances[toNormalized] = toAfter
+
+    local persisted
+    if idempotency then
+      local storedResult = {
+        ok = true,
+        transactionRef = options.external_ref,
+        correlationId = options.external_ref,
+        replayed = false
+      }
+      persisted = MZAccountRepository.transferPlayerMoneyIdempotent(
+        player.citizenid,
+        fromNormalized,
+        toNormalized,
+        fromAfter,
+        toAfter,
+        encodeIdempotentResult(idempotency, requestFingerprint, options.external_ref, storedResult),
+        outbox
+      )
+    else
+      persisted = MZAccountRepository.transferPlayerMoney(
+        player.citizenid,
+        fromNormalized,
+        toNormalized,
+        fromAfter,
+        toAfter,
+        outbox
+      )
+    end
+    if not persisted then
+      if idempotency then
+        local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+        if found and stored then return true, { replayedResult = stored } end
+        if found then return false, storedErr end
+      end
+      return false, 'database_error'
+    end
 
     player.money[fromNormalized] = fromAfter
     player.money[toNormalized] = toAfter
@@ -578,28 +1061,47 @@ function MZAccountService.transferMoneyBetweenAccounts(source, fromAccount, toAc
       fromBefore = fromBefore,
       fromAfter = fromAfter,
       toBefore = toBefore,
-      toAfter = toAfter
+      toAfter = toAfter,
+      outboxPersisted = type(outbox) == 'table',
+      financialResult = financialResult
     }
   end)
 
   if not ok then return { ok = false, error = detailOrErr } end
 
   local detail = detailOrErr
+  if detail.replayedResult then return detail.replayedResult end
   logMoneyChange('transfer_between_accounts_out', detail.player, fromNormalized, detail.fromBefore, detail.fromAfter, -amount, options)
   logMoneyChange('transfer_between_accounts_in', detail.player, toNormalized, detail.toBefore, detail.toAfter, amount, options)
-  recordLedgerChange(detail.player, fromNormalized, detail.fromBefore, detail.fromAfter, 'out', amount, options)
-  recordLedgerChange(detail.player, toNormalized, detail.toBefore, detail.toAfter, 'in', amount, options)
+  if detail.outboxPersisted ~= true then
+    recordLedgerChange(detail.player, fromNormalized, detail.fromBefore, detail.fromAfter, 'out', amount, options)
+    recordLedgerChange(detail.player, toNormalized, detail.toBefore, detail.toAfter, 'in', amount, options)
+  end
 
-  return {
-    ok = true,
-    balances = cloneTable(detail.player.money),
-    transactionRef = options.external_ref
-  }
+  return detail.financialResult
 end
 
 function MZAccountService.transferBankBetweenPlayers(source, target, amount, options)
   local sender = MZPlayerService.getPlayer(source)
   if not sender then return { ok = false, error = 'player_not_loaded' } end
+
+  options = normalizeServiceOptions(options)
+  local idempotency, idempotencyErr = buildIdempotencyContext(options, sender.citizenid, 'bank_transfer')
+  if idempotency == false then return { ok = false, error = idempotencyErr } end
+
+  amount = math.floor(tonumber(amount) or 0)
+  if amount <= 0 or amount > MAX_SAFE_INTEGER then return { ok = false, error = 'invalid_amount' } end
+  local fee = math.floor(tonumber(options.fee) or 0)
+  if fee < 0 or fee > MAX_SAFE_INTEGER or amount > MAX_SAFE_INTEGER - fee then
+    return { ok = false, error = 'invalid_fee' }
+  end
+  local totalCost = amount + fee
+  local requestFingerprint = ('target=%s;amount=%d;fee=%d'):format(tostring(target or ''), amount, fee)
+
+  if idempotency then
+    local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+    if found then return stored or { ok = false, error = storedErr } end
+  end
 
   local targetSource = tonumber(target)
   local recipient
@@ -615,14 +1117,6 @@ function MZAccountService.transferBankBetweenPlayers(source, target, amount, opt
     return { ok = false, error = 'self_transfer' }
   end
 
-  amount = math.floor(tonumber(amount) or 0)
-  if amount <= 0 then return { ok = false, error = 'invalid_amount' } end
-
-  options = normalizeServiceOptions(options)
-  local fee = math.floor(tonumber(options.fee) or 0)
-  if fee < 0 then return { ok = false, error = 'invalid_fee' } end
-  local totalCost = amount + fee
-
   options.external_ref = trim(options.external_ref or options.externalRef)
   if options.external_ref == '' then
     options.external_ref = generateTransactionRef('mzacc-transfer')
@@ -631,25 +1125,117 @@ function MZAccountService.transferBankBetweenPlayers(source, target, amount, opt
   options.data = type(options.data) == 'table' and options.data or {}
   options.data.fee = fee
   options.data.transfer_amount = amount
-
   local ok, detailOrErr = withAccountLocks({ sender.citizenid, recipient.citizenid }, function()
     sender = MZPlayerService.getPlayer(source)
     recipient = MZPlayerService.getPlayer(targetSource)
     if not sender or not recipient then return false, 'recipient_offline' end
 
+    if idempotency then
+      local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+      if found then
+        if not stored then return false, storedErr end
+        return true, { replayedResult = stored }
+      end
+    end
+
     local senderBefore = math.floor(tonumber((sender.money or {}).bank) or 0)
     local recipientBefore = math.floor(tonumber((recipient.money or {}).bank) or 0)
     if senderBefore < totalCost then return false, 'not_enough_money' end
+    if recipientBefore < 0 or recipientBefore > MAX_SAFE_INTEGER - amount then
+      return false, 'amount_overflow'
+    end
 
     local senderAfter = senderBefore - totalCost
     local recipientAfter = recipientBefore + amount
-    local persisted = MZAccountRepository.transferBankBetweenPlayers(
-      sender.citizenid,
-      senderAfter,
-      recipient.citizenid,
-      recipientAfter
-    )
-    if not persisted then return false, 'database_error' end
+    local senderLedgerMetadata = normalizeLedgerOptions(options, {
+      category = 'unknown',
+      reason = 'bank_transfer',
+      sourceType = 'core_legacy',
+      sourceResource = 'mz_core'
+    })
+    local recipientOutboxOptions = cloneTable(options)
+    recipientOutboxOptions.related_citizenid = tostring(sender.citizenid)
+    recipientOutboxOptions.reason = options.recipient_reason or options.reason
+    local recipientLedgerMetadata = normalizeLedgerOptions(recipientOutboxOptions, {
+      category = senderLedgerMetadata.category,
+      reason = 'bank_transfer_received',
+      sourceType = senderLedgerMetadata.source_type,
+      sourceResource = senderLedgerMetadata.source_resource
+    })
+    local outbox, outboxErr = buildFinancialOutbox({
+      correlationId = options.external_ref,
+      idempotency = idempotency,
+      eventType = 'bank_transfer',
+      sourceCitizenId = sender.citizenid,
+      targetCitizenId = recipient.citizenid,
+      account = 'bank',
+      amount = amount,
+      fee = fee,
+      reason = senderLedgerMetadata.reason,
+      ledgerMetadata = senderLedgerMetadata,
+      options = options,
+      entries = {
+        ledgerEntry(
+          1, sender.citizenid, 'bank', 'out', totalCost,
+          senderBefore, senderAfter, senderLedgerMetadata
+        ),
+        ledgerEntry(
+          2, recipient.citizenid, 'bank', 'in', amount,
+          recipientBefore, recipientAfter, recipientLedgerMetadata
+        )
+      }
+    })
+    if outbox == false then return false, outboxErr end
+
+    local financialResult = {
+      ok = true,
+      balances = {
+        sender = senderAfter,
+        recipient = recipientAfter
+      },
+      targetSource = targetSource,
+      targetCitizenId = tostring(recipient.citizenid),
+      transactionRef = options.external_ref,
+      correlationId = options.external_ref,
+      fee = fee,
+      replayed = false
+    }
+
+    local persisted
+    if idempotency then
+      local storedResult = {
+        ok = true,
+        targetCitizenId = tostring(recipient.citizenid),
+        transactionRef = options.external_ref,
+        correlationId = options.external_ref,
+        fee = fee,
+        replayed = false
+      }
+      persisted = MZAccountRepository.transferBankBetweenPlayersIdempotent(
+        sender.citizenid,
+        senderAfter,
+        recipient.citizenid,
+        recipientAfter,
+        encodeIdempotentResult(idempotency, requestFingerprint, options.external_ref, storedResult),
+        outbox
+      )
+    else
+      persisted = MZAccountRepository.transferBankBetweenPlayers(
+        sender.citizenid,
+        senderAfter,
+        recipient.citizenid,
+        recipientAfter,
+        outbox
+      )
+    end
+    if not persisted then
+      if idempotency then
+        local stored, storedErr, found = recoverIdempotentResult(idempotency, requestFingerprint)
+        if found and stored then return true, { replayedResult = stored } end
+        if found then return false, storedErr end
+      end
+      return false, 'database_error'
+    end
 
     sender.money.bank = senderAfter
     recipient.money.bank = recipientAfter
@@ -659,31 +1245,28 @@ function MZAccountService.transferBankBetweenPlayers(source, target, amount, opt
       senderBefore = senderBefore,
       senderAfter = senderAfter,
       recipientBefore = recipientBefore,
-      recipientAfter = recipientAfter
+      recipientAfter = recipientAfter,
+      outboxPersisted = type(outbox) == 'table',
+      financialResult = financialResult
     }
   end)
 
   if not ok then return { ok = false, error = detailOrErr } end
 
   local detail = detailOrErr
+  if detail.replayedResult then return detail.replayedResult end
   logMoneyChange('transfer_bank_out', detail.sender, 'bank', detail.senderBefore, detail.senderAfter, -totalCost, options)
-  recordLedgerChange(detail.sender, 'bank', detail.senderBefore, detail.senderAfter, 'out', totalCost, options)
+  if detail.outboxPersisted ~= true then
+    recordLedgerChange(detail.sender, 'bank', detail.senderBefore, detail.senderAfter, 'out', totalCost, options)
+  end
 
   local recipientOptions = cloneTable(options)
   recipientOptions.related_citizenid = tostring(detail.sender.citizenid)
   recipientOptions.reason = options.recipient_reason or options.reason
   logMoneyChange('transfer_bank_in', detail.recipient, 'bank', detail.recipientBefore, detail.recipientAfter, amount, recipientOptions)
-  recordLedgerChange(detail.recipient, 'bank', detail.recipientBefore, detail.recipientAfter, 'in', amount, recipientOptions)
+  if detail.outboxPersisted ~= true then
+    recordLedgerChange(detail.recipient, 'bank', detail.recipientBefore, detail.recipientAfter, 'in', amount, recipientOptions)
+  end
 
-  return {
-    ok = true,
-    balances = {
-      sender = detail.senderAfter,
-      recipient = detail.recipientAfter
-    },
-    targetSource = targetSource,
-    targetCitizenId = tostring(detail.recipient.citizenid),
-    transactionRef = options.external_ref,
-    fee = fee
-  }
+  return detail.financialResult
 end
