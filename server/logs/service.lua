@@ -118,7 +118,6 @@ local function isGlobalLogViewer(source)
 
   return MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
     or MZOrgService.hasGlobalPermission(source, 'staff.logs.view') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
 end
 
 local function canViewOrgLogs(source, orgCode)
@@ -126,10 +125,7 @@ local function canViewOrgLogs(source, orgCode)
     return false
   end
 
-  return MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
+  return isGlobalLogViewer(source)
     or MZOrgService.canOrg(source, orgCode, 'logs.view') == true
 end
 
@@ -140,6 +136,10 @@ local function sanitizeFilters(filters)
     orgCode = limitString(filters.orgCode or filters.org_code, 48),
     category = limitString(filters.category or filters.scope, 32),
     severity = limitString(filters.severity, 24),
+    action = limitString(filters.action, 96),
+    actor = limitString(filters.actor or filters.actorCitizenId, 96),
+    auditId = limitString(filters.auditId or filters.audit_id, 96),
+    auditOnly = filters.auditOnly == true,
     search = limitString(filters.search, 80),
     dateFrom = limitString(filters.dateFrom or filters.date_from, 32),
     dateTo = limitString(filters.dateTo or filters.date_to, 32),
@@ -207,7 +207,9 @@ local function normalizeLogRow(row)
     category = tostring(row.scope or 'core'),
     action = tostring(row.action or 'unknown'),
     severity = firstString(data.severity, meta.severity) or 'info',
-    orgCode = getOrgCodeFromData(data),
+    scope = row.org_code and 'org' or 'global',
+    orgCode = row.org_code,
+    auditId = row.audit_id,
     actorName = getActorName(actor, row.actor),
     actorCitizenId = getCitizenId(actor),
     targetName = firstString(target.name, target.label, target.id, row.target),
@@ -218,13 +220,37 @@ local function normalizeLogRow(row)
   }
 end
 
-local function buildLogQuery(filters, canViewGlobal)
+local function buildLogQuery(filters, scopeKind, orgCode)
   local where = {}
   local params = {}
+
+  if scopeKind == 'org' then
+    where[#where + 1] = 'org_code = ?'
+    params[#params + 1] = orgCode
+  else
+    where[#where + 1] = 'org_code IS NULL'
+  end
 
   if filters.category then
     where[#where + 1] = 'scope = ?'
     params[#params + 1] = filters.category
+  end
+
+  if filters.action then
+    where[#where + 1] = 'action = ?'
+    params[#params + 1] = filters.action
+  end
+
+  if filters.actor then
+    where[#where + 1] = 'actor = ?'
+    params[#params + 1] = filters.actor
+  end
+
+  if filters.auditId then
+    where[#where + 1] = 'audit_id = ?'
+    params[#params + 1] = filters.auditId
+  elseif filters.auditOnly then
+    where[#where + 1] = 'audit_id IS NOT NULL'
   end
 
   if filters.search then
@@ -247,15 +273,7 @@ local function buildLogQuery(filters, canViewGlobal)
     params[#params + 1] = filters.dateTo
   end
 
-  if filters.orgCode then
-    where[#where + 1] = '(target LIKE ? OR data_json LIKE ?)'
-    params[#params + 1] = ('%%%s%%'):format(filters.orgCode)
-    params[#params + 1] = ('%%%s%%'):format(filters.orgCode)
-  elseif not canViewGlobal then
-    where[#where + 1] = '1 = 0'
-  end
-
-  local sql = 'SELECT id, scope, action, actor, target, data_json, created_at FROM mz_logs'
+  local sql = 'SELECT id, scope, action, actor, target, org_code, audit_id, data_json, created_at FROM mz_logs'
   if #where > 0 then
     sql = sql .. ' WHERE ' .. table.concat(where, ' AND ')
   end
@@ -320,15 +338,22 @@ function MZLogService.makeTarget(targetType, targetId, extra)
   return target
 end
 
-function MZLogService.create(scope, action, actor, target, data)
-  MySQL.insert.await([[
-    INSERT INTO mz_logs (scope, action, actor, target, data_json)
-    VALUES (?, ?, ?, ?, ?)
+function MZLogService.create(scope, action, actor, target, data, options)
+  data = type(data) == 'table' and data or {}
+  options = type(options) == 'table' and options or {}
+  local orgCode = limitString(options.orgCode or options.org_code or getOrgCodeFromData(data), 64)
+  local auditId = limitString(options.auditId or options.audit_id, 96)
+
+  return MySQL.insert.await([[
+    INSERT INTO mz_logs (scope, action, actor, target, org_code, audit_id, data_json)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   ]], {
     normalizeScalar(scope, 'core'),
     normalizeScalar(action, 'unknown'),
     MZLogService.normalizeActor(actor),
     normalizeScalar(target, 'unknown'),
+    orgCode,
+    auditId,
     MZUtils.jsonEncode(sanitizePayload(data))
   })
 end
@@ -355,35 +380,65 @@ function MZLogService.createDetailed(scope, action, payload)
       before = before,
       after = after,
       meta = meta
+    },
+    {
+      orgCode = getOrgCodeFromData({ context = context }),
+      auditId = payload.auditId or payload.audit_id
     }
   )
 end
 
-function MZLogService.listLogs(source, filters)
+function MZLogService.listOrgLogsSecure(source, orgCode, filters)
   source = tonumber(source)
   if not source or source <= 0 then
     return false, 'invalid_source'
   end
 
   filters = sanitizeFilters(filters)
-
-  local canViewGlobal = isGlobalLogViewer(source)
-  if not canViewGlobal and not canViewOrgLogs(source, filters.orgCode) then
-    return false, 'forbidden'
+  orgCode = limitString(orgCode or filters.orgCode, 64)
+  if not orgCode then return false, 'invalid_org' end
+  if not MZOrgRepository or not MZOrgRepository.getOrgByCode or not MZOrgRepository.getOrgByCode(orgCode) then
+    return false, 'invalid_org'
   end
+  if not canViewOrgLogs(source, orgCode) then return false, 'forbidden' end
 
-  local sql, params = buildLogQuery(filters, canViewGlobal)
+  local sql, params = buildLogQuery(filters, 'org', orgCode)
   local rows = MySQL.query.await(sql, params) or {}
   local result = {}
 
   for _, row in ipairs(rows) do
     local item = normalizeLogRow(row)
-    if (not filters.orgCode or item.orgCode == filters.orgCode or tostring(row.target or ''):find(filters.orgCode, 1, true)) then
-      if (not filters.severity or item.severity == filters.severity) then
-        result[#result + 1] = item
-      end
+    if item.orgCode == orgCode and (not filters.severity or item.severity == filters.severity) then
+      result[#result + 1] = item
     end
   end
 
   return result
+end
+
+function MZLogService.listGlobalLogsSecure(source, filters)
+  source = tonumber(source)
+  if not source or source <= 0 then return false, 'invalid_source' end
+  if not isGlobalLogViewer(source) then return false, 'forbidden' end
+
+  filters = sanitizeFilters(filters)
+  filters.orgCode = nil
+  local sql, params = buildLogQuery(filters, 'global')
+  local rows = MySQL.query.await(sql, params) or {}
+  local result = {}
+  for _, row in ipairs(rows) do
+    local item = normalizeLogRow(row)
+    if item.orgCode == nil and (not filters.severity or item.severity == filters.severity) then
+      result[#result + 1] = item
+    end
+  end
+  return result
+end
+
+function MZLogService.listLogs(source, filters)
+  filters = sanitizeFilters(filters)
+  if filters.orgCode then
+    return MZLogService.listOrgLogsSecure(source, filters.orgCode, filters)
+  end
+  return MZLogService.listGlobalLogsSecure(source, filters)
 end

@@ -1,4 +1,27 @@
-print('[mz_core][player/exports] loaded')
+local function identityDebugEnabled()
+  return Config and Config.Debug == true
+end
+
+local function aceAllowed(source, ace)
+  source = tonumber(source)
+  ace = tostring(ace or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if not source or source <= 0 or ace == '' then return false end
+  local allowed = IsPlayerAceAllowed(source, ace)
+  local normalized = tostring(allowed):lower()
+  return allowed == true or allowed == 1 or normalized == '1' or normalized == 'true'
+end
+
+local function canUseIdentityDebug(source)
+  if not identityDebugEnabled() then return false end
+  source = tonumber(source) or 0
+  if source <= 0 then return true end
+  return aceAllowed(source, 'mzcore.debug')
+    or aceAllowed(source, (Config and Config.OwnerAce) or 'group.mz_owner')
+end
+
+if identityDebugEnabled() then
+  print('[mz_core][player/exports] loaded')
+end
 
 exports('GetPlayer', function(source)
   return MZPlayerService.getPlayer(source)
@@ -46,6 +69,7 @@ local function summarizeIdentifiers(source)
 end
 
 local function logIdentityResolve(source, message)
+  if not identityDebugEnabled() then return end
   print(('[mz_core][ResolvePlayerIdentity][src:%s] %s'):format(tostring(source), tostring(message or '')))
 end
 
@@ -159,9 +183,13 @@ exports('ResolvePlayerIdentity', function(source)
   return resolvePlayerIdentityInternal(source)
 end)
 
-print('[mz_core][player/exports] ResolvePlayerIdentity registered')
+if identityDebugEnabled() then
+  print('[mz_core][player/exports] ResolvePlayerIdentity registered')
+end
 
 RegisterCommand('mzcore_identity_debug', function(commandSource, args)
+  if not canUseIdentityDebug(commandSource) then return end
+
   local targetSource = tonumber(args and args[1])
 
   if commandSource and commandSource > 0 and not targetSource then

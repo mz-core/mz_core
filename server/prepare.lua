@@ -244,6 +244,7 @@ local statements = {
     has_shared_account TINYINT(1) NOT NULL DEFAULT 0,
     has_storage TINYINT(1) NOT NULL DEFAULT 0,
     active TINYINT(1) NOT NULL DEFAULT 1,
+    revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
     config_json LONGTEXT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -295,7 +296,7 @@ local statements = {
     UNIQUE KEY uq_mz_player_org_unique (citizenid, org_id),
     KEY idx_mz_player_orgs_citizenid (citizenid),
     KEY idx_mz_player_orgs_org_id (org_id)
-  )]],
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
 
   [[CREATE TABLE IF NOT EXISTS mz_player_permissions (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -306,6 +307,45 @@ local statements = {
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY uq_mz_player_permission_unique (citizenid, permission)
   )]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_staff_roles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    code VARCHAR(48) NOT NULL,
+    name VARCHAR(80) NOT NULL,
+    level INT NOT NULL,
+    active TINYINT(1) NOT NULL DEFAULT 1,
+    revision BIGINT UNSIGNED NOT NULL DEFAULT 1,
+    created_by_citizenid VARCHAR(32) NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_staff_roles_code (code),
+    UNIQUE KEY uq_mz_staff_roles_level (level),
+    KEY idx_mz_staff_roles_active (active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_staff_role_permissions (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    role_id INT NOT NULL,
+    permission VARCHAR(128) NOT NULL,
+    allow TINYINT(1) NOT NULL DEFAULT 1,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_staff_role_permission (role_id, permission),
+    KEY idx_mz_staff_role_permissions_role (role_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_staff_assignments (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    citizenid VARCHAR(32) NOT NULL,
+    role_id INT NOT NULL,
+    active TINYINT(1) NOT NULL DEFAULT 1,
+    assigned_by_citizenid VARCHAR(32) NOT NULL,
+    reason VARCHAR(255) NOT NULL,
+    assigned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    revoked_at TIMESTAMP NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_staff_assignments_citizenid (citizenid),
+    KEY idx_mz_staff_assignments_role_active (role_id, active)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
 
   [[CREATE TABLE IF NOT EXISTS mz_player_vehicles (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -459,11 +499,15 @@ local statements = {
     action VARCHAR(64) NOT NULL,
     actor VARCHAR(64) NULL,
     target VARCHAR(64) NULL,
+    org_code VARCHAR(64) NULL,
+    audit_id VARCHAR(96) NULL,
     data_json LONGTEXT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     KEY idx_mz_logs_scope (scope),
-    KEY idx_mz_logs_action (action)
-  )]]
+    KEY idx_mz_logs_action (action),
+    KEY idx_mz_logs_org_code (org_code),
+    UNIQUE KEY uq_mz_logs_audit_id (audit_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]]
 }
 
 local function runPrepareQuery(label, statement, params)
@@ -511,6 +555,38 @@ local function ensureColumn(tableName, columnName, definition)
   runPrepareQuery(
     ('add_column_%s_%s'):format(tableName, columnName),
     ('ALTER TABLE `%s` ADD COLUMN %s'):format(tableName, definition)
+  )
+end
+
+local function ensureIndex(tableName, indexName, definition)
+  local row = MySQL.single.await([[
+    SELECT COUNT(1) AS total
+    FROM information_schema.statistics
+    WHERE table_schema = DATABASE()
+      AND table_name = ?
+      AND index_name = ?
+  ]], { tableName, indexName })
+
+  if row and tonumber(row.total) and tonumber(row.total) > 0 then return end
+
+  runPrepareQuery(
+    ('add_index_%s_%s'):format(tableName, indexName),
+    ('ALTER TABLE `%s` ADD %s'):format(tableName, definition)
+  )
+end
+
+local function ensureInnoDB(tableName)
+  local row = MySQL.single.await([[
+    SELECT ENGINE AS engine
+    FROM information_schema.tables
+    WHERE table_schema = DATABASE() AND table_name = ?
+    LIMIT 1
+  ]], { tableName })
+  if not row then error(('table_missing:%s'):format(tableName), 0) end
+  if tostring(row.engine or ''):lower() == 'innodb' then return end
+  runPrepareQuery(
+    ('convert_%s_to_innodb'):format(tableName),
+    ('ALTER TABLE `%s` ENGINE=InnoDB'):format(tableName)
   )
 end
 
@@ -673,6 +749,46 @@ local function runPrepare()
     ensureColumn('mz_inventory_items', 'instance_uid', 'instance_uid VARCHAR(64) NULL')
     ensureColumn('mz_player_vehicles', 'metadata_json', 'metadata_json LONGTEXT NULL')
     ensureColumn('mz_org_grades', 'active', 'active TINYINT(1) NOT NULL DEFAULT 1')
+    ensureColumn('mz_orgs', 'revision', 'revision BIGINT UNSIGNED NOT NULL DEFAULT 1')
+    ensureColumn('mz_logs', 'org_code', 'org_code VARCHAR(64) NULL')
+    ensureColumn('mz_logs', 'audit_id', 'audit_id VARCHAR(96) NULL')
+    ensureIndex('mz_logs', 'idx_mz_logs_org_code', 'KEY idx_mz_logs_org_code (org_code)')
+    ensureIndex('mz_logs', 'uq_mz_logs_audit_id', 'UNIQUE KEY uq_mz_logs_audit_id (audit_id)')
+    ensureInnoDB('mz_player_orgs')
+    ensureInnoDB('mz_orgs')
+    ensureInnoDB('mz_org_grades')
+    ensureInnoDB('mz_org_permissions')
+    ensureInnoDB('mz_org_accounts')
+    ensureInnoDB('mz_logs')
+
+    -- Backfill idempotente: somente extrai chaves JSON estruturais conhecidas.
+    -- Registros sem org_code confiavel permanecem globais; nao ha fallback textual.
+    runPrepareQuery('backfill_mz_logs_org_code', [[
+      UPDATE mz_logs
+      SET org_code = COALESCE(
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data_json, '$.context.org_code')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data_json, '$.context.orgCode')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data_json, '$.org_code')), ''),
+        NULLIF(JSON_UNQUOTE(JSON_EXTRACT(data_json, '$.orgCode')), '')
+      )
+      WHERE org_code IS NULL
+        AND data_json IS NOT NULL
+        AND JSON_VALID(data_json) = 1
+    ]])
+
+    local legacyStaffPermissions = MySQL.query.await([[
+      SELECT p.org_id, o.code AS org_code, p.grade_id, p.permission, p.allow
+      FROM mz_org_permissions p
+      LEFT JOIN mz_orgs o ON o.id = p.org_id
+      WHERE p.permission LIKE 'staff.%'
+      ORDER BY p.org_id, p.grade_id, p.permission
+    ]]) or {}
+    for _, row in ipairs(legacyStaffPermissions) do
+      print(('[mz_core][migration][staff-permission] ignored legacy row orgId=%s orgCode=%s gradeId=%s permission=%s allow=%s'):format(
+        tostring(row.org_id), tostring(row.org_code), tostring(row.grade_id),
+        tostring(row.permission), tostring(row.allow)
+      ))
+    end
 
     runPrepareQuery('ensure_mz_vehicle_world_state', [[
       CREATE TABLE IF NOT EXISTS mz_vehicle_world_state (
@@ -701,7 +817,7 @@ local function runPrepare()
         KEY idx_mz_vehicle_world_last_seen (last_seen_at)
       )
     ]])
-    
+
     runPrepareQuery('ensure_mz_world_drops', [[
       CREATE TABLE IF NOT EXISTS mz_world_drops (
         id INT AUTO_INCREMENT PRIMARY KEY,

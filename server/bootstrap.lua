@@ -51,11 +51,12 @@ CreateThread(function()
     tostring(MZCoreState.ready)
   ))
 
-  if not MZSeed or type(MZSeed.ensureDefaultOrgs) ~= 'function' then
+  if not MZSeed or type(MZSeed.ensureDefaultOrgs) ~= 'function'
+    or not MZStaffSeed or type(MZStaffSeed.ensureDefaultRoles) ~= 'function' then
     MZCoreState.seedDone = true
     MZCoreState.seedOk = false
     MZCoreState.ready = false
-    print(('[mz_core][bootstrap] seed failed: default org seed unavailable prepareDone=%s prepareOk=%s seedDone=%s seedOk=%s ready=%s'):format(
+    print(('[mz_core][bootstrap] seed failed: default org/staff seed unavailable prepareDone=%s prepareOk=%s seedDone=%s seedOk=%s ready=%s'):format(
       tostring(MZCoreState.prepareDone),
       tostring(MZCoreState.prepareOk),
       tostring(MZCoreState.seedDone),
@@ -69,6 +70,7 @@ CreateThread(function()
 
   local ok, err = xpcall(function()
     MZSeed.ensureDefaultOrgs()
+    MZStaffSeed.ensureDefaultRoles()
   end, debug.traceback)
 
   MZCoreState.seedDone = true

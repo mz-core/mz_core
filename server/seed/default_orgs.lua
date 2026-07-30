@@ -391,6 +391,12 @@ local defaultOrgs = {
       { level = 3, code = 'medico', name = 'Médico', salary = 2200, inherits_level = 2 }
     },
     base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view',
       'ambulance.radio.use',
       'ambulance.tablet.open'
     },
@@ -421,6 +427,12 @@ local defaultOrgs = {
       { level = 3, code = 'chefe', name = 'Chefe', salary = 2200, inherits_level = 2 }
     },
     base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view',
       'mechanic.tablet.open'
     },
     grade_permissions = {
@@ -455,29 +467,45 @@ local defaultOrgs = {
       { level = 4, code = 'lider', name = 'Líder', salary = 0, inherits_level = 3 }
     },
 
-    base_capabilities = {
+    base_permissions = {
+      'org.view',
+      'members.view',
+      'goals.view',
+      'account.view',
+      'recruitment.view',
+      'logs.view',
       'radio.use',
       'storage.open'
     },
 
-    grade_capabilities = {
+    grade_permissions = {
       [1] = {
         'vehicle.basic'
       },
       [2] = {
+        'account.deposit',
         'vehicle.medium',
         'storage.deposit'
       },
       [3] = {
-        'storage.withdraw',
         'members.invite',
+        'members.remove',
+        'members.promote',
+        'members.demote',
+        'goals.manage',
+        'recruitment.manage',
+        'account.deposit',
+        'storage.withdraw',
         'vehicle.advanced'
       },
       [4] = {
         'manage.members',
-        'account.manage',
-        'manage.account',
         'members.set_leader',
+        'account.manage',
+        'account.withdraw',
+        'manage.account',
+        'goals.manage',
+        'recruitment.manage',
         'boss.actions'
       }
     }
@@ -494,27 +522,9 @@ local defaultOrgs = {
       { level = 2, code = 'moderador', name = 'Moderador', salary = 0, inherits_level = 1 },
       { level = 3, code = 'admin', name = 'Admin', salary = 0, inherits_level = 2 }
     },
-    base_permissions = {
-      'staff.panel.open'
-    },
-    grade_permissions = {
-      [1] = {
-        'staff.orgs.view',
-        'staff.report.view'
-      },
-      [2] = {
-        'staff.kick',
-        'staff.spectate'
-      },
-      [3] = {
-        'staff.ban',
-        'staff.teleport',
-        'staff.logs.view',
-        'staff.orgs.manage',
-        'staff.orgs.create',
-        'staff.orgs.set_leader'
-      }
-    }
+    -- Permissoes administrativas globais nunca sao concedidas por cargo.
+    base_permissions = {},
+    grade_permissions = {}
   },
   {
     type = 'vip',
@@ -529,6 +539,9 @@ local defaultOrgs = {
       { level = 3, code = 'gold', name = 'Gold', salary = 0, inherits_level = 2 }
     },
     base_permissions = {
+      'org.view',
+      'members.view',
+      'logs.view',
       'vip.chat.tag'
     },
     grade_permissions = {

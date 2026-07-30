@@ -36,14 +36,6 @@ local function canViewOrgAccount(source, orgCode)
     return true
   end
 
-  if MZOrgService.hasGlobalPermission(source, 'staff.orgs.view') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.manage') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.create') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.orgs.set_leader') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.logs.view') == true then
-    return true
-  end
-
   return MZOrgService.canOrg(source, orgCode, 'account.view') == true
     or MZOrgService.canOrg(source, orgCode, 'org.view') == true
 end
@@ -487,6 +479,10 @@ function MZOrgAccountService.setBalance(orgCode, amount, actor)
     return false, 'org_not_found'
   end
 
+  if not asBool(org.active) then
+    return false, 'org_archived'
+  end
+
   if not asBool(org.has_shared_account) then
     return false, 'org_has_no_shared_account'
   end
@@ -540,6 +536,10 @@ function MZOrgAccountService.getAccountReadOnly(source, orgCode)
     return false, 'org_not_found'
   end
 
+  if not asBool(org.active) then
+    return false, 'org_archived'
+  end
+
   if not canViewOrgAccount(source, orgCode) then
     return false, 'forbidden'
   end
@@ -578,6 +578,10 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
   if not okBalance then
     logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, balanceOrErr, { amount = amount })
     return false, balanceOrErr == 'org_not_found' and 'invalid_org' or balanceOrErr
+  end
+  if not asBool(org.active) then
+    logOrgAccountBlocked('org.account.deposit.blocked', orgCode, source, 'org_archived', { amount = amount })
+    return false, 'org_archived'
   end
 
   if not canManageOrgAccount(source, orgCode, 'account.deposit') then
@@ -633,6 +637,10 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
     logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, balanceOrErr, { amount = amount })
     return false, balanceOrErr == 'org_not_found' and 'invalid_org' or balanceOrErr
   end
+  if not asBool(org.active) then
+    logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, 'org_archived', { amount = amount })
+    return false, 'org_archived'
+  end
 
   if not canManageOrgAccount(source, orgCode, 'account.withdraw') then
     logOrgAccountBlocked('org.account.withdraw.blocked', orgCode, source, 'forbidden', { amount = amount })
@@ -676,6 +684,7 @@ function MZOrgAccountService.listTransactions(source, orgCode, filters)
 
   local org = getOrgByCode(orgCode)
   if not org then return false, 'invalid_org' end
+  if not asBool(org.active) then return false, 'org_archived' end
   if not canViewOrgAccount(source, orgCode) then return false, 'forbidden' end
 
   local limit = math.floor(tonumber(filters.limit) or 50)

@@ -1,5 +1,18 @@
 local didFirstSpawn = false
 local isSpawning = false
+local pvpPed = 0
+
+local function enablePvpForCurrentPed()
+  local ped = PlayerPedId()
+  if not ped or ped == 0 or not DoesEntityExist(ped) then
+    return false
+  end
+
+  NetworkSetFriendlyFireOption(true)
+  SetCanAttackFriendly(ped, true, false)
+  pvpPed = ped
+  return true
+end
 
 local function loadModel(model)
   if type(model) == 'string' then
@@ -78,6 +91,7 @@ local function doSpawn(spawnData)
 
     SetPlayerInvincible(PlayerId(), false)
     SetEntityInvincible(ped, false)
+    enablePvpForCurrentPed()
     ClearPedTasksImmediately(ped)
     ClearPlayerWantedLevel(PlayerId())
 
@@ -117,6 +131,19 @@ end)
 
 
 -----
+
+CreateThread(function()
+  while true do
+    local ped = PlayerPedId()
+
+    -- SetPlayerModel troca o handle do ped e limpa esta configuracao.
+    if ped and ped ~= 0 and ped ~= pvpPed and DoesEntityExist(ped) then
+      enablePvpForCurrentPed()
+    end
+
+    Wait(1000)
+  end
+end)
 
 
 CreateThread(function()

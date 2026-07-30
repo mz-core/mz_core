@@ -26,6 +26,46 @@ exports('GetOrgAccessModel', function(source, orgCode)
   return MZOrgService.getOrgAccessModel(source, orgCode)
 end)
 
+exports('GetStaffOrgInspection', function(source, orgCode)
+  return MZOrgService.getStaffOrgInspection(source, orgCode)
+end)
+
+exports('ListLegacyStaffOrgPermissions', function(source)
+  return MZOrgService.listLegacyStaffPermissions(source)
+end)
+
+exports('CreateStaffOrganization', function(source, payload)
+  return MZOrgStaffMutationService.create(source, payload)
+end)
+
+exports('UpdateStaffOrganizationBasic', function(source, payload)
+  return MZOrgStaffMutationService.updateBasic(source, payload)
+end)
+
+exports('ChangeStaffOrganizationType', function(source, payload)
+  return MZOrgStaffMutationService.changeType(source, payload)
+end)
+
+exports('UpdateStaffOrganizationFeatures', function(source, payload)
+  return MZOrgStaffMutationService.updateFeatures(source, payload)
+end)
+
+exports('UpdateStaffOrganizationAppearance', function(source, payload)
+  return MZOrgStaffMutationService.updateAppearance(source, payload)
+end)
+
+exports('UpdateStaffOrganizationDutyPoint', function(source, payload)
+  return MZOrgStaffMutationService.updateDutyPoint(source, payload)
+end)
+
+exports('ArchiveStaffOrganization', function(source, payload)
+  return MZOrgStaffMutationService.archive(source, payload)
+end)
+
+exports('RestoreStaffOrganization', function(source, payload)
+  return MZOrgStaffMutationService.restore(source, payload)
+end)
+
 exports('ListOrgGoals', function(source, filters)
   return MZOrgService.listOrgGoals(source, filters)
 end)
@@ -114,6 +154,30 @@ exports('RemoveOrgGradePermission', function(source, orgCode, gradeId, permissio
   return MZOrgService.removeOrgGradePermission(source, orgCode, gradeId, permission, reason)
 end)
 
+exports('CreateOrganizationGrade', function(source, orgCode, payload)
+  return MZOrgService.createOrganizationGrade(source, orgCode, payload)
+end)
+
+exports('UpdateOrganizationGradeBasic', function(source, orgCode, gradeId, payload)
+  return MZOrgService.updateOrganizationGradeBasic(source, orgCode, gradeId, payload)
+end)
+
+exports('DisableOrganizationGrade', function(source, orgCode, gradeId, reason)
+  return MZOrgService.disableOrganizationGrade(source, orgCode, gradeId, reason)
+end)
+
+exports('ReactivateOrganizationGrade', function(source, orgCode, gradeId, reason)
+  return MZOrgService.reactivateOrganizationGrade(source, orgCode, gradeId, reason)
+end)
+
+exports('AddOrganizationGradePermission', function(source, orgCode, gradeId, permission, reason)
+  return MZOrgService.addOrganizationGradePermission(source, orgCode, gradeId, permission, reason)
+end)
+
+exports('RemoveOrganizationGradePermission', function(source, orgCode, gradeId, permission, reason)
+  return MZOrgService.removeOrganizationGradePermission(source, orgCode, gradeId, permission, reason)
+end)
+
 exports('CreateOrg', function(data, actor)
   return MZOrgService.createOrg(data, actor)
 end)
@@ -146,16 +210,16 @@ exports('RemoveMemberFromOrg', function(citizenid, orgCode, actor)
   return MZOrgService.removeMember(citizenid, orgCode, actor)
 end)
 
-exports('RemoveOrgMember', function(source, orgCode, targetCitizenId)
-  return MZOrgService.removeOrgMemberSecure(source, orgCode, targetCitizenId)
+exports('RemoveOrgMember', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.removeOrgMemberSecure(source, orgCode, targetCitizenId, options)
 end)
 
-exports('PromoteOrgMemberSecure', function(source, orgCode, targetCitizenId)
-  return MZOrgService.promoteOrgMemberSecure(source, orgCode, targetCitizenId)
+exports('PromoteOrgMemberSecure', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.promoteOrgMemberSecure(source, orgCode, targetCitizenId, options)
 end)
 
-exports('DemoteOrgMemberSecure', function(source, orgCode, targetCitizenId)
-  return MZOrgService.demoteOrgMemberSecure(source, orgCode, targetCitizenId)
+exports('DemoteOrgMemberSecure', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.demoteOrgMemberSecure(source, orgCode, targetCitizenId, options)
 end)
 
 exports('SetOrgMemberPrimary', function(citizenid, orgCode, actor)
@@ -166,12 +230,20 @@ exports('SetOrgMemberDuty', function(citizenid, orgCode, duty, actor)
   return MZOrgService.setDuty(citizenid, orgCode, duty, actor)
 end)
 
+exports('SetSelfOrgDutyAtPoint', function(source, orgCode, duty)
+  return MZOrgService.setSelfDutyAtPoint(source, orgCode, duty)
+end)
+
 exports('SetOrgMemberGrade', function(citizenid, orgCode, gradeLevel, actor)
   return MZOrgService.setGrade(citizenid, orgCode, gradeLevel, actor)
 end)
 
 exports('SetOrgLeaderByCitizenId', function(source, orgCode, targetCitizenId, options)
   return MZOrgService.setLeaderByCitizenId(source, orgCode, targetCitizenId, options)
+end)
+
+exports('TransferOrganizationLeadership', function(source, orgCode, targetCitizenId, options)
+  return MZOrgService.transferOrganizationLeadership(source, orgCode, targetCitizenId, options)
 end)
 
 exports('PromoteOrgMember', function(citizenid, orgCode, actor)

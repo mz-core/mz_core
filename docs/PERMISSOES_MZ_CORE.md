@@ -25,12 +25,32 @@ Os comandos administrativos do `mz_economy` continuam permitindo execucao pelo c
 
 O comando `mz_money_add` e console-only. Ele nao depende de chat/ACE de player porque `source` precisa ser `0`; se um player tentar usar pelo chat, o comando e negado.
 
-## Observacao
+## Permissões granulares atuais
 
-Se no futuro o projeto quiser permissoes granulares por modulo, isso deve ser decidido explicitamente e documentado, por exemplo:
+O grupo `group.mz_owner` continua sendo a autoridade administrativa máxima, mas o domínio de organizações já possui permissões globais Staff granulares e capabilities organizacionais.
 
-- `mzcore.economy.manage`
-- `mzcore.org.manage`
-- `mzcore.phone.manage`
+Permissões `staff.*`:
 
-Mas o padrao atual e `group.mz_owner`.
+- vêm somente de owner, ACE explícito ou override global explícito;
+- nunca são resolvidas por cargo ou membership organizacional;
+- não são aceitas por `CanOrg`.
+
+Capabilities organizacionais:
+
+- são resolvidas por membership, cargo, herança e overrides organizacionais válidos;
+- nunca concedem acesso ao Staff Menu;
+- incluem `members.set_leader`, que não equivale a `staff.orgs.set_leader`.
+
+No Lote 6D, `TransferOrganizationLeadership` exige membership ativo e `members.set_leader` diretamente revalidados. Owner/ACE/Staff não são fallback nesse export. O export administrativo `SetOrgLeaderByCitizenId` continua separado e exige autorização Staff.
+
+Liderança organizacional é suportada apenas por `job`, `gang`, `business`, `government` e `event`. O tipo `vip` representa níveis de privilégios futuros e não possui líder. Para VIP:
+
+- `CanOrg(..., 'members.set_leader')` falha fechado, inclusive para owner ou override;
+- apenas `org.view`, `members.view`, `logs.view` e capabilities `vip.*` podem ser efetivas;
+- membership e nível são administrados pelo Staff; VIP não convida, remove, promove ou rebaixa;
+- contextos e modelos de acesso não anunciam capabilities legadas incompatíveis;
+- os dois contratos de liderança retornam `leadership_not_supported`;
+- novas concessões incompatíveis são recusadas;
+- a remoção de um registro legado incompatível continua disponível para Staff com autorização adequada.
+
+Permissões granulares de outros módulos, como economia ou telefone, continuam dependendo de decisão e contrato próprios.
