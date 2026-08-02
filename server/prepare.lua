@@ -444,11 +444,43 @@ local statements = {
     actor_name VARCHAR(120) NULL,
     reason VARCHAR(255) NULL,
     metadata_json LONGTEXT NULL,
+    operation_id BIGINT UNSIGNED NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_org_acc_tx_operation (operation_id),
     KEY idx_mz_org_acc_tx_org_code (org_code),
     KEY idx_mz_org_acc_tx_type (type),
     KEY idx_mz_org_acc_tx_created_at (created_at)
   )]],
+
+  [[CREATE TABLE IF NOT EXISTS mz_org_account_operations (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    source_resource VARCHAR(100) NOT NULL,
+    operation_key VARCHAR(128) NOT NULL,
+    operation_type VARCHAR(24) NOT NULL,
+    purpose VARCHAR(64) NOT NULL,
+    org_id BIGINT UNSIGNED NOT NULL,
+    org_code VARCHAR(64) NOT NULL,
+    actor_citizenid VARCHAR(64) NOT NULL,
+    amount BIGINT UNSIGNED NOT NULL,
+    related_ref VARCHAR(128) NOT NULL,
+    request_fingerprint VARCHAR(1024) NOT NULL,
+    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+    error_code VARCHAR(64) NULL,
+    balance_before BIGINT NULL,
+    balance_after BIGINT NULL,
+    receipt_id VARCHAR(128) NULL,
+    correlation_id VARCHAR(128) NULL,
+    reversal_of_operation_id BIGINT UNSIGNED NULL,
+    metadata_json LONGTEXT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_mz_org_acc_op_scope (source_resource, operation_key),
+    UNIQUE KEY uq_mz_org_acc_op_receipt (receipt_id),
+    UNIQUE KEY uq_mz_org_acc_op_reversal (reversal_of_operation_id),
+    KEY idx_mz_org_acc_op_org (org_id, status, id),
+    KEY idx_mz_org_acc_op_actor (actor_citizenid, created_at),
+    KEY idx_mz_org_acc_op_related_ref (related_ref)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4]],
 
   [[CREATE TABLE IF NOT EXISTS mz_org_goals (
     id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
@@ -719,6 +751,18 @@ local function runPrepare()
       'idx_mz_financial_outbox_dispatch', 'idx_mz_financial_outbox_lease',
       'idx_mz_financial_outbox_created', 'idx_mz_financial_outbox_source'
     })
+
+    validateTableStructure('mz_org_account_operations', {
+      'id', 'source_resource', 'operation_key', 'operation_type', 'purpose',
+      'org_id', 'org_code', 'actor_citizenid', 'amount', 'related_ref',
+      'request_fingerprint', 'status', 'error_code', 'balance_before',
+      'balance_after', 'receipt_id', 'correlation_id',
+      'reversal_of_operation_id', 'metadata_json', 'created_at', 'updated_at'
+    }, {
+      'PRIMARY', 'uq_mz_org_acc_op_scope', 'uq_mz_org_acc_op_receipt',
+      'uq_mz_org_acc_op_reversal', 'idx_mz_org_acc_op_org',
+      'idx_mz_org_acc_op_actor', 'idx_mz_org_acc_op_related_ref'
+    })
     MZCoreState.financialOutbox.schemaReady = true
     MZCoreState.financialOutbox.schemaVersion = tonumber(
       Config and Config.FinancialOutbox and Config.FinancialOutbox.schemaVersion
@@ -750,15 +794,19 @@ local function runPrepare()
     ensureColumn('mz_player_vehicles', 'metadata_json', 'metadata_json LONGTEXT NULL')
     ensureColumn('mz_org_grades', 'active', 'active TINYINT(1) NOT NULL DEFAULT 1')
     ensureColumn('mz_orgs', 'revision', 'revision BIGINT UNSIGNED NOT NULL DEFAULT 1')
+    ensureColumn('mz_org_account_transactions', 'operation_id', 'operation_id BIGINT UNSIGNED NULL')
     ensureColumn('mz_logs', 'org_code', 'org_code VARCHAR(64) NULL')
     ensureColumn('mz_logs', 'audit_id', 'audit_id VARCHAR(96) NULL')
     ensureIndex('mz_logs', 'idx_mz_logs_org_code', 'KEY idx_mz_logs_org_code (org_code)')
     ensureIndex('mz_logs', 'uq_mz_logs_audit_id', 'UNIQUE KEY uq_mz_logs_audit_id (audit_id)')
+    ensureIndex('mz_org_account_transactions', 'uq_mz_org_acc_tx_operation', 'UNIQUE KEY uq_mz_org_acc_tx_operation (operation_id)')
     ensureInnoDB('mz_player_orgs')
     ensureInnoDB('mz_orgs')
     ensureInnoDB('mz_org_grades')
     ensureInnoDB('mz_org_permissions')
     ensureInnoDB('mz_org_accounts')
+    ensureInnoDB('mz_org_account_transactions')
+    ensureInnoDB('mz_org_account_operations')
     ensureInnoDB('mz_logs')
 
     -- Backfill idempotente: somente extrai chaves JSON estruturais conhecidas.

@@ -34,6 +34,7 @@ Aliases recomendados para futuro:
 | Saque de org | `mz_core` / `mz_org` | `mz_core/server/accounts/org_accounts.lua` | `WithdrawOrgAccount` | org - amount, player bank + amount | Nao | `org_transfer` | Transferencia de saldo existente da org para jogador. |
 | Payroll | `mz_core` | `mz_core/server/accounts/payroll.lua` | `PayCitizenSalary`, `RunPayrollTick` | salario do cargo, debitado da org | Como renda do jogador, nao como dinheiro criado | `salary` | Como debita `mz_org_accounts`, e transferencia economica. |
 | Add org balance | `mz_core` | `mz_core/server/accounts/org_accounts.lua` | `AddOrgAccountBalance`, comando `mzorg_deposit` | org + amount | Nao | `admin_org_adjustment` | Cria saldo em org. Deve ser separado de receita real. |
+| Reembolso de compra da org | `mz_core` / `mz_org_activities` | `mz_core/server/accounts/org_accounts.lua` | `RefundOrgAccount` | org + valor do recibo original | Nao | `org_facility_refund` | Compensacao idempotente; um recibo de gasto admite apenas um reembolso. |
 | Legacy banco/PayPal/cassino | `celular` | `celular/resource/smartphone/server.js` | banco, PayPal, cassino | varia | Nao confiavel | `legacy_bypass` | Fora do `mz_core`. Se ativo, precisa isolamento/adaptacao. |
 
 ## Saida ou remocao de dinheiro
@@ -49,6 +50,7 @@ Aliases recomendados para futuro:
 | Tatuagem | `mz_tatto` | `mz_tatto/server/service.lua` | compra/salvamento de tatuagem | soma dos precos de tatuagens novas | Sim | `cosmetic_expense` | Remove `Config.MoneyType` ou `wallet`. |
 | Deposito em org | `mz_core` / `mz_org` | `mz_core/server/accounts/org_accounts.lua` | `DepositOrgAccount` | player bank - amount, org + amount | Nao | `org_transfer` | Transferencia entre jogador e org. |
 | Remove org balance | `mz_core` | `mz_core/server/accounts/org_accounts.lua` | `RemoveOrgAccountBalance`, comando `mzorg_withdraw` | org - amount | Nao | `admin_org_adjustment` | Remove saldo de org sem representar despesa real. |
+| Compra de instalacao da org | `mz_core` / `mz_org_activities` | `mz_core/server/accounts/org_accounts.lua` | `SpendOrgAccount` | org - preco autoritativo | Sim | `org_facility_purchase` | Debito idempotente com recibo; nao reutiliza ajuste administrativo. |
 | Payroll debit | `mz_core` | `mz_core/server/accounts/payroll.lua` | `payCitizen` | org - salario | Sim para org | `salary_expense` | Contraparte do credito salarial ao jogador. |
 
 ## Transferencias que nao devem ser renda liquida

@@ -55,6 +55,15 @@ local function canManageOrgAccount(source, orgCode, capability)
     or MZOrgService.canOrg(source, orgCode, 'manage.account') == true
 end
 
+local function canUseOrgCommerce(source, orgCode, capability)
+  source = tonumber(source)
+  if not source or source <= 0 then return false end
+  if MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true then
+    return true
+  end
+  return MZOrgService.canOrg(source, orgCode, capability) == true
+end
+
 local function normalizeReason(value)
   if type(value) ~= 'string' and type(value) ~= 'number' then return nil end
   value = tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
@@ -831,6 +840,429 @@ function MZOrgAccountService.removeBalance(orgCode, amount, actor, reason)
   return true, detail.after
 end
 
+local ORG_COMMERCE_VERSION = 1
+local ORG_COMMERCE_PURPOSES = {
+  facility_purchase = {
+    capability = 'facility.purchase',
+    category = 'org_facility_purchase',
+    reason = 'facility_purchase',
+    resources = { mz_org_activities = true }
+  }
+}
+
+local function normalizeBoundedToken(value, minLength, maxLength)
+  if type(value) ~= 'string' and type(value) ~= 'number' then return nil end
+  local token = tostring(value):gsub('^%s+', ''):gsub('%s+$', '')
+  if #token < minLength or #token > maxLength then return nil end
+  if not token:match('^[%w%._:%-]+$') then return nil end
+  return token
+end
+
+local function normalizeSourceResource(value)
+  if type(value) ~= 'string' then return nil end
+  value = value:gsub('^%s+', ''):gsub('%s+$', '')
+  if value == '' or #value > 100 then return nil end
+  return value
+end
+
+local function encodeCommerceMetadata(data)
+  local ok, encoded = pcall(MZUtils.jsonEncode, data)
+  if not ok or type(encoded) ~= 'string' or encoded == '' or #encoded > 8192 then
+    return nil
+  end
+  return encoded
+end
+
+local function commerceFingerprint(operationType, sourceResource, org, actorCitizenId, amount, purpose, relatedRef, reversalId)
+  return table.concat({
+    tostring(ORG_COMMERCE_VERSION), tostring(operationType), tostring(sourceResource),
+    tostring(org.id), tostring(org.code), tostring(actorCitizenId), tostring(amount),
+    tostring(purpose), tostring(relatedRef), tostring(reversalId or '')
+  }, '|')
+end
+
+local function normalizeCommerceReceipt(row, replayed)
+  return {
+    schemaVersion = ORG_COMMERCE_VERSION,
+    receiptId = row.receipt_id,
+    correlationId = row.correlation_id,
+    operationId = tonumber(row.id) or row.id,
+    operationKey = row.operation_key,
+    operationType = row.operation_type,
+    purpose = row.purpose,
+    orgCode = row.org_code,
+    amount = tonumber(row.amount) or 0,
+    balanceBefore = tonumber(row.balance_before) or 0,
+    balanceAfter = tonumber(row.balance_after) or 0,
+    relatedRef = row.related_ref,
+    reversalOfOperationId = tonumber(row.reversal_of_operation_id) or row.reversal_of_operation_id,
+    replayed = replayed == true
+  }
+end
+
+local function recoverCommerceOperation(row, operationType, purpose, fingerprint)
+  if not row then return nil, nil, false end
+  if tostring(row.operation_type or '') ~= tostring(operationType)
+      or tostring(row.purpose or '') ~= tostring(purpose)
+      or tostring(row.request_fingerprint or '') ~= tostring(fingerprint) then
+    return nil, 'idempotency_conflict', true
+  end
+
+  if tostring(row.status) == 'applied' then
+    return normalizeCommerceReceipt(row, true), nil, true
+  end
+  if tostring(row.status) == 'rejected' then
+    return nil, tostring(row.error_code or 'operation_rejected'), true
+  end
+  if tostring(row.status) ~= 'pending' then
+    return nil, 'operation_state_invalid', true
+  end
+  return row, nil, false
+end
+
+local function buildCommerceFinancialData(operation, org, actorCitizenId, sourceResource, beforeBalance, afterBalance, receiptId)
+  local spend = operation.operationType == 'spend'
+  local category = spend and 'org_facility_purchase' or 'org_facility_refund'
+  local reason = spend and 'facility_purchase' or 'facility_purchase_refund'
+  local ledgerOptions = {
+    __invokingResource = sourceResource,
+    category = category,
+    reason = reason,
+    source_type = 'org_account_commerce',
+    related_org_code = tostring(org.code),
+    external_ref = receiptId,
+    counts_as_income = false,
+    counts_as_expense = spend,
+    data = {
+      channel = 'org',
+      operation_key = operation.operationKey,
+      related_ref = operation.relatedRef,
+      purpose = operation.purpose
+    }
+  }
+  local metadata = MZAccountService.NormalizeFinancialLedgerOptionsInternal(ledgerOptions, {})
+  local outbox, outboxErr = MZAccountService.BuildFinancialOutboxInternal({
+    correlationId = operation.correlationId,
+    eventType = spend and 'org_account_spend' or 'org_account_refund',
+    sourceCitizenId = actorCitizenId,
+    account = 'org',
+    amount = operation.amount,
+    fee = 0,
+    reason = reason,
+    ledgerMetadata = metadata,
+    options = ledgerOptions,
+    entries = {
+      MZAccountService.BuildFinancialLedgerEntryInternal(
+        1, nil, 'org', spend and 'out' or 'in', operation.amount,
+        beforeBalance, afterBalance, metadata
+      )
+    }
+  })
+  if outbox == false then return false, outboxErr end
+  return {
+    outbox = outbox,
+    metadata = metadata,
+    reason = reason,
+    category = category,
+    direction = spend and 'out' or 'in'
+  }
+end
+
+local function applyPendingCommerceOperation(row, org, player, source, sourceResource)
+  local account = MySQL.single.await(
+    'SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1', { org.id }
+  )
+  if not account then return false, 'org_account_missing' end
+
+  local amount = math.floor(tonumber(row.amount) or 0)
+  local beforeBalance = math.floor(tonumber(account.balance) or 0)
+  local spend = tostring(row.operation_type) == 'spend'
+  local afterBalance
+  if spend then
+    if beforeBalance < amount then
+      MZAccountRepository.rejectOrgAccountOperation(row.id, 'insufficient_org_funds')
+      return false, 'insufficient_org_funds'
+    end
+    afterBalance = beforeBalance - amount
+  else
+    if beforeBalance > MAX_SAFE_INTEGER - amount then
+      MZAccountRepository.rejectOrgAccountOperation(row.id, 'amount_overflow')
+      return false, 'amount_overflow'
+    end
+    afterBalance = beforeBalance + amount
+  end
+
+  local receiptId = MZAccountService.GenerateFinancialTransactionRefInternal(
+    spend and 'mzorg-spend' or 'mzorg-refund'
+  )
+  local correlationId = MZAccountService.GenerateFinancialTransactionRefInternal('mzacc-org-commerce')
+  local financial, financialErr = buildCommerceFinancialData({
+    operationType = tostring(row.operation_type),
+    operationKey = tostring(row.operation_key),
+    relatedRef = tostring(row.related_ref),
+    purpose = tostring(row.purpose),
+    amount = amount,
+    correlationId = correlationId
+  }, org, tostring(player.citizenid), sourceResource, beforeBalance, afterBalance, receiptId)
+  if financial == false then return false, financialErr end
+
+  local persisted = MZAccountRepository.applyOrgAccountOperation({
+    operationId = tonumber(row.id),
+    balanceBefore = beforeBalance,
+    balanceAfter = afterBalance,
+    receiptId = receiptId,
+    correlationId = correlationId,
+    actorName = getPlayerDisplayName(player, source),
+    reason = financial.reason
+  }, financial.outbox)
+  if not persisted then return false, 'database_error' end
+
+  local applied = MZAccountRepository.getOrgAccountOperation(sourceResource, tostring(row.operation_key))
+  if not applied or tostring(applied.status) ~= 'applied' then
+    return false, 'balance_conflict'
+  end
+
+  local receipt = normalizeCommerceReceipt(applied, false)
+  receipt.outboxPersisted = type(financial.outbox) == 'table'
+  receipt.ledger = financial
+  return true, receipt
+end
+
+local function recordLegacyCommerce(receipt)
+  if type(receipt) ~= 'table' or receipt.outboxPersisted == true or type(receipt.ledger) ~= 'table' then
+    return
+  end
+  local ledger = receipt.ledger
+  recordOrgLedger({
+    account = 'org',
+    amount = receipt.amount,
+    balance_before = receipt.balanceBefore,
+    balance_after = receipt.balanceAfter,
+    direction = ledger.direction,
+    category = ledger.category,
+    reason = ledger.reason,
+    source_resource = ledger.metadata.source_resource,
+    source_type = ledger.metadata.source_type,
+    counts_as_income = false,
+    counts_as_expense = ledger.metadata.counts_as_expense == true,
+    related_org_code = receipt.orgCode,
+    external_ref = receipt.receiptId
+  })
+end
+
+function MZOrgAccountService.getCommerceCapabilities()
+  local ready = MZCoreState and MZCoreState.ready == true
+  return {
+    schemaVersion = ORG_COMMERCE_VERSION,
+    ready = ready,
+    spend = ready,
+    refund = ready,
+    idempotent = true,
+    receipt = true,
+    error = ready and nil or 'core_not_ready',
+    purposes = { 'facility_purchase' }
+  }
+end
+
+function MZOrgAccountService.spend(source, orgCode, amount, options, sourceResource)
+  source = tonumber(source)
+  orgCode = normalizeOrgCode(orgCode)
+  amount = math.floor(tonumber(amount) or 0)
+  options = type(options) == 'table' and options or {}
+  sourceResource = normalizeSourceResource(sourceResource)
+
+  if not MZCoreState or MZCoreState.ready ~= true then return false, 'core_not_ready' end
+  if not source or source <= 0 then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if amount <= 0 or amount > MAX_SAFE_INTEGER then return false, 'invalid_amount' end
+  if not sourceResource then return false, 'invalid_source_resource' end
+
+  local purpose = normalizeBoundedToken(options.purpose, 3, 64)
+  local policy = purpose and ORG_COMMERCE_PURPOSES[purpose] or nil
+  if not policy or policy.resources[sourceResource] ~= true then
+    return false, 'commerce_purpose_forbidden'
+  end
+  local operationKey = normalizeBoundedToken(
+    options.operationKey or options.idempotencyKey or options.idempotency_key, 16, 128
+  )
+  if not operationKey then return false, 'invalid_operation_key' end
+  local relatedRef = normalizeBoundedToken(options.relatedRef or options.related_ref, 8, 128)
+  if not relatedRef then return false, 'invalid_related_ref' end
+
+  local player = MZPlayerService.getPlayer(source)
+  if not player or not player.citizenid then return false, 'player_not_loaded' end
+  local okBalance, balanceOrErr, org = MZOrgAccountService.getBalance(orgCode)
+  if not okBalance then return false, balanceOrErr end
+  if not asBool(org.active) then return false, 'org_archived' end
+  if not canUseOrgCommerce(source, orgCode, policy.capability) then return false, 'forbidden' end
+
+  local fingerprint = commerceFingerprint(
+    'spend', sourceResource, org, player.citizenid, amount, purpose, relatedRef
+  )
+  local metadataJson = encodeCommerceMetadata({
+    schemaVersion = ORG_COMMERCE_VERSION,
+    operation = 'spend', purpose = purpose, relatedRef = relatedRef,
+    sourceResource = sourceResource, userReason = normalizeReason(options.reason)
+  })
+  if not metadataJson then return false, 'invalid_metadata' end
+
+  local lockedOk, resultOrErr = MZAccountService.WithFinancialLocksInternal({
+    ('org:%s'):format(org.id),
+    ('org-commerce:%s:%s'):format(sourceResource, operationKey)
+  }, function()
+    player = MZPlayerService.getPlayer(source)
+    if not player or not player.citizenid then return false, 'player_not_loaded' end
+    local currentOrg = getOrgByCode(orgCode)
+    if not currentOrg or tonumber(currentOrg.id) ~= tonumber(org.id) then return false, 'org_not_found' end
+    if not asBool(currentOrg.active) then return false, 'org_archived' end
+    if not asBool(currentOrg.has_shared_account) then return false, 'org_has_no_shared_account' end
+    if not canUseOrgCommerce(source, orgCode, policy.capability) then return false, 'forbidden' end
+
+    local existing = MZAccountRepository.getOrgAccountOperation(sourceResource, operationKey)
+    local recovered, recoverErr, terminal = recoverCommerceOperation(
+      existing, 'spend', purpose, fingerprint
+    )
+    if terminal then
+      if recovered then return true, recovered end
+      return false, recoverErr
+    end
+
+    local operation = existing
+    if not operation then
+      local account = MySQL.single.await(
+        'SELECT balance FROM mz_org_accounts WHERE org_id = ? LIMIT 1', { org.id }
+      )
+      if not account then return false, 'org_account_missing' end
+      local insufficient = math.floor(tonumber(account.balance) or 0) < amount
+      local operationId = MZAccountRepository.createOrgAccountOperation({
+        sourceResource = sourceResource, operationKey = operationKey,
+        operationType = 'spend', purpose = purpose, orgId = org.id,
+        orgCode = tostring(org.code), actorCitizenId = tostring(player.citizenid),
+        amount = amount, relatedRef = relatedRef, fingerprint = fingerprint,
+        status = insufficient and 'rejected' or 'pending',
+        errorCode = insufficient and 'insufficient_org_funds' or nil,
+        metadataJson = metadataJson
+      })
+      if not operationId then return false, 'database_error' end
+      if insufficient then return false, 'insufficient_org_funds' end
+      operation = MZAccountRepository.getOrgAccountOperation(sourceResource, operationKey)
+      if not operation then return false, 'database_error' end
+    end
+
+    return applyPendingCommerceOperation(operation, org, player, source, sourceResource)
+  end)
+
+  if not lockedOk then return false, resultOrErr end
+  recordLegacyCommerce(resultOrErr)
+  logOrgAccountAction('org.account.spend', org, source, resultOrErr.balanceBefore, resultOrErr.balanceAfter, {
+    amount = amount, purpose = purpose, receipt_id = resultOrErr.receiptId,
+    replayed = resultOrErr.replayed == true, source_resource = sourceResource
+  })
+  resultOrErr.ledger = nil
+  resultOrErr.outboxPersisted = nil
+  return true, resultOrErr
+end
+
+function MZOrgAccountService.refund(source, orgCode, spendReceiptId, options, sourceResource)
+  source = tonumber(source)
+  orgCode = normalizeOrgCode(orgCode)
+  options = type(options) == 'table' and options or {}
+  sourceResource = normalizeSourceResource(sourceResource)
+  spendReceiptId = normalizeBoundedToken(spendReceiptId, 8, 128)
+
+  if not MZCoreState or MZCoreState.ready ~= true then return false, 'core_not_ready' end
+  if not source or source <= 0 then return false, 'invalid_source' end
+  if not orgCode then return false, 'invalid_org' end
+  if not sourceResource then return false, 'invalid_source_resource' end
+  if not spendReceiptId then return false, 'invalid_receipt_id' end
+  if sourceResource ~= 'mz_org_activities' then return false, 'commerce_purpose_forbidden' end
+
+  local operationKey = normalizeBoundedToken(
+    options.operationKey or options.idempotencyKey or options.idempotency_key, 16, 128
+  )
+  if not operationKey then return false, 'invalid_operation_key' end
+  local player = MZPlayerService.getPlayer(source)
+  if not player or not player.citizenid then return false, 'player_not_loaded' end
+  local org = getOrgByCode(orgCode)
+  if not org then return false, 'org_not_found' end
+  if not asBool(org.has_shared_account) then return false, 'org_has_no_shared_account' end
+
+  local original = MZAccountRepository.getOrgAccountOperationByReceipt(spendReceiptId)
+  if not original or tostring(original.status) ~= 'applied'
+      or tostring(original.operation_type) ~= 'spend'
+      or tostring(original.purpose) ~= 'facility_purchase' then
+    return false, 'spend_receipt_not_found'
+  end
+  if tostring(original.source_resource) ~= sourceResource
+      or tostring(original.org_code) ~= tostring(org.code)
+      or tostring(original.actor_citizenid) ~= tostring(player.citizenid) then
+    return false, 'spend_receipt_forbidden'
+  end
+
+  local amount = math.floor(tonumber(original.amount) or 0)
+  local purpose = 'facility_purchase_refund'
+  local relatedRef = spendReceiptId
+  local fingerprint = commerceFingerprint(
+    'refund', sourceResource, org, player.citizenid, amount, purpose,
+    relatedRef, original.id
+  )
+  local metadataJson = encodeCommerceMetadata({
+    schemaVersion = ORG_COMMERCE_VERSION,
+    operation = 'refund', purpose = purpose, relatedRef = relatedRef,
+    sourceResource = sourceResource, reversalOfOperationId = tonumber(original.id),
+    userReason = normalizeReason(options.reason)
+  })
+  if not metadataJson then return false, 'invalid_metadata' end
+
+  local lockedOk, resultOrErr = MZAccountService.WithFinancialLocksInternal({
+    ('org:%s'):format(org.id),
+    ('org-commerce:%s:%s'):format(sourceResource, operationKey),
+    ('org-commerce-reversal:%s'):format(original.id)
+  }, function()
+    local existing = MZAccountRepository.getOrgAccountOperation(sourceResource, operationKey)
+    local recovered, recoverErr, terminal = recoverCommerceOperation(
+      existing, 'refund', purpose, fingerprint
+    )
+    if terminal then
+      if recovered then return true, recovered end
+      return false, recoverErr
+    end
+
+    local reversal = MZAccountRepository.getOrgAccountReversal(original.id)
+    if reversal and (not existing or tonumber(reversal.id) ~= tonumber(existing.id)) then
+      return false, 'spend_already_refunded'
+    end
+
+    local operation = existing
+    if not operation then
+      local operationId = MZAccountRepository.createOrgAccountOperation({
+        sourceResource = sourceResource, operationKey = operationKey,
+        operationType = 'refund', purpose = purpose, orgId = org.id,
+        orgCode = tostring(org.code), actorCitizenId = tostring(player.citizenid),
+        amount = amount, relatedRef = relatedRef, fingerprint = fingerprint,
+        status = 'pending', reversalOfOperationId = tonumber(original.id),
+        metadataJson = metadataJson
+      })
+      if not operationId then return false, 'database_error' end
+      operation = MZAccountRepository.getOrgAccountOperation(sourceResource, operationKey)
+      if not operation then return false, 'database_error' end
+    end
+
+    return applyPendingCommerceOperation(operation, org, player, source, sourceResource)
+  end)
+
+  if not lockedOk then return false, resultOrErr end
+  recordLegacyCommerce(resultOrErr)
+  logOrgAccountAction('org.account.refund', org, source, resultOrErr.balanceBefore, resultOrErr.balanceAfter, {
+    amount = amount, receipt_id = resultOrErr.receiptId,
+    spend_receipt_id = spendReceiptId, replayed = resultOrErr.replayed == true,
+    source_resource = sourceResource
+  })
+  resultOrErr.ledger = nil
+  resultOrErr.outboxPersisted = nil
+  return true, resultOrErr
+end
+
 exports('GetOrgAccountBalance', function(orgCode)
   return MZOrgAccountService.getBalance(orgCode)
 end)
@@ -861,4 +1293,18 @@ end)
 
 exports('ListOrgAccountTransactions', function(source, orgCode, filters)
   return MZOrgAccountService.listTransactions(source, orgCode, filters)
+end)
+
+exports('GetOrgAccountCommerceCapabilities', function()
+  return MZOrgAccountService.getCommerceCapabilities()
+end)
+
+exports('SpendOrgAccount', function(source, orgCode, amount, options)
+  local invokingResource = type(GetInvokingResource) == 'function' and GetInvokingResource() or nil
+  return MZOrgAccountService.spend(source, orgCode, amount, options, invokingResource)
+end)
+
+exports('RefundOrgAccount', function(source, orgCode, spendReceiptId, options)
+  local invokingResource = type(GetInvokingResource) == 'function' and GetInvokingResource() or nil
+  return MZOrgAccountService.refund(source, orgCode, spendReceiptId, options, invokingResource)
 end)

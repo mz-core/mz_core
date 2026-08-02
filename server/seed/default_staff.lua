@@ -77,7 +77,12 @@ local managerPermissions = extend(administratorPermissions, {
   'staff.world.doors.archive',
   'staff.world.props.create',
   'staff.world.props.manage',
-  'staff.world.props.archive'
+  'staff.world.props.archive',
+  'staff.furniture.view',
+  'staff.furniture.create',
+  'staff.furniture.manage',
+  'staff.furniture.archive',
+  'staff.furniture.recovery'
 })
 
 local defaultRoles = {
