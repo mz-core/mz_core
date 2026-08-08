@@ -10,6 +10,7 @@ MZClient.InventoryWeapons.lastClipAmmoSent = MZClient.InventoryWeapons.lastClipA
 MZClient.InventoryWeapons.reloading = MZClient.InventoryWeapons.reloading == true
 
 local WEAPON_UNARMED = `WEAPON_UNARMED`
+local sendWeaponAmmoUpdate
 
 local function getWeaponConfig()
   return type(Config.Weapons) == 'table' and Config.Weapons or {}
@@ -92,6 +93,12 @@ local function useHotbarSlot(hotbarSlot)
     return
   end
 
+  -- Eventos do mesmo cliente chegam ao servidor em ordem. Persistir primeiro
+  -- impede que um toggle rapido reequipe o snapshot anterior da arma.
+  if type(sendWeaponAmmoUpdate) == 'function' then
+    sendWeaponAmmoUpdate('before_hotbar_use', true)
+  end
+
   TriggerServerEvent('mz_core:server:inventory:useHotbarSlot', {
     hotbar_slot = math.floor(hotbarSlot)
   })
@@ -150,7 +157,9 @@ local function getWeaponClipAmmoNative(ped, weaponHash)
   end
 
   local ok, clip = GetAmmoInClip(ped, weaponHash)
-  if ok == true and type(clip) == 'number' then
+  -- Alguns artifacts retornam o BOOL nativo como 1/0. O segundo retorno continua
+  -- sendo a quantidade real do pente e deve sempre ter prioridade.
+  if type(clip) == 'number' then
     return math.max(math.floor(clip), 0)
   end
 
@@ -542,7 +551,7 @@ local function updateAuthorizedVisualAmmoFromPed(reason)
   return false
 end
 
-local function sendWeaponAmmoUpdate(reason, force)
+sendWeaponAmmoUpdate = function(reason, force)
   local authorized = MZClient.InventoryWeapons.authorized
   if type(authorized) ~= 'table' or tostring(authorized.instance_uid or '') == '' then
     return false
@@ -706,6 +715,15 @@ local function requestAuthorizedWeaponReload()
     notifyInventoryWeapon(ReloadErrorMessages[errorCode] or 'Não foi possível recarregar a arma.', errorCode == 'weapon_clip_full' and 'info' or 'error')
   end)
 end
+
+RegisterCommand('mz_weapon_reload', function()
+  requestAuthorizedWeaponReload()
+end, false)
+RegisterKeyMapping('mz_weapon_reload', 'Recarregar arma pelo inventário', 'keyboard', 'R')
+
+exports('FlushEquippedWeaponAmmo', function(reason)
+  return sendWeaponAmmoUpdate(tostring(reason or 'before_inventory_action'), true)
+end)
 
 local function setUnarmed(ped)
   ped = ped or getPed()

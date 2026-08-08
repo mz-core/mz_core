@@ -216,7 +216,13 @@ expect(noAmmoOk == false and noAmmoErr == 'weapon_reload_no_ammo', 'ausencia de 
 local clientSource = assert(io.open('client/inventory.lua', 'rb')):read('*a')
 expect(clientSource:find('DisableControlAction(0, RELOAD_CONTROL, true)', 1, true) ~= nil, 'controle nativo de recarga nao foi interceptado')
 expect(clientSource:find("lib.callback.await('mz_core:server:inventory:reloadWeapon'", 1, true) ~= nil, 'callback de recarga automatica ausente')
+expect(clientSource:find("RegisterKeyMapping('mz_weapon_reload'", 1, true) ~= nil, 'mapeamento confiavel da tecla R ausente')
 expect(clientSource:find('clip_ammo = clipForServer', 1, true) ~= nil, 'pente nao e enviado na persistencia periodica')
+expect(clientSource:find("sendWeaponAmmoUpdate('before_hotbar_use', true)", 1, true) ~= nil, 'hotbar nao persiste disparos antes da troca')
+expect(clientSource:find("exports('FlushEquippedWeaponAmmo'", 1, true) ~= nil, 'export de flush para o inventario ausente')
+local clipResultCheck = assert(clientSource:find("if type(clip) == 'number' then", 1, true))
+local boolResultCheck = assert(clientSource:find("if type(ok) == 'number' then", 1, true))
+expect(clipResultCheck < boolResultCheck, 'quantidade real do pente nao tem prioridade sobre o BOOL numerico')
 
 local eventSource = assert(io.open('server/inventory/events.lua', 'rb')):read('*a')
 expect(eventSource:find("lib.callback.register('mz_core:server:inventory:reloadWeapon'", 1, true) ~= nil, 'callback server-side de recarga ausente')
