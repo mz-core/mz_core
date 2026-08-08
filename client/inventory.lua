@@ -11,6 +11,8 @@ MZClient.InventoryWeapons.reloading = MZClient.InventoryWeapons.reloading == tru
 
 local WEAPON_UNARMED = `WEAPON_UNARMED`
 local sendWeaponAmmoUpdate
+local requestAuthorizedWeaponReload
+local notifyInventoryWeapon
 
 local function getWeaponConfig()
   return type(Config.Weapons) == 'table' and Config.Weapons or {}
@@ -82,6 +84,42 @@ local function getHotbarSlotCount()
   return count
 end
 
+local function isWeaponReloadTransitionActive(startEmptyReload)
+  local inventoryWeapons = MZClient.InventoryWeapons
+  if inventoryWeapons.reloading == true then
+    return true
+  end
+
+  local authorized = inventoryWeapons.authorized
+  if type(authorized) ~= 'table'
+    or getWeaponConfig().autoReloadFromInventory == false
+    or math.max(0, math.floor(tonumber(authorized.inventoryAmmo) or 0)) <= 0 then
+    return false
+  end
+
+  local ped = PlayerPedId()
+  local weaponHash = tonumber(authorized.weapon_hash)
+  if not ped or ped == 0 or not weaponHash then
+    return false
+  end
+
+  local nativeAmmo = math.max(0, math.floor(tonumber(GetAmmoInPedWeapon(ped, weaponHash)) or 0))
+  if nativeAmmo > 0 then
+    return false
+  end
+
+  local selectedWeapon = GetSelectedPedWeapon(ped)
+  if selectedWeapon ~= weaponHash and selectedWeapon ~= WEAPON_UNARMED then
+    return false
+  end
+
+  if startEmptyReload == true and type(requestAuthorizedWeaponReload) == 'function' then
+    requestAuthorizedWeaponReload('auto_empty')
+  end
+
+  return true
+end
+
 local function useHotbarSlot(hotbarSlot)
   hotbarSlot = tonumber(hotbarSlot)
   if not hotbarSlot then
@@ -90,6 +128,11 @@ local function useHotbarSlot(hotbarSlot)
 
   if MZPlayerStateClient and MZPlayerStateClient.canPerformAction
     and not MZPlayerStateClient.canPerformAction('inventory.use') then
+    return
+  end
+
+  if isWeaponReloadTransitionActive(true) then
+    notifyInventoryWeapon('Aguarde a recarga terminar antes de guardar ou trocar a arma.', 'info')
     return
   end
 
@@ -107,7 +150,7 @@ local function useHotbarSlot(hotbarSlot)
   })
 end
 
-local function notifyInventoryWeapon(message, notifyType)
+notifyInventoryWeapon = function(message, notifyType)
   message = tostring(message or '')
   if message == '' then
     return
@@ -706,7 +749,7 @@ local ReloadErrorMessages = {
   weapon_ammo_revision_mismatch = 'A munição foi atualizada. Tente recarregar novamente.'
 }
 
-local function requestAuthorizedWeaponReload(reason)
+requestAuthorizedWeaponReload = function(reason)
   local inventoryWeapons = MZClient.InventoryWeapons
   local authorized = inventoryWeapons.authorized
   if type(authorized) ~= 'table' or inventoryWeapons.reloading == true then
@@ -739,6 +782,9 @@ local function requestAuthorizedWeaponReload(reason)
     return
   end
 
+  inventoryWeapons.reloading = true
+  inventoryWeapons.lastReloadRequestAt = now
+
   if autoHolsteredEmptyWeapon then
     applyAuthorizedAmmoDisplayToPed(ped, weaponHash, authorized)
   end
@@ -747,9 +793,6 @@ local function requestAuthorizedWeaponReload(reason)
   if clipAmmo == nil then
     clipAmmo = math.max(0, math.floor(tonumber(authorized.clipAmmo) or 0))
   end
-
-  inventoryWeapons.reloading = true
-  inventoryWeapons.lastReloadRequestAt = now
 
   CreateThread(function()
     local response = lib.callback.await('mz_core:server:inventory:reloadWeapon', false, {
@@ -802,6 +845,10 @@ exports('FlushEquippedWeaponAmmo', function(reason)
   -- estado como sucesso permite que o inventario equipe a primeira arma.
   if type(MZClient.InventoryWeapons.authorized) ~= 'table' then
     return true
+  end
+
+  if isWeaponReloadTransitionActive(true) then
+    return false
   end
 
   return sendWeaponAmmoUpdate(tostring(reason or 'before_inventory_action'), true)
