@@ -132,7 +132,6 @@ local function useHotbarSlot(hotbarSlot)
   end
 
   if isWeaponReloadTransitionActive(true) then
-    notifyInventoryWeapon('Aguarde a recarga terminar antes de guardar ou trocar a arma.', 'info')
     return
   end
 
