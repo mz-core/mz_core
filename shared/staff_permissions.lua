@@ -61,7 +61,17 @@ MZStaffPermissionCatalog = {
   { code = 'staff.members.remove', label = 'Remover membros', group = 'membros' },
   { code = 'staff.members.promote', label = 'Promover membros', group = 'membros' },
   { code = 'staff.members.demote', label = 'Rebaixar membros', group = 'membros' },
-  { code = 'staff.logs.view', label = 'Visualizar logs globais', group = 'logs' }
+  { code = 'staff.logs.view', label = 'Visualizar logs globais', group = 'logs' },
+  { code = 'mz_banguard.alerts.view', label = 'Visualizar Central de Alertas', group = 'seguranca' },
+  { code = 'mz_banguard.alerts.details', label = 'Visualizar detalhes de incidentes', group = 'seguranca' },
+  { code = 'mz_banguard.alerts.acknowledge', label = 'Reconhecer incidentes', group = 'seguranca' },
+  { code = 'mz_banguard.alerts.note', label = 'Adicionar notas a incidentes', group = 'seguranca' },
+  { code = 'mz_banguard.alerts.clear', label = 'Resolver, reabrir ou marcar falso positivo', group = 'seguranca' },
+  { code = 'mz_banguard.alerts.identifiers', label = 'Visualizar identifiers de incidentes', group = 'seguranca_sensivel' },
+  { code = 'mz_banguard.actions.spectate', label = 'Espectar alvo a partir de incidente', group = 'seguranca' },
+  { code = 'mz_banguard.actions.goto', label = 'Ir ate alvo a partir de incidente', group = 'seguranca' },
+  { code = 'mz_banguard.actions.kick', label = 'Remover alvo a partir de incidente', group = 'seguranca_sensivel' },
+  { code = 'mz_banguard.actions.ban', label = 'Banir alvo a partir de incidente', group = 'seguranca_sensivel' }
 }
 
 MZStaffPermissionSet = {}

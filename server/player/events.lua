@@ -105,8 +105,22 @@ local function scheduleLoadPlayer(src, reason)
       return
     end
 
-    TriggerClientEvent('mz_core:client:playerLoaded', src, playerData)
-    MZPlayerHUDService.syncToClient(src)
+    local identityOk, syncIdentity = MZPlayerStateService.getSyncIdentity(src)
+    TriggerClientEvent(
+      'mz_core:client:playerLoaded',
+      src,
+      playerData,
+      identityOk and syncIdentity.sessionToken or nil
+    )
+    local syncResult = MZPlayerStateSyncService.sync(src, 'player_loaded', {
+      forcePhysicalApply = true,
+      sessionReset = true
+    })
+    if syncResult.ok ~= true then
+      print(('[mz_core][player_state][initial_sync_failed] source=%s code=%s'):format(
+        tostring(src), tostring(syncResult.code)
+      ))
+    end
 
     CreateThread(function()
       Wait(5000)
@@ -153,17 +167,21 @@ end)
 AddEventHandler('playerDropped', function(reason)
   LoadingPlayers[source] = nil
 
+  local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(source, reason or 'player_dropped')
+
   if MZInventoryService and MZInventoryService.handlePlayerDropped then
     MZInventoryService.handlePlayerDropped(source, reason)
   end
 
-  MZPlayerService.unloadPlayer(source, reason)
+  MZPlayerService.unloadPlayer(source, reason, true, stateFlushOk, stateFlushResult)
 end)
 
 AddEventHandler('onResourceStop', function(resourceName)
   if resourceName ~= GetCurrentResourceName() then
     return
   end
+
+  MZPlayerStateService.beginShutdown()
 
   local loadedSources = {}
   for src, _ in pairs(MZCache.playersBySource or {}) do
@@ -172,11 +190,31 @@ AddEventHandler('onResourceStop', function(resourceName)
 
   table.sort(loadedSources)
 
+  local flushSucceeded, flushFailed = 0, 0
   for _, src in ipairs(loadedSources) do
+    local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(src, 'resource_stop')
+    if stateFlushOk then flushSucceeded = flushSucceeded + 1 else flushFailed = flushFailed + 1 end
+
     if MZInventoryService and MZInventoryService.handlePlayerDropped then
       MZInventoryService.handlePlayerDropped(src, 'resource_stop')
     end
 
-    MZPlayerService.unloadPlayer(src, 'resource_stop')
+    MZPlayerService.unloadPlayer(src, 'resource_stop', true, stateFlushOk, stateFlushResult)
+  end
+
+
+  MZPlayerStateService.clearRuntime()
+  print(('[mz_core][player_state][resource_stop_flush] total=%s succeeded=%s failed=%s'):format(
+    tostring(#loadedSources), tostring(flushSucceeded), tostring(flushFailed)
+  ))
+
+  if MZLogService and MZLogService.createDetailed then
+    pcall(MZLogService.createDetailed, 'player_state', 'resource_stop_flush', {
+      actor = { type = 'resource', id = GetCurrentResourceName() },
+      target = { type = 'player_state_runtime', id = 'all' },
+      context = { operation = 'resource_stop_flush', timestamp = os.time() },
+      after = { total = #loadedSources, succeeded = flushSucceeded, failed = flushFailed },
+      meta = { result = flushFailed == 0 and 'success' or 'partial_failure' }
+    })
   end
 end)

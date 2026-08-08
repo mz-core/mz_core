@@ -114,6 +114,32 @@ exports('RemovePlayerItem', function(source, itemName, amount)
   return MZInventoryService.removePlayerItem(source, itemName, amount)
 end)
 
+exports('ReserveMedicalItem', function(source, itemName, operationId, ttlSeconds)
+  return MZInventoryService.reserveMedicalItem(
+    source,
+    itemName,
+    operationId,
+    ttlSeconds,
+    GetInvokingResource()
+  )
+end)
+
+exports('CommitMedicalItemReservation', function(source, operationId)
+  return MZInventoryService.commitMedicalItemReservation(source, operationId, GetInvokingResource())
+end)
+
+exports('CancelMedicalItemReservation', function(source, operationId)
+  return MZInventoryService.cancelMedicalItemReservation(source, operationId, GetInvokingResource())
+end)
+
+exports('CancelMedicalItemReservationsForResource', function()
+  return MZInventoryService.cancelMedicalItemReservationsForResource(GetInvokingResource())
+end)
+
+exports('GetMedicalItemReservations', function()
+  return MZInventoryService.getMedicalItemReservations(GetInvokingResource())
+end)
+
 exports('SetPlayerSlot', function(source, slot, item, amount, metadata)
   return MZInventoryService.setPlayerSlot(source, slot, item, amount, metadata)
 end)
@@ -200,4 +226,13 @@ end)
 
 exports('GetInventoryErrorCatalog', function()
   return MZInventoryService.getPublicInventoryErrorCatalog()
+end)
+
+-- Server-only authority contracts. They return sanitized copies and never query inventory storage.
+exports('GetEquippedWeaponState', function(source)
+  return MZInventoryService.getEquippedWeaponState(source)
+end)
+
+exports('IsWeaponAuthorized', function(source, weaponHash)
+  return MZInventoryService.isWeaponAuthorized(source, weaponHash)
 end)

@@ -21,6 +21,12 @@ expect(service:find("resources = { mz_org_activities = true }", 1, true),
   'facility purchase caller allowlist missing')
 expect(service:find("capability = 'facility.purchase'", 1, true),
   'facility purchase capability missing')
+expect(service:find("capability = 'facility.furniture.buy'", 1, true),
+  'furniture purchase capability missing')
+expect(service:find("resources = { mz_furniture = true }", 1, true),
+  'furniture caller allowlist missing')
+expect(service:find("purposes = { 'facility_purchase', 'furniture_purchase' }", 1, true),
+  'commerce capability advertisement is incomplete')
 expect(service:find("exports('SpendOrgAccount'", 1, true), 'spend export missing')
 expect(service:find("exports('RefundOrgAccount'", 1, true), 'refund export missing')
 expect(not service:find("MZOrgAccountService.removeBalance(orgCode, amount, source", 1, true),

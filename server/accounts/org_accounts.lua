@@ -846,7 +846,17 @@ local ORG_COMMERCE_PURPOSES = {
     capability = 'facility.purchase',
     category = 'org_facility_purchase',
     reason = 'facility_purchase',
+    refundCategory = 'org_facility_refund',
+    refundReason = 'facility_purchase_refund',
     resources = { mz_org_activities = true }
+  },
+  furniture_purchase = {
+    capability = 'facility.furniture.buy',
+    category = 'org_furniture_purchase',
+    reason = 'furniture_purchase',
+    refundCategory = 'org_furniture_refund',
+    refundReason = 'furniture_purchase_refund',
+    resources = { mz_furniture = true }
   }
 }
 
@@ -922,8 +932,14 @@ end
 
 local function buildCommerceFinancialData(operation, org, actorCitizenId, sourceResource, beforeBalance, afterBalance, receiptId)
   local spend = operation.operationType == 'spend'
-  local category = spend and 'org_facility_purchase' or 'org_facility_refund'
-  local reason = spend and 'facility_purchase' or 'facility_purchase_refund'
+  local purpose = tostring(operation.purpose or '')
+  local basePurpose = spend and purpose or purpose:gsub('_refund$', '')
+  local policy = ORG_COMMERCE_PURPOSES[basePurpose]
+  if not policy or policy.resources[sourceResource] ~= true then
+    return false, 'commerce_purpose_forbidden'
+  end
+  local category = spend and policy.category or policy.refundCategory
+  local reason = spend and policy.reason or policy.refundReason
   local ledgerOptions = {
     __invokingResource = sourceResource,
     category = category,
@@ -1060,7 +1076,7 @@ function MZOrgAccountService.getCommerceCapabilities()
     idempotent = true,
     receipt = true,
     error = ready and nil or 'core_not_ready',
-    purposes = { 'facility_purchase' }
+    purposes = { 'facility_purchase', 'furniture_purchase' }
   }
 end
 
@@ -1175,8 +1191,6 @@ function MZOrgAccountService.refund(source, orgCode, spendReceiptId, options, so
   if not orgCode then return false, 'invalid_org' end
   if not sourceResource then return false, 'invalid_source_resource' end
   if not spendReceiptId then return false, 'invalid_receipt_id' end
-  if sourceResource ~= 'mz_org_activities' then return false, 'commerce_purpose_forbidden' end
-
   local operationKey = normalizeBoundedToken(
     options.operationKey or options.idempotencyKey or options.idempotency_key, 16, 128
   )
@@ -1188,9 +1202,11 @@ function MZOrgAccountService.refund(source, orgCode, spendReceiptId, options, so
   if not asBool(org.has_shared_account) then return false, 'org_has_no_shared_account' end
 
   local original = MZAccountRepository.getOrgAccountOperationByReceipt(spendReceiptId)
+  local originalPurpose = original and tostring(original.purpose or '') or ''
+  local originalPolicy = ORG_COMMERCE_PURPOSES[originalPurpose]
   if not original or tostring(original.status) ~= 'applied'
       or tostring(original.operation_type) ~= 'spend'
-      or tostring(original.purpose) ~= 'facility_purchase' then
+      or not originalPolicy or originalPolicy.resources[sourceResource] ~= true then
     return false, 'spend_receipt_not_found'
   end
   if tostring(original.source_resource) ~= sourceResource
@@ -1200,7 +1216,7 @@ function MZOrgAccountService.refund(source, orgCode, spendReceiptId, options, so
   end
 
   local amount = math.floor(tonumber(original.amount) or 0)
-  local purpose = 'facility_purchase_refund'
+  local purpose = originalPurpose .. '_refund'
   local relatedRef = spendReceiptId
   local fingerprint = commerceFingerprint(
     'refund', sourceResource, org, player.citizenid, amount, purpose,

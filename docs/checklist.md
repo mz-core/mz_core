@@ -165,3 +165,15 @@ Esta checklist foi revisada contra o codigo real do repositorio. Ela nao e histo
 - garagem nao duplica veiculo `out`
 - appearance/clothing persiste
 - HUD/cinto funciona por classe de veiculo
+
+## Player State — Lote 6
+
+- [x] consumers críticos inventariados e guardados no servidor
+- [x] leituras externas ativas migradas para snapshot read-only
+- [x] compatibilidade mutável mantida com warning controlado
+- [x] observabilidade com métricas, redaction, agregação e cooldown
+- [x] recovery médico idempotente, limitado e administrável
+- [x] billing off e item loss none por default
+- [x] documentação pública, operação, segurança e ADR
+- [x] checklist runtime consolidado sem aprovações fabricadas
+- [ ] executar FiveM/OneSync com dois jogadores e MySQL real

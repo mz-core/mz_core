@@ -1,5 +1,6 @@
 local didFirstSpawn = false
 local isSpawning = false
+local spawnRequestPending = false
 local pvpPed = 0
 
 local function enablePvpForCurrentPed()
@@ -63,11 +64,6 @@ local function doSpawn(spawnData)
 
   exports.spawnmanager:setAutoSpawn(false)
 
-  SetPlayerModel(PlayerId(), model)
-  SetModelAsNoLongerNeeded(model)
-
-  Wait(100)
-
   local spawn = {
     x = spawnData.x,
     y = spawnData.y,
@@ -79,8 +75,6 @@ local function doSpawn(spawnData)
 
   exports.spawnmanager:spawnPlayer(spawn, function()
     local ped = PlayerPedId()
-
-    NetworkResurrectLocalPlayer(spawn.x, spawn.y, spawn.z, spawn.heading or 0.0, true, true, false)
 
     SetEntityCoordsNoOffset(ped, spawn.x, spawn.y, spawn.z, false, false, false)
     SetEntityHeading(ped, spawn.heading or 0.0)
@@ -102,8 +96,18 @@ local function doSpawn(spawnData)
     ShutdownLoadingScreen()
     ShutdownLoadingScreenNui()
 
-    TriggerEvent('playerSpawned', spawn)
+    SetModelAsNoLongerNeeded(model)
+    TriggerEvent('mz_core:client:pedModelReady', { reason = 'core_spawn_complete' })
+    if type(spawnData.securityLifecycleId) == 'string' and spawnData.securityLifecycleId ~= '' then
+      TriggerServerEvent('mz_banguard:server:lifecycleReady', spawnData.securityLifecycleId)
+    end
     TriggerServerEvent('mz_core:vehicles:server:playerWorldReady')
+    if type(spawnData.authorizedOperation) == 'table' then
+      TriggerEvent('mz_core:client:authorizedSpawnReady', {
+        operationId = spawnData.authorizedOperation.operationId,
+        token = spawnData.authorizedOperation.token
+      })
+    end
 
     didFirstSpawn = true
     isSpawning = false
@@ -118,11 +122,13 @@ RegisterNetEvent('mz_core:client:playerLoaded', function(playerData)
   MZClient.PlayerData = playerData
   MZClient.PlayerSession = playerData and playerData.session or nil
 
-  if didFirstSpawn then return end
+  if didFirstSpawn or isSpawning or spawnRequestPending then return end
+  spawnRequestPending = true
 
   CreateThread(function()
     Wait(500)
     local spawnData = lib.callback.await('mz_core:server:getSpawnData', false)
+    spawnRequestPending = false
     if spawnData then
       doSpawn(spawnData)
     end

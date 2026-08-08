@@ -3,10 +3,14 @@ MZInventoryService = {}
 local ItemUseHandlers = {}
 local EquippedWeaponsBySource = {}
 local EquippedWeaponSourceByCitizenId = {}
+local WeaponTransitionAtBySource = {}
+local WeaponTransitionRevisionBySource = {}
 local PendingWeaponAmmoUpdatesBySource = {}
 local WeaponAmmoUpdateRateLimits = {}
 local UnauthorizedWeaponLogRateLimits = {}
 local InventoryContainerGrants = {}
+local MedicalItemReservations = {}
+local MedicalItemReservationTerminals = {}
 local PendingWeaponAmmoUpdateTtlMs = 10000
 local HouseStashGrantTtlSeconds = 15 * 60
 local HouseStashMaxSlots = 200
@@ -15,9 +19,72 @@ local HouseStashMaxWeight = 1000000
 local enforceEquippedWeaponStillOwned
 local applyEquippedAmmoToMovingWeapon
 local cleanupInvalidHotbarRefsForPlayer
+local cloneTable
 
 local function trimString(value)
   return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+-- Cfx serializes a function passed across a resource boundary as a protected,
+-- callable table. Normalize that reference into a local Lua closure so the
+-- inventory keeps a single callable contract without accepting plain tables.
+local function normalizeCallable(value)
+  if type(value) == 'function' then return value end
+  if type(value) ~= 'table' then return nil end
+  local reference = rawget(value, '__cfx_functionReference')
+  local metatable = getmetatable(value)
+  if type(reference) ~= 'string' or reference == '' or type(metatable) ~= 'table'
+    or type(rawget(metatable, '__call')) ~= 'function' then
+    return nil
+  end
+  return function(...)
+    return value(...)
+  end
+end
+
+local function medicalReservationWriterAllowed(invokingResource)
+  local settings = Config and Config.Inventory and Config.Inventory.medicalReservation or {}
+  if type(invokingResource) ~= 'string' or invokingResource == '' then return false end
+  for _, writer in ipairs(type(settings.writers) == 'table' and settings.writers or {}) do
+    if writer == invokingResource then return true end
+  end
+  return false
+end
+
+local function medicalReservationReaderAllowed(invokingResource)
+  local settings = Config and Config.Inventory and Config.Inventory.medicalReservation or {}
+  if medicalReservationWriterAllowed(invokingResource) then return true end
+  for _, reader in ipairs(type(settings.readers) == 'table' and settings.readers or {}) do
+    if reader == invokingResource then return true end
+  end
+  return false
+end
+
+local function playerActionAllowed(source, action)
+  if not MZPlayerStateService or type(MZPlayerStateService.canPerformAction) ~= 'function' then return false end
+  local ok, result = MZPlayerStateService.canPerformAction(source, action)
+  return ok == true and type(result) == 'table' and result.allowed == true
+end
+
+local function cleanupMedicalReservationTerminals()
+  local current = os.time()
+  for operationId, terminal in pairs(MedicalItemReservationTerminals) do
+    if current > (tonumber(terminal.expiresAt) or 0) then MedicalItemReservationTerminals[operationId] = nil end
+  end
+end
+
+local function medicalTerminal(operation, action, result)
+  local settings = Config and Config.Inventory and Config.Inventory.medicalReservation or {}
+  local retention = math.max(60, math.floor(tonumber(settings.terminalRetentionSeconds) or 900))
+  MedicalItemReservationTerminals[operation.operationId] = {
+    operationId = operation.operationId,
+    source = operation.source,
+    citizenid = operation.citizenid,
+    invokingResource = operation.invokingResource,
+    action = action,
+    result = cloneTable(result),
+    expiresAt = os.time() + retention
+  }
 end
 
 local function normalizeHouseCode(value)
@@ -500,7 +567,7 @@ local function getInventoryWeight(ownerType, ownerId, inventoryType)
 end
 
 
-local function cloneTable(value)
+cloneTable = function(value)
   if type(value) ~= 'table' then
     return value
   end
@@ -762,7 +829,26 @@ local function releaseContainerLocks(lockHandle)
   end
 end
 
+local function mutationConflictsWithMedicalReservation(contexts, mutationName)
+  if mutationName == 'reserve_medical_item' or mutationName == 'rollback_medical_item' then return false end
+  for _, reservation in pairs(MedicalItemReservations) do
+    if reservation.state == 'reserved' then
+      for _, ctx in ipairs(type(contexts) == 'table' and contexts or {}) do
+        if tostring(ctx.ownerType or '') == 'player'
+          and tostring(ctx.ownerId or '') == tostring(reservation.citizenid or '')
+          and tostring(ctx.inventoryType or '') == MZConstants.InventoryTypes.MAIN then
+          return true
+        end
+      end
+    end
+  end
+  return false
+end
+
 local function executeInventoryMutation(actorPlayer, contexts, mutationName, buildPlan)
+  if mutationConflictsWithMedicalReservation(contexts, mutationName) then
+    return false, 'medical_reservation_active'
+  end
   local lockHandle, lockErr = acquireContainerLocks(contexts)
   if not lockHandle then
     return false, lockErr
@@ -792,6 +878,7 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
   if #statements > 0 then
     local transactionOk, transactionErr = MZInventoryRepository.runTransaction(statements)
     if not transactionOk then
+      if type(plan.onAbort) == 'function' then pcall(plan.onAbort, transactionErr or 'inventory_transaction_failed') end
       releaseContainerLocks(lockHandle)
       print(('[mz_core][inventory][transaction_failed] mutation=%s | error=%s'):format(
         tostring(mutationName or 'unknown'),
@@ -802,12 +889,30 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
   end
 
   if type(plan.afterCommit) == 'function' then
-    local commitHookOk, commitHookErr = pcall(plan.afterCommit)
-    if not commitHookOk then
+    local commitHookCallOk, commitHookOk, commitHookResult = pcall(plan.afterCommit)
+    if not commitHookCallOk or commitHookOk == false then
       print(('[mz_core][inventory][after_commit_failed] mutation=%s | error=%s'):format(
         tostring(mutationName or 'unknown'),
-        tostring(commitHookErr or 'unknown')
+        tostring(commitHookCallOk and commitHookResult or commitHookOk or 'unknown')
       ))
+      if type(plan.onAbort) == 'function' then pcall(plan.onAbort, 'after_commit_failed') end
+      local rollbackStatements = type(plan.rollbackStatements) == 'table' and plan.rollbackStatements or {}
+      local rollbackOk, rollbackErr = false, 'rollback_unavailable'
+      if #rollbackStatements > 0 then
+        rollbackOk, rollbackErr = MZInventoryRepository.runTransaction(rollbackStatements)
+      end
+      releaseContainerLocks(lockHandle)
+      if not rollbackOk then
+        print(('[mz_core][inventory][rollback_failed] mutation=%s | error=%s'):format(
+          tostring(mutationName or 'unknown'), tostring(rollbackErr or 'inventory_rollback_failed')
+        ))
+        return false, 'inventory_rollback_failed'
+      end
+      return false, tostring(commitHookCallOk and commitHookResult or 'use_effect_failed')
+    end
+    if type(plan.result) == 'table' and commitHookResult ~= nil then
+      plan.result.data = type(plan.result.data) == 'table' and plan.result.data or {}
+      plan.result.data.effect = cloneTable(commitHookResult)
     end
   end
 
@@ -1443,7 +1548,9 @@ local function normalizeUseResult(result)
     error = result.error,
     data = result.data,
     statements = type(result.statements) == 'table' and result.statements or {},
-    afterCommit = type(result.afterCommit) == 'function' and result.afterCommit or nil
+    afterCommit = normalizeCallable(result.afterCommit),
+    onAbort = normalizeCallable(result.onAbort),
+    operationId = type(result.operationId) == 'string' and result.operationId or nil
   }
 end
 
@@ -1641,6 +1748,16 @@ local function getWeaponHashValue(weaponName)
   return nil
 end
 
+local function normalizeWeaponHashValue(value)
+  value = tonumber(value)
+  if not value then return nil end
+
+  value = math.floor(value)
+  if value < 0 then value = value + 4294967296 end
+  if value < 0 or value > 4294967295 then return nil end
+  return value
+end
+
 local function clampWeaponAmmo(itemDef, ammo)
   ammo = tonumber(ammo) or 0
   ammo = math.floor(ammo)
@@ -1807,6 +1924,7 @@ local function setEquippedWeaponState(source, player, row, payload)
     return
   end
 
+  local now = GetGameTimer()
   local state = {
     source = source,
     citizenid = tostring(player.citizenid or ''),
@@ -1814,14 +1932,20 @@ local function setEquippedWeaponState(source, player, row, payload)
     slot = tonumber(row.slot) or row.slot,
     instance_uid = tostring(payload.instance_uid or ''),
     weapon = tostring(payload.weapon or ''),
+    weapon_hash = normalizeWeaponHashValue(payload.weapon_hash or getWeaponHashValue(payload.weapon)),
     equip_nonce = tostring(payload.equip_nonce or ''),
     ammo = math.max(0, math.floor(tonumber(payload.ammo) or 0)),
     ammo_revision = math.max(0, math.floor(tonumber(payload.ammo_revision) or 0)),
     serial = payload.serial,
-    durability = payload.durability
+    durability = payload.durability,
+    equipped_at = now,
+    transition_at = now
   }
 
   EquippedWeaponsBySource[source] = state
+  WeaponTransitionAtBySource[source] = now
+  WeaponTransitionRevisionBySource[source] = (math.max(0,
+    math.floor(tonumber(WeaponTransitionRevisionBySource[source]) or 0)) % 2147483646) + 1
   if state.citizenid ~= '' then
     EquippedWeaponSourceByCitizenId[state.citizenid] = source
   end
@@ -1844,6 +1968,10 @@ local function clearEquippedWeaponState(source, reason, options)
   end
 
   local player = MZPlayerService.getPlayer(source)
+  local transitionAt = GetGameTimer()
+  WeaponTransitionAtBySource[source] = transitionAt
+  WeaponTransitionRevisionBySource[source] = (math.max(0,
+    math.floor(tonumber(WeaponTransitionRevisionBySource[source]) or 0)) % 2147483646) + 1
   EquippedWeaponsBySource[source] = nil
   if equipped.citizenid and EquippedWeaponSourceByCitizenId[equipped.citizenid] == source then
     EquippedWeaponSourceByCitizenId[equipped.citizenid] = nil
@@ -2593,7 +2721,6 @@ local function buildSetPlayerSlotMetadataMutationPlan(ctx, slot, metadata, mode)
   if not itemDef then
     return false, 'item_not_found'
   end
-
   metadata = normalizeMetadataTable(metadata)
   mode = tostring(mode or 'merge'):lower()
 
@@ -2668,6 +2795,9 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
   if not itemDef then
     return false, 'item_not_found'
   end
+  if not tonumber(row.amount) or math.floor(tonumber(row.amount)) < 1 then
+    return false, 'not_enough_amount'
+  end
 
   local handler = ItemUseHandlers[row.item]
   if not handler then
@@ -2680,9 +2810,7 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
     item = row.item,
     amount = tonumber(row.amount) or 0,
     metadata = normalizeMetadataTable(row.metadata),
-    definition = itemDef,
-    player = ctx.player,
-    context = ctx
+    definition = itemDef
   }
 
   local okCall, handlerResult = pcall(handler, payload)
@@ -2696,6 +2824,7 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
   end
 
   local statements = {}
+  local rollbackStatements = {}
   local afterSlot = buildSlotSnapshot(row, slot)
 
   for _, statement in ipairs(result.statements or {}) do
@@ -2711,9 +2840,20 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
     local currentAmount = tonumber(row.amount) or 0
     if currentAmount <= consumeAmount then
       statements[#statements + 1] = buildTransactionDeleteRow(ctx, slot)
+      rollbackStatements[#rollbackStatements + 1] = MZInventoryRepository.buildSetSlotStatement({
+        owner_type = ctx.ownerType,
+        owner_id = ctx.ownerId,
+        inventory_type = ctx.inventoryType,
+        slot = slot,
+        item = row.item,
+        amount = currentAmount,
+        metadata = normalizeMetadataTable(row.metadata),
+        instance_uid = row.instance_uid
+      })
       afterSlot = buildSlotSnapshot(nil, slot)
     else
       statements[#statements + 1] = buildTransactionUpdateAmount(ctx, slot, currentAmount - consumeAmount)
+      rollbackStatements[#rollbackStatements + 1] = buildTransactionUpdateAmount(ctx, slot, currentAmount)
       afterSlot = buildSlotSnapshot({
         item = row.item,
         amount = currentAmount - consumeAmount,
@@ -2742,6 +2882,8 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
       }
     },
     afterCommit = result.afterCommit,
+    onAbort = result.onAbort,
+    rollbackStatements = rollbackStatements,
     result = result
   }
 end
@@ -2761,7 +2903,8 @@ function MZInventoryService.registerItemUseHandler(itemName, handler)
     return false, 'invalid_item'
   end
 
-  if type(handler) ~= 'function' then
+  handler = normalizeCallable(handler)
+  if not handler then
     return false, 'invalid_handler'
   end
 
@@ -2806,6 +2949,7 @@ function MZInventoryService.getPersonalStashWeight(source)
 end
 
 function MZInventoryService.movePlayerToPersonalStash(source, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2820,6 +2964,7 @@ function MZInventoryService.movePlayerToPersonalStash(source, fromSlot, toSlot, 
 end
 
 function MZInventoryService.movePersonalStashToPlayer(source, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2854,6 +2999,7 @@ function MZInventoryService.getOrgStashWeight(source, orgCode)
 end
 
 function MZInventoryService.movePlayerToOrgStash(source, orgCode, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2868,6 +3014,7 @@ function MZInventoryService.movePlayerToOrgStash(source, orgCode, fromSlot, toSl
 end
 
 function MZInventoryService.moveOrgStashToPlayer(source, orgCode, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2902,6 +3049,7 @@ function MZInventoryService.getVehicleTrunkWeight(source, plate)
 end
 
 function MZInventoryService.movePlayerToVehicleTrunk(source, plate, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2916,6 +3064,7 @@ function MZInventoryService.movePlayerToVehicleTrunk(source, plate, fromSlot, to
 end
 
 function MZInventoryService.moveVehicleTrunkToPlayer(source, plate, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2950,6 +3099,7 @@ function MZInventoryService.getVehicleGloveboxWeight(source, plate)
 end
 
 function MZInventoryService.movePlayerToVehicleGlovebox(source, plate, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -2964,6 +3114,7 @@ function MZInventoryService.movePlayerToVehicleGlovebox(source, plate, fromSlot,
 end
 
 function MZInventoryService.moveVehicleGloveboxToPlayer(source, plate, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'storage.use') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -3042,6 +3193,7 @@ function MZInventoryService.getWorldDropWeight(dropUid)
 end
 
 function MZInventoryService.movePlayerToWorldDrop(source, dropUid, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'inventory.drop') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -3056,6 +3208,7 @@ function MZInventoryService.movePlayerToWorldDrop(source, dropUid, fromSlot, toS
 end
 
 function MZInventoryService.moveWorldDropToPlayer(source, dropUid, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'inventory.pickup') then return false, 'player_state_blocked' end
   local playerCtx, err = getPlayerInventoryContext(source)
   if not playerCtx then
     return false, err
@@ -3239,6 +3392,272 @@ function MZInventoryService.removePlayerItem(source, itemName, amount)
   end)
 end
 
+function MZInventoryService.reserveMedicalItem(source, itemName, operationId, ttlSeconds, invokingResource)
+  if not medicalReservationWriterAllowed(invokingResource) then return false, 'not_authorized' end
+  cleanupMedicalReservationTerminals()
+  operationId = trimString(operationId)
+  itemName = trimString(itemName)
+  if operationId == '' or #operationId > 96 or itemName == '' or #itemName > 64 then
+    return false, 'invalid_reservation'
+  end
+
+  local terminal = MedicalItemReservationTerminals[operationId]
+  if terminal then
+    if terminal.source == tonumber(source) and terminal.invokingResource == invokingResource then
+      return false, 'reservation_terminal'
+    end
+    return false, 'reservation_conflict'
+  end
+
+  local existing = MedicalItemReservations[operationId]
+  if existing then
+    if existing.source == tonumber(source) and existing.invokingResource == invokingResource then
+      return true, cloneTable(existing.public)
+    end
+    return false, 'reservation_conflict'
+  end
+
+  local ctx, err = getPlayerInventoryContext(source)
+  if not ctx then return false, err end
+  local settings = Config and Config.Inventory and Config.Inventory.medicalReservation or {}
+  ttlSeconds = math.max(5, math.min(
+    math.floor(tonumber(ttlSeconds) or 30),
+    math.floor(tonumber(settings.maximumTtlSeconds) or 60)
+  ))
+  local reservedSnapshot
+
+  local ok, result = executeInventoryMutation(ctx.player, { ctx }, 'reserve_medical_item', function()
+    local rows = getInventoryRowsFromContext(ctx)
+    local selected
+    for _, row in ipairs(rows) do
+      if tostring(row.item or '') == itemName and (tonumber(row.amount) or 0) >= 1 then
+        selected = row
+        break
+      end
+    end
+    if not selected then return false, 'not_enough_items' end
+
+    local rowAmount = math.floor(tonumber(selected.amount) or 0)
+    reservedSnapshot = {
+      slot = tonumber(selected.slot),
+      item = tostring(selected.item),
+      amountBefore = rowAmount,
+      metadata = normalizeMetadataTable(selected.metadata),
+      instanceUid = selected.instance_uid
+    }
+    local statements = {}
+    if rowAmount == 1 then
+      statements[1] = buildTransactionDeleteRow(ctx, selected.slot)
+    else
+      statements[1] = buildTransactionUpdateAmount(ctx, selected.slot, rowAmount - 1)
+    end
+    return {
+      statements = statements,
+      logAction = 'reserve_medical_item',
+      logTargetCtx = ctx,
+      logPayload = {
+        before = { slot = buildSlotSnapshot(selected, selected.slot) },
+        after = { reserved = true },
+        meta = { item = itemName, operationId = operationId }
+      },
+      result = { reserved = true }
+    }
+  end)
+  if not ok then return false, result end
+
+  local reservation = {
+    operationId = operationId,
+    source = tonumber(source),
+    citizenid = ctx.player.citizenid,
+    sessionId = ctx.player.session and ctx.player.session.id or nil,
+    invokingResource = invokingResource,
+    item = itemName,
+    context = {
+      ownerType = ctx.ownerType, ownerId = ctx.ownerId, inventoryType = ctx.inventoryType,
+      maxSlots = ctx.maxSlots, maxWeight = ctx.maxWeight, source = tonumber(source)
+    },
+    snapshot = reservedSnapshot,
+    createdAt = os.time(),
+    expiresAt = os.time() + ttlSeconds,
+    state = 'reserved'
+  }
+  reservation.public = {
+    operationId = operationId,
+    item = itemName,
+    slot = reservedSnapshot.slot,
+    expiresAt = reservation.expiresAt,
+    state = reservation.state
+  }
+  MedicalItemReservations[operationId] = reservation
+  return true, cloneTable(reservation.public)
+end
+
+local function validateMedicalReservation(operationId, source, invokingResource)
+  if not medicalReservationWriterAllowed(invokingResource) then return nil, 'not_authorized' end
+  local reservation = MedicalItemReservations[trimString(operationId)]
+  if not reservation then return nil, 'reservation_not_found' end
+  if reservation.invokingResource ~= invokingResource or reservation.source ~= tonumber(source) then
+    return nil, 'reservation_mismatch'
+  end
+  local ctx, err = getPlayerInventoryContext(source)
+  if ctx then
+    local sessionId = ctx.player.session and ctx.player.session.id or nil
+    if reservation.citizenid == ctx.player.citizenid and reservation.sessionId == sessionId then
+      return reservation, nil, ctx
+    end
+  end
+  local stored = cloneTable(reservation.context or {})
+  if not stored.ownerType or not stored.ownerId or not stored.inventoryType then
+    return nil, err or 'reservation_session_mismatch'
+  end
+  stored.player = nil
+  return reservation, nil, stored
+end
+
+function MZInventoryService.commitMedicalItemReservation(source, operationId, invokingResource)
+  cleanupMedicalReservationTerminals()
+  local terminal = MedicalItemReservationTerminals[trimString(operationId)]
+  if terminal and terminal.source == tonumber(source) and terminal.invokingResource == invokingResource then
+    if terminal.action == 'commit' then return true, cloneTable(terminal.result) end
+    return false, 'reservation_already_rolled_back'
+  end
+  local reservation, err = validateMedicalReservation(operationId, source, invokingResource)
+  if not reservation then return false, err end
+  reservation.state = 'committed'
+  MedicalItemReservations[reservation.operationId] = nil
+  local result = { operationId = reservation.operationId, item = reservation.item, state = 'committed' }
+  medicalTerminal(reservation, 'commit', result)
+  return true, cloneTable(result)
+end
+
+function MZInventoryService.cancelMedicalItemReservation(source, operationId, invokingResource)
+  cleanupMedicalReservationTerminals()
+  local terminal = MedicalItemReservationTerminals[trimString(operationId)]
+  if terminal and terminal.source == tonumber(source) and terminal.invokingResource == invokingResource then
+    if terminal.action == 'cancel' then return true, cloneTable(terminal.result) end
+    return false, 'reservation_already_committed'
+  end
+  local reservation, err, ctx = validateMedicalReservation(operationId, source, invokingResource)
+  if not reservation then return false, err end
+  local snapshot = reservation.snapshot
+
+  local ok, result = executeInventoryMutation(ctx.player, { ctx }, 'rollback_medical_item', function()
+    local rows = getInventoryRowsFromContext(ctx)
+    local current = findRowBySlot(rows, snapshot.slot)
+    local statement
+    local restoredSlot = snapshot.slot
+    local matchingInstance
+    for _, row in ipairs(rows) do
+      if tostring(row.instance_uid or '') == tostring(snapshot.instanceUid or '') then
+        matchingInstance = row
+        break
+      end
+    end
+    if snapshot.amountBefore > 1 then
+      if matchingInstance then
+        if tostring(matchingInstance.item or '') ~= snapshot.item then return false, 'reservation_instance_conflict' end
+        restoredSlot = tonumber(matchingInstance.slot)
+        statement = buildTransactionUpdateAmount(ctx, restoredSlot, (tonumber(matchingInstance.amount) or 0) + 1)
+      else
+        if current then
+          local used = buildUsedSlotLookup(rows)
+          restoredSlot = findFreeSlotInRows(rows, ctx.maxSlots, used)
+          if not restoredSlot then return false, 'no_free_slot' end
+        end
+        statement = buildTransactionSetRow(
+          ctx, restoredSlot, snapshot.item, 1, snapshot.metadata, snapshot.instanceUid
+        )
+      end
+    else
+      if matchingInstance then
+        if tostring(matchingInstance.item or '') ~= snapshot.item then return false, 'reservation_instance_conflict' end
+        restoredSlot = tonumber(matchingInstance.slot)
+      elseif current then
+        local used = buildUsedSlotLookup(rows)
+        restoredSlot = findFreeSlotInRows(rows, ctx.maxSlots, used)
+        if not restoredSlot then return false, 'no_free_slot' end
+      end
+      if not matchingInstance then
+        statement = buildTransactionSetRow(
+          ctx,
+          restoredSlot,
+          snapshot.item,
+          1,
+          snapshot.metadata,
+          snapshot.instanceUid
+        )
+      end
+    end
+    return {
+      statements = statement and { statement } or {},
+      logAction = 'rollback_medical_item',
+      logTargetCtx = ctx,
+      logPayload = {
+        before = { reserved = true },
+        after = { slot = restoredSlot },
+        meta = { item = snapshot.item, operationId = reservation.operationId }
+      },
+      result = { restoredSlot = restoredSlot }
+    }
+  end)
+  if not ok then return false, result end
+  reservation.state = 'rolled_back'
+  MedicalItemReservations[reservation.operationId] = nil
+  local terminalResult = {
+    operationId = reservation.operationId,
+    item = reservation.item,
+    state = reservation.state,
+    restoredSlot = result and result.restoredSlot or snapshot.slot
+  }
+  medicalTerminal(reservation, 'cancel', terminalResult)
+  return true, cloneTable(terminalResult)
+end
+
+function MZInventoryService.getMedicalItemReservations(invokingResource)
+  if not medicalReservationReaderAllowed(invokingResource) then return false, 'not_authorized' end
+  cleanupMedicalReservationTerminals()
+  local active, terminal = {}, {}
+  for operationId, reservation in pairs(MedicalItemReservations) do
+    active[#active + 1] = {
+      operationId = operationId, source = reservation.source, citizenid = reservation.citizenid,
+      item = reservation.item, slot = reservation.snapshot and reservation.snapshot.slot,
+      state = reservation.state, createdAt = reservation.createdAt, expiresAt = reservation.expiresAt,
+      resource = reservation.invokingResource
+    }
+  end
+  for operationId, entry in pairs(MedicalItemReservationTerminals) do
+    terminal[#terminal + 1] = {
+      operationId = operationId, source = entry.source, citizenid = entry.citizenid,
+      action = entry.action, expiresAt = entry.expiresAt, resource = entry.invokingResource
+    }
+  end
+  table.sort(active, function(a, b) return a.operationId < b.operationId end)
+  table.sort(terminal, function(a, b) return a.operationId < b.operationId end)
+  return true, { active = active, terminal = terminal }
+end
+
+function MZInventoryService.cancelMedicalItemReservationsForResource(invokingResource)
+  if not medicalReservationWriterAllowed(invokingResource) then return false, 'not_authorized' end
+  local ids = {}
+  for operationId, reservation in pairs(MedicalItemReservations) do
+    if reservation.invokingResource == invokingResource then ids[#ids + 1] = operationId end
+  end
+  table.sort(ids)
+  local restored, failed = 0, 0
+  for _, operationId in ipairs(ids) do
+    local reservation = MedicalItemReservations[operationId]
+    if reservation then
+      local ok = MZInventoryService.cancelMedicalItemReservation(
+        reservation.source,
+        operationId,
+        invokingResource
+      )
+      if ok then restored = restored + 1 else failed = failed + 1 end
+    end
+  end
+  return failed == 0, { restored = restored, failed = failed }
+end
+
 function MZInventoryService.setPlayerSlot(source, slot, item, amount, metadata)
   local ctx, err = getPlayerInventoryContext(source)
   if not ctx then return false, err end
@@ -3258,6 +3677,7 @@ function MZInventoryService.clearPlayerSlot(source, slot)
 end
 
 function MZInventoryService.movePlayerSlot(source, fromSlot, toSlot, amount)
+  if not playerActionAllowed(source, 'inventory.move') then return false, 'player_state_blocked' end
   local ctx, err = getPlayerInventoryContext(source)
   if not ctx then
     return false, err
@@ -3314,6 +3734,10 @@ function MZInventoryService.setPlayerSlotMetadata(source, slot, metadata, mode)
 end
 
 function MZInventoryService.usePlayerItem(source, slot)
+  local actionOk, actionResult = MZPlayerStateService.canPerformAction(source, 'inventory.use')
+  if not actionOk or type(actionResult) ~= 'table' or actionResult.allowed ~= true then
+    return false, 'player_state_blocked'
+  end
   local ctx, err = getPlayerInventoryContext(source)
   if not ctx then
     return false, err
@@ -3325,6 +3749,10 @@ function MZInventoryService.usePlayerItem(source, slot)
 end
 
 function MZInventoryService.usePlayerItemByInstanceUid(source, instanceUid)
+  local actionOk, actionResult = MZPlayerStateService.canPerformAction(source, 'inventory.use')
+  if not actionOk or type(actionResult) ~= 'table' or actionResult.allowed ~= true then
+    return false, 'player_state_blocked'
+  end
   local ctx, err = getPlayerInventoryContext(source)
   if not ctx then
     return false, err
@@ -3356,6 +3784,7 @@ function MZInventoryService.usePlayerItemByInstanceUid(source, instanceUid)
 end
 
 function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
+  if not playerActionAllowed(source, 'weapon.use') then return false, 'player_state_blocked' end
   payload = type(payload) == 'table' and payload or {}
   local instanceUid = tostring(payload.instance_uid or payload.instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
   if instanceUid == '' then
@@ -3377,6 +3806,81 @@ function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
   )
 end
 
+function MZInventoryService.getEquippedWeaponState(source)
+  source = tonumber(source)
+  if not source or source <= 0 then
+    return nil, 'invalid_source'
+  end
+  source = math.floor(source)
+
+  local player = MZPlayerService.getPlayer(source)
+  if not player
+    or not player.citizenid
+    or (type(MZPlayerService.isPlayerLoaded) == 'function'
+      and MZPlayerService.isPlayerLoaded(source) ~= true) then
+    return nil, 'player_not_loaded'
+  end
+
+  local equipped = EquippedWeaponsBySource[source]
+  local transitionAt = math.max(
+    0,
+    math.floor(tonumber(WeaponTransitionAtBySource[source]) or 0)
+  )
+  local transitionRevision = math.max(
+    0,
+    math.floor(tonumber(WeaponTransitionRevisionBySource[source]) or 0)
+  )
+
+  if type(equipped) ~= 'table' or tostring(equipped.instance_uid or '') == '' then
+    return {
+      equipped = false,
+      source = source,
+      citizenid = tostring(player.citizenid):sub(1, 64),
+      lastTransitionAt = transitionAt,
+      transitionRevision = transitionRevision
+    }, 'weapon_not_equipped'
+  end
+
+  local weaponName = tostring(equipped.weapon or ''):sub(1, 64)
+  return {
+    equipped = true,
+    source = source,
+    citizenid = tostring(equipped.citizenid or player.citizenid):sub(1, 64),
+    itemName = tostring(equipped.item or ''):sub(1, 64),
+    weaponName = weaponName,
+    weaponHash = normalizeWeaponHashValue(
+      equipped.weapon_hash or getWeaponHashValue(weaponName)
+    ),
+    slot = tonumber(equipped.slot) and math.floor(tonumber(equipped.slot)) or nil,
+    instanceUid = tostring(equipped.instance_uid or ''):sub(1, 64),
+    serial = equipped.serial and tostring(equipped.serial):sub(1, 96) or nil,
+    ammo = math.max(0, math.floor(tonumber(equipped.ammo) or 0)),
+    ammoRevision = math.max(0, math.floor(tonumber(equipped.ammo_revision) or 0)),
+    durability = tonumber(equipped.durability),
+    equippedAt = math.max(0, math.floor(tonumber(equipped.equipped_at) or 0)),
+    lastTransitionAt = transitionAt,
+    transitionRevision = transitionRevision
+  }
+end
+
+function MZInventoryService.isWeaponAuthorized(source, weaponHash)
+  local normalizedHash = normalizeWeaponHashValue(weaponHash)
+  if not normalizedHash then
+    return false, 'invalid_weapon_hash'
+  end
+
+  local state, reason = MZInventoryService.getEquippedWeaponState(source)
+  if not state then return false, reason end
+  if state.equipped ~= true or not state.weaponHash then
+    return false, reason or 'weapon_not_equipped', state
+  end
+  if state.weaponHash ~= normalizedHash then
+    return false, 'weapon_hash_mismatch', state
+  end
+
+  return true, 'weapon_authorized', state
+end
+
 function MZInventoryService.clearPlayerEquippedWeapon(source, reason)
   return clearEquippedWeaponState(source, reason or 'clear_equipped_weapon', { notifyClient = true })
 end
@@ -3384,6 +3888,8 @@ end
 function MZInventoryService.handlePlayerDropped(source, reason)
   local ok, err = clearEquippedWeaponState(source, reason or 'player_dropped', { notifyClient = false, queuePending = false })
   clearWeaponRuntimeLimitsForSource(source)
+  WeaponTransitionAtBySource[tonumber(source)] = nil
+  WeaponTransitionRevisionBySource[tonumber(source)] = nil
   return ok, err
 end
 
@@ -3429,6 +3935,12 @@ local PublicInventoryErrors = {
   invalid_target = { code = 'invalid_target', message = 'Invalid inventory target.' },
   item_not_usable = { code = 'item_not_usable', message = 'Item is not usable.' },
   use_failed = { code = 'use_failed', message = 'Item use failed.' },
+  no_benefit = { code = 'no_benefit', message = 'O item nÃ£o traria benefÃ­cio agora.' },
+  cooldown = { code = 'cooldown', message = 'Aguarde antes de usar outro consumÃ­vel.' },
+  operation_active = { code = 'operation_active', message = 'JÃ¡ existe um consumo em andamento.' },
+  invalid_state = { code = 'invalid_state', message = 'Seu estado atual impede o uso deste item.' },
+  player_state_blocked = { code = 'player_state_blocked', message = 'AÃ§Ã£o bloqueada pelo estado do jogador.' },
+  inventory_rollback_failed = { code = 'inventory_rollback_failed', message = 'Falha crÃ­tica ao compensar o item.' },
   weapon_reload_no_weapon = { code = 'weapon_reload_no_weapon', message = 'Nenhuma arma equipada.' },
   weapon_reload_incompatible_ammo = { code = 'weapon_reload_incompatible_ammo', message = 'Munição incompatível com a arma equipada.' },
   weapon_ammo_full = { code = 'weapon_ammo_full', message = 'A arma já está com munição cheia.' },
@@ -3880,6 +4392,8 @@ local function cleanupTouchedWorldDrops(dropUids)
 end
 
 function MZInventoryService.openPlayerInventory(source)
+  local actionOk, action = MZPlayerStateService.canPerformAction(source, 'inventory.open')
+  if not actionOk or not action or action.allowed ~= true then return false, 'player_state_blocked' end
   local ok, snapshotOrErr = getPublicInventorySnapshot(source, { type = 'player' })
   if not ok then
     return buildPublicInventoryError(snapshotOrErr, {
@@ -3952,6 +4466,8 @@ function MZInventoryService.createHouseStashAccessGrant(source, descriptor)
 end
 
 function MZInventoryService.openInventoryContainer(source, descriptor)
+  local actionOk, action = MZPlayerStateService.canPerformAction(source, 'inventory.open')
+  if not actionOk or not action or action.allowed ~= true then return false, 'player_state_blocked' end
   local ok, snapshotOrErr, normalized = getPublicInventorySnapshot(source, descriptor)
   if not ok then
     return buildPublicInventoryError(snapshotOrErr, {
@@ -3970,6 +4486,7 @@ function MZInventoryService.getInventorySnapshot(source, descriptor)
 end
 
 function MZInventoryService.getInventoryViewSnapshot(source, request)
+  if not playerActionAllowed(source, 'inventory.open') then return buildPublicInventoryError('player_state_blocked') end
   request = type(request) == 'table' and request or {}
 
   local playerDescriptor = request.player or request.primary or { type = 'player' }
@@ -4001,6 +4518,7 @@ function MZInventoryService.getInventoryViewSnapshot(source, request)
 end
 
 function MZInventoryService.dropInventoryItemAction(source, request)
+  if not playerActionAllowed(source, 'inventory.drop') then return buildPublicInventoryError('player_state_blocked') end
   request = type(request) == 'table' and request or {}
 
   local descriptor = request.container or { type = 'player' }
@@ -4093,6 +4611,13 @@ function MZInventoryService.moveInventoryItem(source, request)
 
   local fromDescriptor = request.from and request.from.container or request.from_container
   local toDescriptor = request.to and request.to.container or request.to_container
+  local fromType = type(fromDescriptor) == 'table' and tostring(fromDescriptor.type or '') or tostring(fromDescriptor or '')
+  local toType = type(toDescriptor) == 'table' and tostring(toDescriptor.type or '') or tostring(toDescriptor or '')
+  local actionName = fromType == 'drop' and 'inventory.pickup'
+    or toType == 'drop' and 'inventory.drop'
+    or (fromType ~= 'player' or toType ~= 'player') and 'storage.use'
+    or 'inventory.move'
+  if not playerActionAllowed(source, actionName) then return buildPublicInventoryError('player_state_blocked') end
   local fromSlot = request.from and request.from.slot or request.from_slot
   local toSlot = request.to and request.to.slot or request.to_slot
   local amount = request.amount
@@ -4143,6 +4668,8 @@ function MZInventoryService.moveInventoryItem(source, request)
 end
 
 function MZInventoryService.splitInventoryStack(source, request)
+  local actionOk, action = MZPlayerStateService.canPerformAction(source, 'inventory.move')
+  if not actionOk or not action or action.allowed ~= true then return buildPublicInventoryError('player_state_blocked') end
   request = type(request) == 'table' and request or {}
 
   local descriptor = request.container
@@ -4177,6 +4704,8 @@ function MZInventoryService.splitInventoryStack(source, request)
 end
 
 function MZInventoryService.mergeInventorySlots(source, request)
+  local actionOk, action = MZPlayerStateService.canPerformAction(source, 'inventory.move')
+  if not actionOk or not action or action.allowed ~= true then return buildPublicInventoryError('player_state_blocked') end
   request = type(request) == 'table' and request or {}
 
   local descriptor = request.container
@@ -4211,6 +4740,8 @@ function MZInventoryService.mergeInventorySlots(source, request)
 end
 
 function MZInventoryService.swapInventorySlots(source, request)
+  local actionOk, action = MZPlayerStateService.canPerformAction(source, 'inventory.move')
+  if not actionOk or not action or action.allowed ~= true then return buildPublicInventoryError('player_state_blocked') end
   request = type(request) == 'table' and request or {}
 
   local descriptor = request.container
@@ -4291,6 +4822,7 @@ function MZInventoryService.getPlayerHotbar(source)
 end
 
 function MZInventoryService.bindHotbarSlot(source, hotbarSlot, inventorySlot)
+  if not playerActionAllowed(source, 'inventory.move') then return false, 'player_state_blocked' end
   local player, playerErr = getPlayerBySource(source)
   if not player then
     return false, playerErr
@@ -4353,6 +4885,7 @@ function MZInventoryService.bindHotbarSlot(source, hotbarSlot, inventorySlot)
 end
 
 function MZInventoryService.clearHotbarSlot(source, hotbarSlot)
+  if not playerActionAllowed(source, 'inventory.move') then return false, 'player_state_blocked' end
   local player, playerErr = getPlayerBySource(source)
   if not player then
     return false, playerErr
@@ -4475,13 +5008,14 @@ function MZInventoryService.getPublicInventoryErrorCatalog()
   return cloneTable(PublicInventoryErrors)
 end
 
-MZInventoryService.registerItemUseHandler('water', function(payload)
-  return {
-    ok = true,
-    consume = true,
-    amount = 1
+if rawget(_G, 'MZ_INVENTORY_CONSUMABLE_TESTING') == true then
+  MZInventoryService._consumableTest = {
+    executeInventoryMutation = executeInventoryMutation,
+    normalizeUseResult = normalizeUseResult,
+    normalizeCallable = normalizeCallable,
+    buildUsePlayerItemMutationPlan = buildUsePlayerItemMutationPlan
   }
-end)
+end
 
 MZInventoryService.registerItemUseHandler('radio', function(payload)
   return {

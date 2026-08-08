@@ -83,6 +83,11 @@ local function useHotbarSlot(hotbarSlot)
     return
   end
 
+  if MZPlayerStateClient and MZPlayerStateClient.canPerformAction
+    and not MZPlayerStateClient.canPerformAction('inventory.use') then
+    return
+  end
+
   TriggerServerEvent('mz_core:server:inventory:useHotbarSlot', {
     hotbar_slot = math.floor(hotbarSlot)
   })
