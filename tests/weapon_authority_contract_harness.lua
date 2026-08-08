@@ -100,6 +100,7 @@ local state = MZInventoryService.getEquippedWeaponState(1)
 expect(state and state.equipped == true, 'arma equipada nao foi retornada')
 expect(state.weaponHash == 453432689 and state.itemName == 'weapon_pistol', 'estado sanitizado incorreto')
 expect(state.ammo == 12 and state.ammoRevision == 3 and state.durability == 98, 'metadata sanitizada incorreta')
+expect(state.clipAmmo == 12, 'arma legada nao recebeu fallback seguro para o pente')
 expect(state.transitionRevision == 1, 'revisao inicial da transicao nao foi registrada')
 expect(state.equip_nonce == nil and state.equipNonce == nil, 'nonce foi exposto')
 

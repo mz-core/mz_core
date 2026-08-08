@@ -2,8 +2,12 @@ MZClient = MZClient or {}
 MZClient.InventoryWeapons = MZClient.InventoryWeapons or {
   authorized = nil,
   lastAmmoSent = nil,
+  lastClipAmmoSent = nil,
+  reloading = false,
   lastUnauthorizedReportAt = 0
 }
+MZClient.InventoryWeapons.lastClipAmmoSent = MZClient.InventoryWeapons.lastClipAmmoSent or nil
+MZClient.InventoryWeapons.reloading = MZClient.InventoryWeapons.reloading == true
 
 local WEAPON_UNARMED = `WEAPON_UNARMED`
 
@@ -247,9 +251,9 @@ local function logIgnoredNativeAmmo(reason, authorized, nativeTotal, nativeClip)
   ))
 end
 
-local function applyWeaponAmmoToPed(ped, weaponHash, totalAmmo, clipSize)
+local function applyWeaponAmmoToPed(ped, weaponHash, totalAmmo, clipSize, preferredClip)
   totalAmmo = math.max(0, math.floor(tonumber(totalAmmo) or 0))
-  local desiredClip, reserveAmmo = calculateWeaponAmmoParts(totalAmmo, clipSize)
+  local desiredClip, reserveAmmo = calculateWeaponAmmoParts(totalAmmo, clipSize, preferredClip)
 
   SetPedAmmo(ped, weaponHash, totalAmmo)
   SetCurrentPedWeapon(ped, weaponHash, true)
@@ -488,7 +492,21 @@ local function updateAuthorizedVisualAmmoFromPed(reason)
   local nativeTotal = math.max(0, math.floor(tonumber(GetAmmoInPedWeapon(ped, weaponHash)) or 0))
   local nativeClip = getWeaponClipAmmoNative(ped, weaponHash)
   local knownAmmo = tonumber(authorized.ammo)
-  if knownAmmo == nil or nativeTotal >= knownAmmo then
+  if knownAmmo == nil or nativeTotal > knownAmmo then
+    return false
+  end
+
+  if nativeTotal == knownAmmo then
+    local reliableClip = isNativeClipReliable(authorized, nativeClip, nativeTotal, weaponHash)
+    if not reliableClip or tonumber(nativeClip) == tonumber(authorized.clipAmmo) then
+      return false
+    end
+
+    setAuthorizedAmmoDisplay(authorized, nativeTotal, nativeClip)
+    if hasPublishedWeaponHudDisplayChanged(authorized) then
+      publishWeaponHudState(reason or 'ammo_visual_update')
+      return true
+    end
     return false
   end
 
@@ -584,6 +602,11 @@ local function sendWeaponAmmoUpdate(reason, force)
         weapon = authorized.weapon
       })
     end
+  elseif nativeTotal == knownAmmo then
+    local reliableClip = isNativeClipReliable(authorized, nativeClip, nativeTotal, weaponHash)
+    if reliableClip and tonumber(nativeClip) ~= tonumber(authorized.clipAmmo) then
+      setAuthorizedAmmoDisplay(authorized, nativeTotal, nativeClip)
+    end
   end
 
   if tonumber(authorized.ammo) ~= previousAmmo or tonumber(authorized.clipAmmo) ~= previousClipAmmo then
@@ -594,21 +617,94 @@ local function sendWeaponAmmoUpdate(reason, force)
     return false
   end
 
-  if force ~= true and MZClient.InventoryWeapons.lastAmmoSent == ammoForServer then
+  local clipForServer = math.max(0, math.floor(tonumber(authorized.clipAmmo) or 0))
+  if force ~= true
+    and MZClient.InventoryWeapons.lastAmmoSent == ammoForServer
+    and MZClient.InventoryWeapons.lastClipAmmoSent == clipForServer then
     return false
   end
 
   MZClient.InventoryWeapons.lastAmmoSent = ammoForServer
+  MZClient.InventoryWeapons.lastClipAmmoSent = clipForServer
   TriggerServerEvent('mz_core:server:inventory:updateWeaponAmmo', {
     instance_uid = authorized.instance_uid,
     equip_nonce = authorized.equip_nonce,
     ammo_revision = math.max(0, math.floor(tonumber(authorized.ammo_revision) or 0)),
     slot = authorized.slot,
     ammo = ammoForServer,
+    clip_ammo = clipForServer,
     reason = tostring(reason or 'periodic')
   })
 
   return true
+end
+
+local RELOAD_CONTROL = 45
+
+local ReloadErrorMessages = {
+  inventory_busy = 'Inventário ocupado. Tente novamente.',
+  player_state_blocked = 'Você não pode recarregar neste estado.',
+  weapon_not_equipped = 'Nenhuma arma equipada.',
+  weapon_not_owned = 'A arma equipada não está mais no inventário.',
+  weapon_reload_no_ammo = 'Você não possui munição compatível.',
+  weapon_clip_full = 'O pente já está cheio.',
+  weapon_ammo_revision_mismatch = 'A munição foi atualizada. Tente recarregar novamente.'
+}
+
+local function requestAuthorizedWeaponReload()
+  local inventoryWeapons = MZClient.InventoryWeapons
+  local authorized = inventoryWeapons.authorized
+  if type(authorized) ~= 'table' or inventoryWeapons.reloading == true then
+    return
+  end
+
+  if MZPlayerStateClient and MZPlayerStateClient.canPerformAction
+    and (not MZPlayerStateClient.canPerformAction('weapon.use')
+      or not MZPlayerStateClient.canPerformAction('inventory.use')) then
+    return
+  end
+
+  local now = GetGameTimer()
+  if now - (tonumber(inventoryWeapons.lastReloadRequestAt) or 0) < 500 then
+    return
+  end
+
+  local ped = getPed()
+  local weaponHash = ped and (tonumber(authorized.weapon_hash) or getWeaponHash(authorized.weapon)) or nil
+  if not ped or not weaponHash or GetSelectedPedWeapon(ped) ~= weaponHash then
+    return
+  end
+
+  local totalAmmo = math.max(0, math.floor(tonumber(GetAmmoInPedWeapon(ped, weaponHash)) or tonumber(authorized.ammo) or 0))
+  local clipAmmo = getWeaponClipAmmoNative(ped, weaponHash)
+  if clipAmmo == nil then
+    clipAmmo = math.max(0, math.floor(tonumber(authorized.clipAmmo) or 0))
+  end
+
+  inventoryWeapons.reloading = true
+  inventoryWeapons.lastReloadRequestAt = now
+
+  CreateThread(function()
+    local response = lib.callback.await('mz_core:server:inventory:reloadWeapon', false, {
+      instance_uid = authorized.instance_uid,
+      equip_nonce = authorized.equip_nonce,
+      ammo_revision = math.max(0, math.floor(tonumber(authorized.ammo_revision) or 0)),
+      ammo = totalAmmo,
+      clip_ammo = clipAmmo
+    })
+
+    inventoryWeapons.reloading = false
+    if type(response) == 'table' and response.ok == true then
+      return
+    end
+
+    local errorCode = type(response) == 'table' and response.error or nil
+    if type(errorCode) == 'table' then
+      errorCode = errorCode.internal_code or errorCode.code
+    end
+    errorCode = tostring(errorCode or 'weapon_reload_failed')
+    notifyInventoryWeapon(ReloadErrorMessages[errorCode] or 'Não foi possível recarregar a arma.', errorCode == 'weapon_clip_full' and 'info' or 'error')
+  end)
 end
 
 local function setUnarmed(ped)
@@ -667,9 +763,10 @@ local function applyAuthorizedWeapon(payload)
   local itemName = tostring(payload.item or '')
   local itemDef = MZItems and MZItems[itemName] or nil
   local clipSize = tonumber(payload.clipSize) or (type(itemDef) == 'table' and tonumber(itemDef.clipSize) or nil)
+  local preferredClip = tonumber(payload.clip_ammo or payload.clipAmmo)
   removeInventoryWeapons(ped)
   GiveWeaponToPed(ped, weaponHash, ammo, false, true)
-  local clipAmmo, reserveAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize)
+  local clipAmmo, reserveAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize, preferredClip)
 
   MZClient.InventoryWeapons.authorized = {
     item = itemName,
@@ -691,6 +788,7 @@ local function applyAuthorizedWeapon(payload)
   }
   markAuthoritativeAmmo(MZClient.InventoryWeapons.authorized, 'equip', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
   MZClient.InventoryWeapons.lastAmmoSent = ammo
+  MZClient.InventoryWeapons.lastClipAmmoSent = clipAmmo
   publishWeaponHudState('equip')
 end
 
@@ -761,12 +859,14 @@ local function applyAuthorizedAmmo(payload)
   local itemDef = MZItems and MZItems[tostring(authorized.item or '')] or nil
   local clipSize = tonumber(authorized.clipSize) or tonumber(payload.clipSize) or (type(itemDef) == 'table' and tonumber(itemDef.clipSize) or nil)
   authorized.clipSize = clipSize
-  local clipAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize)
+  local preferredClip = tonumber(payload.clip_ammo or payload.clipAmmo)
+  local clipAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize, preferredClip)
 
   setAuthorizedAmmoDisplay(authorized, ammo, clipAmmo)
   authorized.ammo_revision = payloadRevision
   markAuthoritativeAmmo(authorized, 'reload', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
   MZClient.InventoryWeapons.lastAmmoSent = ammo
+  MZClient.InventoryWeapons.lastClipAmmoSent = clipAmmo
 
   publishWeaponHudState('ammo_apply')
 
@@ -798,6 +898,8 @@ local function unequipAuthorizedWeapon(payload)
 
   MZClient.InventoryWeapons.authorized = nil
   MZClient.InventoryWeapons.lastAmmoSent = nil
+  MZClient.InventoryWeapons.lastClipAmmoSent = nil
+  MZClient.InventoryWeapons.reloading = false
   publishWeaponHudState(tostring(payload.reason or 'unequip'))
 end
 
@@ -832,6 +934,13 @@ end
 
 CreateThread(function()
   while true do
+    if type(MZClient.InventoryWeapons.authorized) == 'table' then
+      DisableControlAction(0, RELOAD_CONTROL, true)
+      if IsDisabledControlJustPressed(0, RELOAD_CONTROL) then
+        requestAuthorizedWeaponReload()
+      end
+    end
+
     if getWeaponConfig().blockWeaponWheel ~= false then
       DisableControlAction(0, 14, true)
       DisableControlAction(0, 15, true)
