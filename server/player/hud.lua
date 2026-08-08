@@ -1,13 +1,5 @@
 MZPlayerHUDService = {}
 
-local HUD_DEFAULTS = {
-  hunger = 100,
-  thirst = 100,
-  stress = 0,
-  isdead = false,
-  inlaststand = false
-}
-
 local function clampNumber(value, minValue, maxValue, fallback)
   local numeric = tonumber(value)
   if numeric == nil then
@@ -39,12 +31,21 @@ end
 
 function MZPlayerHUDService.buildStateFromPlayer(player)
   local metadata = getPlayerMetadata(player)
+  local status = Config.PlayerStates and Config.PlayerStates.status or {}
+  local hunger = status.hunger or { min = 0, max = 100, default = 100 }
+  local thirst = status.thirst or { min = 0, max = 100, default = 100 }
+  local stress = status.stress or { min = 0, max = 100, default = 0 }
+  local health = status.health or { min = 0, max = 200, default = 200 }
+  local armor = status.armor or { min = 0, max = 100, default = 0 }
 
   return {
     metadata = {
-      hunger = clampNumber(metadata.hunger, 0, 100, HUD_DEFAULTS.hunger),
-      thirst = clampNumber(metadata.thirst, 0, 100, HUD_DEFAULTS.thirst),
-      stress = clampNumber(metadata.stress, 0, 100, HUD_DEFAULTS.stress),
+      hunger = clampNumber(metadata.hunger, hunger.min, hunger.max, hunger.default),
+      thirst = clampNumber(metadata.thirst, thirst.min, thirst.max, thirst.default),
+      stress = clampNumber(metadata.stress, stress.min, stress.max, stress.default),
+      health = clampNumber(metadata.health, health.min, health.max, health.default),
+      armor = clampNumber(metadata.armor, armor.min, armor.max, armor.default),
+      deathState = tostring(metadata.deathState or 'alive'),
       isdead = metadata.isdead == true,
       inlaststand = metadata.inlaststand == true
     }

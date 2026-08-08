@@ -57,7 +57,13 @@ local administratorPermissions = extend(moderatorPermissions, {
   'staff.members.remove',
   'staff.members.promote',
   'staff.members.demote',
-  'staff.logs.view'
+  'staff.logs.view',
+  'mz_banguard.alerts.view',
+  'mz_banguard.alerts.details',
+  'mz_banguard.alerts.acknowledge',
+  'mz_banguard.alerts.note',
+  'mz_banguard.actions.spectate',
+  'mz_banguard.actions.goto'
 })
 
 local managerPermissions = extend(administratorPermissions, {
@@ -82,7 +88,9 @@ local managerPermissions = extend(administratorPermissions, {
   'staff.furniture.create',
   'staff.furniture.manage',
   'staff.furniture.archive',
-  'staff.furniture.recovery'
+  'staff.furniture.recovery',
+  'mz_banguard.alerts.clear',
+  'mz_banguard.alerts.identifiers'
 })
 
 local defaultRoles = {

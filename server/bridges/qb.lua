@@ -61,15 +61,11 @@ local function getPlayerWrapper(source)
 
   wrapper.Functions.SetPlayerData = function(_, field, value)
     if field == 'metadata' and type(value) == 'table' then
-      local ok = true
-      for metaKey, metaValue in pairs(value) do
-        local updated = MZBridgeAdapter.setMetadataValue(source, metaKey, metaValue)
-        ok = ok and updated == true
-      end
+      local ok, result = MZBridgeAdapter.setMetadataValues(source, value)
       wrapper.PlayerData = MZBridgeAdapter.getPlayerSnapshot(source, {
         ensureLoaded = false
       })
-      return ok
+      return ok, result
     end
 
     if field == 'charinfo' and type(value) == 'table' then

@@ -15,6 +15,9 @@ local function getLicense(source)
 end
 
 local function buildPlayerData(source, row, account)
+  local metadata, metadataChanged, metadataCorrections, metadataDecodeInvalid =
+    MZPlayerStateNormalizer.decodeAndNormalize(row.metadata)
+
   return {
     source = source,
     license = row.license,
@@ -27,7 +30,7 @@ local function buildPlayerData(source, row, account)
       nationality = row.nationality,
       phone = row.phone
     },
-    metadata = MZUtils.jsonDecode(row.metadata, Config.Player.defaultMetadata),
+    metadata = metadata,
     money = {
       wallet = account and account.wallet or 0,
       bank = account and account.bank or 0,
@@ -42,6 +45,10 @@ local function buildPlayerData(source, row, account)
       lastSeenAt = os.time()
     },
     session = nil
+  }, {
+    changed = metadataChanged,
+    corrections = metadataCorrections,
+    decodeInvalid = metadataDecodeInvalid
   }
 end
 
@@ -175,7 +182,7 @@ function MZPlayerService.loadPlayer(source)
 
     MZPlayerRepository.ensureAccount(row.citizenid)
     local account = MZPlayerRepository.getAccount(row.citizenid)
-    local playerData = buildPlayerData(source, row, account)
+    local playerData, metadataNormalization = buildPlayerData(source, row, account)
 
     MZPlayerRepository.closeActiveSessionsByCitizenId(row.citizenid, 'replaced_by_new_load')
 
@@ -189,6 +196,17 @@ function MZPlayerService.loadPlayer(source)
 
     MZCache.playersBySource[source] = playerData
     MZCache.playersByCitizenId[playerData.citizenid] = playerData
+
+    local stateInitialized, stateInitResult = MZPlayerStateService.initializePlayer(
+      source,
+      metadataNormalization.changed and metadataNormalization.corrections or nil
+    )
+    if not stateInitialized then
+      print(('[mz_core][player_state] initialization persistence pending source=%s code=%s'):format(
+        tostring(source),
+        tostring(stateInitResult and stateInitResult.code or 'unknown')
+      ))
+    end
 
     MZLogService.createDetailed('player', 'loaded', {
       actor = MZLogService.makeActor('player', playerData.citizenid, {
@@ -247,6 +265,49 @@ function MZPlayerService.getPlayerByCitizenId(citizenid)
   return MZCache.playersByCitizenId[citizenid]
 end
 
+local function cloneSnapshotValue(value, depth)
+  if type(value) ~= 'table' then return value end
+  depth = (tonumber(depth) or 0) + 1
+  if depth > 5 then return nil end
+  local result = {}
+  for key, item in pairs(value) do
+    if type(key) == 'string' or type(key) == 'number' then
+      result[key] = cloneSnapshotValue(item, depth)
+    end
+  end
+  return result
+end
+
+local function playerSnapshot(player)
+  if type(player) ~= 'table' then return nil end
+  return {
+    source = tonumber(player.source),
+    license = tostring(player.license or ''),
+    citizenid = tostring(player.citizenid or ''),
+    charinfo = cloneSnapshotValue(player.charinfo or {}, 0),
+    money = cloneSnapshotValue(player.money or {}, 0),
+    job = cloneSnapshotValue(player.job, 0),
+    gang = cloneSnapshotValue(player.gang, 0),
+    state = cloneSnapshotValue(player.state or {}, 0),
+    session = player.session and {
+      id = player.session.id,
+      source = tonumber(player.session.source),
+      citizenid = tostring(player.session.citizenid or ''),
+      joinedAt = player.session.joinedAt,
+      lastSeenAt = player.session.lastSeenAt,
+      isActive = player.session.isActive == true
+    } or nil
+  }
+end
+
+function MZPlayerService.getPlayerSnapshot(source)
+  return playerSnapshot(MZPlayerService.getPlayer(source))
+end
+
+function MZPlayerService.getPlayerByCitizenIdSnapshot(citizenid)
+  return playerSnapshot(MZPlayerService.getPlayerByCitizenId(citizenid))
+end
+
 function MZPlayerService.getSourceByCitizenId(citizenid)
   local player = MZCache.playersByCitizenId[citizenid]
   return player and player.source or nil
@@ -262,21 +323,8 @@ function MZPlayerService.isPlayerLoaded(source)
   return player ~= nil and player.state ~= nil and player.state.loaded == true
 end
 
-function MZPlayerService.setMetadataValue(source, key, value)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then return false, 'player_not_loaded' end
-  if type(key) ~= 'string' or key == '' then return false, 'invalid_key' end
-
-  player.metadata = player.metadata or {}
-  player.metadata[key] = value
-  MZPlayerRepository.updateMetadata(player.citizenid, player.metadata)
-  MZPlayerService.touchPlayer(source)
-
-  if MZPlayerHUDService then
-    MZPlayerHUDService.syncToClient(source)
-  end
-
-  return true, player.metadata
+function MZPlayerService.setMetadataValue(source, key, value, context)
+  return MZPlayerStateService.setGenericMetadata(source, key, value, context)
 end
 
 function MZPlayerService.getMetadataValue(source, key)
@@ -302,9 +350,14 @@ function MZPlayerService.setCharinfo(source, charinfo)
   return true, player.charinfo
 end
 
-function MZPlayerService.unloadPlayer(source, reason)
+function MZPlayerService.unloadPlayer(source, reason, statePrepared, preparedFlushOk, preparedFlushResult)
   local player = MZCache.playersBySource[source]
   if not player then return end
+
+  local flushOk, flushResult = preparedFlushOk, preparedFlushResult
+  if statePrepared ~= true then
+    flushOk, flushResult = MZPlayerStateService.beginUnload(source, reason or 'unload')
+  end
 
   local sessionId = player.session and player.session.id or nil
   local before = {
@@ -323,6 +376,10 @@ function MZPlayerService.unloadPlayer(source, reason)
   player.state = player.state or {}
   player.state.loaded = false
   player.state.lastSeenAt = os.time()
+
+  if MZPlayerStateSyncService and MZPlayerStateSyncService.clearStateBags then
+    MZPlayerStateSyncService.clearStateBags(source)
+  end
 
   MZLogService.createDetailed('player', 'unloaded', {
     actor = MZLogService.makeActor('player', player.citizenid, {
@@ -348,6 +405,8 @@ function MZPlayerService.unloadPlayer(source, reason)
 
   MZCache.playersByCitizenId[player.citizenid] = nil
   MZCache.playersBySource[source] = nil
+  MZPlayerStateService.finalizeUnload(source)
+  return flushOk, flushResult
 end
 
 

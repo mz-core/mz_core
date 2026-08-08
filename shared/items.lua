@@ -12,7 +12,7 @@ MZItems = {
   },
 
   bread = {
-    image = 'bread.png',
+    image = 'sandwich.png',
     label = 'Pão',
     weight = 300,
     stack = true,
@@ -57,6 +57,19 @@ MZItems = {
     closeOnUse = false,
     bindOnReceive = true,
     generateSerial = true
+  },
+
+  firstaid = {
+    image = 'firstaid.png',
+    label = 'Kit de Primeiros Socorros',
+    weight = 1200,
+    stack = true,
+    unique = false,
+    usable = false,
+    closeOnUse = false,
+    bindOnReceive = false,
+    generateSerial = false,
+    keepOnDeath = true
   },
 
   bank_card = {

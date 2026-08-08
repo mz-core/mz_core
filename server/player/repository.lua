@@ -29,10 +29,11 @@ function MZPlayerRepository.create(data)
 end
 
 function MZPlayerRepository.updateMetadata(citizenid, metadata)
-  MySQL.update.await('UPDATE mz_players SET metadata = ? WHERE citizenid = ?', {
+  local affected = MySQL.update.await('UPDATE mz_players SET metadata = ? WHERE citizenid = ?', {
     MZUtils.jsonEncode(metadata or {}),
     citizenid
   })
+  return affected ~= nil
 end
 
 function MZPlayerRepository.updateCharinfo(citizenid, charinfo)

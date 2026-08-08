@@ -475,7 +475,9 @@ local defaultOrgs = {
       'recruitment.view',
       'logs.view',
       'radio.use',
-      'storage.open'
+      'storage.open',
+      'facility.view',
+      'facility.furniture.view'
     },
 
     grade_permissions = {
@@ -506,7 +508,10 @@ local defaultOrgs = {
         'manage.account',
         'goals.manage',
         'recruitment.manage',
-        'boss.actions'
+        'boss.actions',
+        'facility.purchase',
+        'facility.manage',
+        'facility.furniture.buy'
       }
     }
   },

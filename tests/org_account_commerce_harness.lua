@@ -21,7 +21,8 @@ MZOrgRepository = { getOrgByCode = function(code) return code == 'mafia' and org
 MZOrgService = {
   hasGlobalPermission = function() return false end,
   canOrg = function(source, code, capability)
-    return source == 1 and code == 'mafia' and capability == 'facility.purchase'
+    return source == 1 and code == 'mafia'
+      and (capability == 'facility.purchase' or capability == 'facility.furniture.buy')
   end
 }
 MZAccountService = {
@@ -158,5 +159,21 @@ local rejectedReplayOk, rejectedReplayErr = MZOrgAccountService.spend(1, 'mafia'
 }, 'mz_org_activities')
 expect(not rejectedReplayOk and rejectedReplayErr == 'insufficient_org_funds' and balance == 2000,
   'rejected key must not become payable after balance changes')
+
+local furnitureSpendOk, furnitureSpend = MZOrgAccountService.spend(1, 'mafia', 250, {
+  operationKey = 'furniture_purchase:test0001',
+  purpose = 'furniture_purchase', relatedRef = 'furniture_purchase:test0001',
+  reason = 'organization furniture test'
+}, 'mz_furniture')
+expect(furnitureSpendOk and furnitureSpend.purpose == 'furniture_purchase' and balance == 1750,
+  'furniture spend must use its dedicated purpose and caller')
+
+local furnitureRefundOk, furnitureRefund = MZOrgAccountService.refund(
+  1, 'mafia', furnitureSpend.receiptId, {
+    operationKey = 'furniture_refund:test0001', reason = 'furniture grant failed'
+  }, 'mz_furniture'
+)
+expect(furnitureRefundOk and furnitureRefund.purpose == 'furniture_purchase_refund'
+  and balance == 2000, 'furniture refund must restore the dedicated spend')
 
 print('[mz_core][test] org account commerce harness passed')

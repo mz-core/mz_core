@@ -1,5 +1,16 @@
 MZBridgeAdapter = MZBridgeAdapter or {}
 
+local BridgeDeprecationWarnings = {}
+local function warnBridgeDeprecation(contract, replacement)
+  local resource = type(GetInvokingResource) == 'function' and GetInvokingResource() or 'unknown'
+  local key = tostring(resource) .. ':' .. tostring(contract)
+  if BridgeDeprecationWarnings[key] then return end
+  BridgeDeprecationWarnings[key] = true
+  print(('[mz_core][deprecated] resource=%s contract=%s replacement=%s'):format(
+    tostring(resource), tostring(contract), tostring(replacement)
+  ))
+end
+
 local function cloneTable(value)
   if type(value) ~= 'table' then
     return value
@@ -164,7 +175,25 @@ function MZBridgeAdapter.getMetadataValue(source, key)
 end
 
 function MZBridgeAdapter.setMetadataValue(source, key, value)
-  return MZPlayerService.setMetadataValue(source, key, value)
+  warnBridgeDeprecation('QB.SetMetaData', 'SetStatus/ApplyStatusPatch')
+  local context = {
+    internal = false,
+    invokingResource = GetInvokingResource(),
+    reason = 'qb_bridge_set_metadata'
+  }
+  if Config.PlayerStates and Config.PlayerStates.status and Config.PlayerStates.status[key] then
+    return MZPlayerStateService.setStatus(source, key, value, context)
+  end
+  return MZPlayerService.setMetadataValue(source, key, value, context)
+end
+
+function MZBridgeAdapter.setMetadataValues(source, values)
+  warnBridgeDeprecation('QB.SetPlayerData(metadata)', 'ApplyStatusPatch')
+  return MZPlayerStateService.applyBridgeMetadataPatch(source, values, {
+    internal = false,
+    invokingResource = GetInvokingResource(),
+    reason = 'qb_bridge_set_player_metadata'
+  })
 end
 
 function MZBridgeAdapter.setCharinfo(source, charinfo)
