@@ -226,6 +226,7 @@ expect(clientSource:find("RegisterNetEvent('mz_core:client:inventory:weaponInven
 expect(clientSource:find('clip_ammo = clipForServer', 1, true) ~= nil, 'pente nao e enviado na persistencia periodica')
 expect(clientSource:find("sendWeaponAmmoUpdate('before_hotbar_use', true)", 1, true) ~= nil, 'hotbar nao persiste disparos antes da troca')
 expect(clientSource:find("exports('FlushEquippedWeaponAmmo'", 1, true) ~= nil, 'export de flush para o inventario ausente')
+expect(clientSource:find("if type(MZClient.InventoryWeapons.authorized) ~= 'table' then", 1, true) ~= nil, 'primeiro equipamento e bloqueado por flush sem arma autorizada')
 local clipResultCheck = assert(clientSource:find("if type(clip) == 'number' then", 1, true))
 local boolResultCheck = assert(clientSource:find("if type(ok) == 'number' then", 1, true))
 expect(clipResultCheck < boolResultCheck, 'quantidade real do pente nao tem prioridade sobre o BOOL numerico')

@@ -761,6 +761,12 @@ end, false)
 RegisterKeyMapping('mz_weapon_reload', 'Recarregar arma pelo inventário', 'keyboard', 'R')
 
 exports('FlushEquippedWeaponAmmo', function(reason)
+  -- Nao ha nada para persistir antes do primeiro equipamento. Tratar esse
+  -- estado como sucesso permite que o inventario equipe a primeira arma.
+  if type(MZClient.InventoryWeapons.authorized) ~= 'table' then
+    return true
+  end
+
   return sendWeaponAmmoUpdate(tostring(reason or 'before_inventory_action'), true)
 end)
 
