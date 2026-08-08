@@ -171,6 +171,7 @@ Config.Player.defaultMetadata = {
 Config.Inventory = {
   defaultSlots = 40,
   defaultWeight = 50000,
+  playerTransferDistance = 3.0,
   hotbarSlots = 5,
   hotbarKeys = {
     [1] = '1',

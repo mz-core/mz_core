@@ -3945,6 +3945,10 @@ local PublicInventoryErrors = {
   weapon_reload_incompatible_ammo = { code = 'weapon_reload_incompatible_ammo', message = 'Munição incompatível com a arma equipada.' },
   weapon_ammo_full = { code = 'weapon_ammo_full', message = 'A arma já está com munição cheia.' },
   drop_create_failed = { code = 'drop_create_failed', message = 'Failed to create ground drop.' },
+  no_nearby_player = { code = 'no_nearby_player', message = 'Nenhum jogador disponivel por perto.' },
+  invalid_source_position = { code = 'invalid_source_position', message = 'Nao foi possivel validar sua posicao.' },
+  target_too_far = { code = 'target_too_far', message = 'O jogador mais proximo saiu do alcance.' },
+  target_state_blocked = { code = 'target_state_blocked', message = 'O jogador proximo nao pode receber itens agora.' },
   player_not_loaded = { code = 'player_not_loaded', message = 'Player inventory is not available yet.' },
   unknown_error = { code = 'unknown_error', message = 'Unknown inventory error.' }
 }
@@ -4606,6 +4610,225 @@ function MZInventoryService.dropInventoryItemAction(source, request)
   })
 end
 
+local function getPlayerTransferDistance()
+  local distance = tonumber(Config and Config.Inventory and Config.Inventory.playerTransferDistance) or 3.0
+  return math.max(0.5, math.min(distance, 10.0))
+end
+
+local function getPlayerBucket(source)
+  local ok, bucket = pcall(GetPlayerRoutingBucket, source)
+  if not ok then
+    return nil
+  end
+
+  return tonumber(bucket)
+end
+
+local function validatePlayerTransferProximity(source, targetSource)
+  local sourceCoords = getSourcePedCoords(source)
+  if not sourceCoords then
+    return false, 'invalid_source_position'
+  end
+
+  local targetCoords = getSourcePedCoords(targetSource)
+  local sourceBucket = getPlayerBucket(source)
+  local targetBucket = getPlayerBucket(targetSource)
+  if not targetCoords or sourceBucket == nil or targetBucket == nil or sourceBucket ~= targetBucket then
+    return false, 'target_too_far'
+  end
+
+  local distanceSquared = getDistanceSquared(sourceCoords, targetCoords)
+  local maxDistance = getPlayerTransferDistance()
+  if distanceSquared > (maxDistance * maxDistance) then
+    return false, 'target_too_far'
+  end
+
+  return true, math.sqrt(distanceSquared)
+end
+
+local function findClosestPlayerTransferTarget(source)
+  source = tonumber(source)
+  if not source or source <= 0 then
+    return nil, 'invalid_source'
+  end
+
+  local sourceCoords = getSourcePedCoords(source)
+  if not sourceCoords then
+    return nil, 'invalid_source_position'
+  end
+
+  local sourceBucket = getPlayerBucket(source)
+  local maxDistance = getPlayerTransferDistance()
+  local maxDistanceSquared = maxDistance * maxDistance
+  local closestSource = nil
+  local closestDistanceSquared = nil
+
+  for _, candidate in ipairs(GetPlayers()) do
+    local targetSource = tonumber(candidate)
+    if targetSource and targetSource > 0 and targetSource ~= source then
+      local targetBucket = getPlayerBucket(targetSource)
+      if sourceBucket ~= nil and targetBucket ~= nil and sourceBucket == targetBucket then
+        local targetCoords = getSourcePedCoords(targetSource)
+        local distanceSquared = getDistanceSquared(sourceCoords, targetCoords)
+        if distanceSquared <= maxDistanceSquared
+          and (closestDistanceSquared == nil or distanceSquared < closestDistanceSquared) then
+          closestSource = targetSource
+          closestDistanceSquared = distanceSquared
+        end
+      end
+    end
+  end
+
+  if not closestSource then
+    return nil, 'no_nearby_player'
+  end
+
+  return closestSource, math.sqrt(closestDistanceSquared or 0)
+end
+
+local function choosePlayerTransferTargetSlot(targetCtx, sourceRow)
+  local targetRows = getInventoryRowsFromContext(targetCtx)
+  local stackRow = findStackableRowInRows(
+    targetRows,
+    sourceRow.item,
+    type(sourceRow.metadata) == 'table' and sourceRow.metadata or {}
+  )
+  if stackRow then
+    return tonumber(stackRow.slot) or stackRow.slot
+  end
+
+  return findFreeSlotInRows(targetRows, targetCtx.maxSlots)
+end
+
+function MZInventoryService.giveInventoryItemAction(source, request)
+  if not playerActionAllowed(source, 'inventory.move') then
+    return buildPublicInventoryError('player_state_blocked')
+  end
+
+  request = type(request) == 'table' and request or {}
+  local fromSlot = tonumber(request.slot or request.from_slot)
+  local requestedAmount = request.amount ~= nil and tonumber(request.amount) or nil
+  if requestedAmount ~= nil then
+    requestedAmount = math.floor(requestedAmount)
+    if requestedAmount < 1 then
+      return buildPublicInventoryError('invalid_amount')
+    end
+  end
+
+  local targetSource, distanceOrErr = findClosestPlayerTransferTarget(source)
+  if not targetSource then
+    return buildPublicInventoryError(distanceOrErr)
+  end
+
+  if not playerActionAllowed(targetSource, 'inventory.move') then
+    return buildPublicInventoryError('target_state_blocked', {
+      target_source = targetSource
+    })
+  end
+
+  local giverCtx, giverErr = getPlayerInventoryContext(source)
+  if not giverCtx then
+    return buildPublicInventoryError(giverErr)
+  end
+
+  if not isValidSlotNumber(fromSlot, giverCtx.maxSlots) then
+    return buildPublicInventoryError('invalid_slot', {
+      slot = tonumber(request.slot) or request.slot
+    })
+  end
+
+  local targetCtx, targetErr = getPlayerInventoryContext(targetSource)
+  if not targetCtx then
+    return buildPublicInventoryError(targetErr, {
+      target_source = targetSource
+    })
+  end
+
+  local transferDetails = nil
+  local ok, resultOrErr = executeInventoryMutation(
+    giverCtx.player,
+    { giverCtx, targetCtx },
+    'give_player_item',
+    function()
+      local proximityOk, currentDistanceOrErr = validatePlayerTransferProximity(source, targetSource)
+      if not proximityOk then
+        return false, currentDistanceOrErr
+      end
+
+      local sourceRow = findRowBySlot(getInventoryRowsFromContext(giverCtx), fromSlot)
+      if not sourceRow then
+        return false, 'source_slot_empty'
+      end
+
+      local itemDef = getItemDefinition(sourceRow.item)
+      if not itemDef then
+        return false, 'item_not_found'
+      end
+
+      local sourceAmount = tonumber(sourceRow.amount) or 0
+      local transferAmount = itemDef.unique == true and 1 or (requestedAmount or sourceAmount)
+      if transferAmount < 1 or transferAmount > sourceAmount then
+        return false, 'invalid_amount'
+      end
+
+      local targetSlot = choosePlayerTransferTargetSlot(targetCtx, sourceRow)
+      if not targetSlot then
+        return false, 'no_free_slot'
+      end
+
+      local plan, planErr = planSlotTransferMutation(
+        giverCtx,
+        targetCtx,
+        fromSlot,
+        targetSlot,
+        transferAmount
+      )
+      if not plan then
+        return false, planErr
+      end
+
+      transferDetails = {
+        target_source = targetSource,
+        target_name = tostring(GetPlayerName(targetSource) or ('ID %s'):format(targetSource)),
+        item = tostring(sourceRow.item or ''),
+        item_label = tostring(itemDef.label or sourceRow.item or 'Item'),
+        amount = transferAmount,
+        distance = tonumber(currentDistanceOrErr) or tonumber(distanceOrErr) or 0,
+        to_slot = tonumber(targetSlot) or targetSlot
+      }
+
+      plan.logAction = 'give_player_item'
+      plan.logPayload = type(plan.logPayload) == 'table' and plan.logPayload or {}
+      plan.logPayload.context = type(plan.logPayload.context) == 'table' and plan.logPayload.context or {}
+      plan.logPayload.context.recipient_source = targetSource
+      plan.logPayload.context.distance = transferDetails.distance
+      plan.logPayload.meta = type(plan.logPayload.meta) == 'table' and plan.logPayload.meta or {}
+      plan.logPayload.meta.recipient_citizenid = tostring(targetCtx.ownerId or '')
+      plan.logPayload.meta.amount = transferAmount
+      plan.result = transferDetails
+      return plan
+    end
+  )
+
+  if not ok then
+    return buildPublicInventoryError(resultOrErr, {
+      slot = fromSlot,
+      target_source = targetSource
+    })
+  end
+
+  local result = type(resultOrErr) == 'table' and resultOrErr or transferDetails or {}
+  TriggerClientEvent('mz_core:client:inventory:itemReceived', targetSource, {
+    source = tonumber(source) or source,
+    source_name = tostring(GetPlayerName(source) or ('ID %s'):format(tostring(source))),
+    item = result.item,
+    item_label = result.item_label,
+    amount = result.amount
+  })
+
+  return buildPublicInventorySuccess(result)
+end
+
 function MZInventoryService.moveInventoryItem(source, request)
   request = type(request) == 'table' and request or {}
 
@@ -5014,6 +5237,14 @@ if rawget(_G, 'MZ_INVENTORY_CONSUMABLE_TESTING') == true then
     normalizeUseResult = normalizeUseResult,
     normalizeCallable = normalizeCallable,
     buildUsePlayerItemMutationPlan = buildUsePlayerItemMutationPlan
+  }
+end
+
+if rawget(_G, 'MZ_INVENTORY_TRANSFER_TESTING') == true then
+  MZInventoryService._transferTest = {
+    findClosestPlayerTransferTarget = findClosestPlayerTransferTarget,
+    validatePlayerTransferProximity = validatePlayerTransferProximity,
+    choosePlayerTransferTargetSlot = choosePlayerTransferTargetSlot
   }
 end
 

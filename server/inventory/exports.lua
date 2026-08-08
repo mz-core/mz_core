@@ -204,6 +204,10 @@ exports('UseInventoryItemAction', function(source, request)
   return MZInventoryService.useInventoryItemAction(source, request)
 end)
 
+exports('GiveInventoryItemAction', function(source, request)
+  return MZInventoryService.giveInventoryItemAction(source, request)
+end)
+
 exports('GetPlayerHotbar', function(source)
   return MZInventoryService.getPlayerHotbar(source)
 end)
