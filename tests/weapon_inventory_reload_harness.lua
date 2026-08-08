@@ -156,6 +156,7 @@ expect(result.ammo == 17 and result.clip_ammo == 12 and result.rounds_added == 1
 expect(findRow(5).amount == 1, 'pacote de municao nao foi consumido uma unica vez')
 expect(findRow(4).metadata.ammo == 17 and findRow(4).metadata.clip_ammo == 12, 'municao nao foi persistida atomicamente')
 expect(appliedPayload and appliedPayload.ammo == 17 and appliedPayload.clip_ammo == 12 and appliedPayload.ammo_revision == 4, 'payload autoritativo incorreto')
+expect(appliedPayload.animate_reload == true, 'recarga automatica nao solicitou animacao nativa')
 
 local fullOk, fullErr = MZInventoryService.reloadEquippedWeaponFromInventory(1, {
   instance_uid = 'MZINV-PISTOL-RELOAD', equip_nonce = nonce,
@@ -217,6 +218,8 @@ local clientSource = assert(io.open('client/inventory.lua', 'rb')):read('*a')
 expect(clientSource:find('DisableControlAction(0, RELOAD_CONTROL, true)', 1, true) ~= nil, 'controle nativo de recarga nao foi interceptado')
 expect(clientSource:find("lib.callback.await('mz_core:server:inventory:reloadWeapon'", 1, true) ~= nil, 'callback de recarga automatica ausente')
 expect(clientSource:find("RegisterKeyMapping('mz_weapon_reload'", 1, true) ~= nil, 'mapeamento confiavel da tecla R ausente')
+expect(clientSource:find('MakePedReload(ped)', 1, true) ~= nil, 'animacao nativa de recarga ausente')
+expect(clientSource:find("publishWeaponHudState('reload_started')", 1, true) ~= nil, 'HUD nao recebe o inicio da recarga')
 expect(clientSource:find('clip_ammo = clipForServer', 1, true) ~= nil, 'pente nao e enviado na persistencia periodica')
 expect(clientSource:find("sendWeaponAmmoUpdate('before_hotbar_use', true)", 1, true) ~= nil, 'hotbar nao persiste disparos antes da troca')
 expect(clientSource:find("exports('FlushEquippedWeaponAmmo'", 1, true) ~= nil, 'export de flush para o inventario ausente')

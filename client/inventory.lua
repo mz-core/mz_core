@@ -702,17 +702,24 @@ local function requestAuthorizedWeaponReload()
       clip_ammo = clipAmmo
     })
 
-    inventoryWeapons.reloading = false
     if type(response) == 'table' and response.ok == true then
       return
     end
 
+    inventoryWeapons.reloading = false
     local errorCode = type(response) == 'table' and response.error or nil
     if type(errorCode) == 'table' then
       errorCode = errorCode.internal_code or errorCode.code
     end
     errorCode = tostring(errorCode or 'weapon_reload_failed')
     notifyInventoryWeapon(ReloadErrorMessages[errorCode] or 'Não foi possível recarregar a arma.', errorCode == 'weapon_clip_full' and 'info' or 'error')
+  end)
+
+  CreateThread(function()
+    Wait(8000)
+    if inventoryWeapons.reloading == true and tonumber(inventoryWeapons.lastReloadRequestAt) == now then
+      inventoryWeapons.reloading = false
+    end
   end)
 end
 
@@ -878,13 +885,60 @@ local function applyAuthorizedAmmo(payload)
   local clipSize = tonumber(authorized.clipSize) or tonumber(payload.clipSize) or (type(itemDef) == 'table' and tonumber(itemDef.clipSize) or nil)
   authorized.clipSize = clipSize
   local preferredClip = tonumber(payload.clip_ammo or payload.clipAmmo)
-  local clipAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize, preferredClip)
+  local targetClipAmmo = calculateWeaponAmmoParts(ammo, clipSize, preferredClip)
+  local nativeClipAmmo = getWeaponClipAmmoNative(ped, weaponHash)
+  local shouldAnimateReload = payload.animate_reload == true
+    and GetSelectedPedWeapon(ped) == weaponHash
+    and tonumber(nativeClipAmmo) ~= nil
+    and targetClipAmmo > nativeClipAmmo
+
+  if shouldAnimateReload then
+    -- O servidor ja confirmou e persistiu o resultado. Mantemos o pente atual
+    -- no ped durante a animacao e fixamos o valor autoritativo ao terminar.
+    setAuthorizedAmmoDisplay(authorized, ammo, targetClipAmmo)
+    authorized.ammo_revision = payloadRevision
+    markAuthoritativeAmmo(authorized, 'reload_animation', 6500)
+    MZClient.InventoryWeapons.lastAmmoSent = ammo
+    MZClient.InventoryWeapons.lastClipAmmoSent = targetClipAmmo
+
+    SetPedAmmo(ped, weaponHash, ammo)
+    SetCurrentPedWeapon(ped, weaponHash, true)
+    SetAmmoInClip(ped, weaponHash, nativeClipAmmo)
+    publishWeaponHudState('reload_started')
+
+    local requestedAt = GetGameTimer()
+    local animationStarted = false
+    if type(MakePedReload) == 'function' then
+      MakePedReload(ped)
+      while GetGameTimer() - requestedAt < 6000 do
+        local reloadState = type(IsPedReloading) == 'function' and IsPedReloading(ped) or false
+        local isReloading = reloadState == true or reloadState == 1
+        if isReloading then
+          animationStarted = true
+        elseif animationStarted or GetGameTimer() - requestedAt >= 500 then
+          break
+        end
+        Wait(0)
+      end
+    end
+
+    local currentAuthorized = MZClient.InventoryWeapons.authorized
+    if currentAuthorized ~= authorized
+      or tostring(currentAuthorized and currentAuthorized.instance_uid or '') ~= instanceUid
+      or tostring(currentAuthorized and currentAuthorized.equip_nonce or '') ~= equipNonce then
+      MZClient.InventoryWeapons.reloading = false
+      return
+    end
+  end
+
+  local clipAmmo = applyWeaponAmmoToPed(ped, weaponHash, ammo, clipSize, targetClipAmmo)
 
   setAuthorizedAmmoDisplay(authorized, ammo, clipAmmo)
   authorized.ammo_revision = payloadRevision
-  markAuthoritativeAmmo(authorized, 'reload', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
+  markAuthoritativeAmmo(authorized, shouldAnimateReload and 'reload_complete' or 'reload', POST_AUTHORITATIVE_AMMO_PROTECT_MS)
   MZClient.InventoryWeapons.lastAmmoSent = ammo
   MZClient.InventoryWeapons.lastClipAmmoSent = clipAmmo
+  MZClient.InventoryWeapons.reloading = false
 
   publishWeaponHudState('ammo_apply')
 

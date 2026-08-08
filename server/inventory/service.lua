@@ -4012,6 +4012,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
       nextRevision,
       roundsAdded
     )
+    clientPayload.animate_reload = true
 
     return {
       statements = statements,
