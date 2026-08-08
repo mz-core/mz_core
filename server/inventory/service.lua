@@ -1787,9 +1787,13 @@ local function clampWeaponAmmo(itemDef, ammo)
     ammo = 0
   end
 
-  local maxAmmo = getWeaponMaxAmmo(itemDef, 120)
-  if maxAmmo and maxAmmo >= 0 and ammo > maxAmmo then
-    ammo = math.floor(maxAmmo)
+  -- A arma carrega apenas o que esta fisicamente no pente. Toda reserva fica
+  -- como item no inventario, impedindo que o motor mantenha uma segunda
+  -- reserva invisivel e recarregue sem consumir itens.
+  local clipSize = math.floor(tonumber(itemDef and itemDef.clipSize) or 0)
+  local maxLoadedAmmo = clipSize > 0 and clipSize or getWeaponMaxAmmo(itemDef, 120)
+  if maxLoadedAmmo and maxLoadedAmmo >= 0 and ammo > maxLoadedAmmo then
+    ammo = math.floor(maxLoadedAmmo)
   end
 
   return ammo
@@ -2313,7 +2317,7 @@ local function handleAmmoItemUse(payload)
     }
   end
 
-  local maxAmmo = getWeaponMaxAmmo(weaponDef, 120) or 120
+  local maxAmmo = getWeaponClipSize(weaponDef)
   local weaponMetadata = type(weaponRow.metadata) == 'table' and weaponRow.metadata or {}
   local currentAmmo = clampWeaponAmmo(weaponDef, equipped.ammo or weaponMetadata.ammo or weaponDef.defaultAmmo or 0)
   if currentAmmo >= maxAmmo then
@@ -3942,6 +3946,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
   local instanceUid = tostring(payload.instance_uid or payload.instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
   local equipNonce = tostring(payload.equip_nonce or payload.equipNonce or payload.nonce or ''):gsub('^%s+', ''):gsub('%s+$', '')
   local requestedRevision = tonumber(payload.ammo_revision or payload.ammoRevision)
+  local reloadReason = tostring(payload.reason or '') == 'auto_empty' and 'auto_empty' or 'manual_reload'
 
   if not source or instanceUid == '' then
     return false, 'invalid_weapon_uid'
@@ -4076,6 +4081,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
       roundsAdded
     )
     clientPayload.animate_reload = true
+    clientPayload.reload_reason = reloadReason
     clientPayload.inventory_ammo = math.max(0, inventoryAmmoBeforeReload - inventoryRoundsConsumed)
 
     return {
@@ -4095,7 +4101,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
         currentEquipped.ammo_revision = nextRevision
 
         logWeaponInventoryAction('weapon_reload', source, ctx.player, weaponRow, {
-          reason = 'reload_key_inventory',
+          reason = reloadReason,
           ammo = newAmmo,
           known_ammo = currentAmmo,
           clip_ammo = newClipAmmo

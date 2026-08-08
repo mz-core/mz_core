@@ -214,6 +214,7 @@ Config.Inventory = {
 Config.Weapons = {
   blockWeaponWheel = true,
   enforceInventoryWeapons = true,
+  autoReloadFromInventory = true,
   ammoSaveIntervalMs = 5000,
   ammoUpdateMinIntervalMs = 750,
   unauthorizedLogIntervalMs = 5000,

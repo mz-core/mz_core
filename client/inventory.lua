@@ -463,11 +463,6 @@ local function canAcceptNativeAmmoDrop(authorized, nativeTotal, weaponHash, igno
     return false, 'authoritative_ammo_protected'
   end
 
-  local ped = getPed()
-  if not ped or not weaponHash or GetSelectedPedWeapon(ped) ~= weaponHash then
-    return false, 'weapon_not_selected'
-  end
-
   local knownAmmo = tonumber(authorized.ammo)
   nativeTotal = tonumber(nativeTotal)
   if knownAmmo == nil or nativeTotal == nil then
@@ -476,6 +471,25 @@ local function canAcceptNativeAmmoDrop(authorized, nativeTotal, weaponHash, igno
 
   knownAmmo = math.floor(knownAmmo)
   nativeTotal = math.floor(nativeTotal)
+  local ped = getPed()
+  if not ped or not weaponHash then
+    return false, 'weapon_not_selected'
+  end
+
+  local selectedWeapon = GetSelectedPedWeapon(ped)
+  if selectedWeapon ~= weaponHash then
+    -- Ao disparar a ultima bala, o GTA pode trocar para desarmado antes de o
+    -- nosso ciclo de 50 ms observar o zero. Esse e o unico caso em que uma
+    -- queda e aceita com a arma fora da mao.
+    local autoHolsteredAfterLastShot = selectedWeapon == WEAPON_UNARMED
+      and nativeTotal == 0
+      and knownAmmo > 0
+      and HasPedGotWeapon(ped, weaponHash, false)
+    if not autoHolsteredAfterLastShot then
+      return false, 'weapon_not_selected'
+    end
+  end
+
   local totalDrop = knownAmmo - nativeTotal
   if totalDrop <= 0 then
     return false, 'no_total_drop'
@@ -692,7 +706,7 @@ local ReloadErrorMessages = {
   weapon_ammo_revision_mismatch = 'A munição foi atualizada. Tente recarregar novamente.'
 }
 
-local function requestAuthorizedWeaponReload()
+local function requestAuthorizedWeaponReload(reason)
   local inventoryWeapons = MZClient.InventoryWeapons
   local authorized = inventoryWeapons.authorized
   if type(authorized) ~= 'table' or inventoryWeapons.reloading == true then
@@ -712,11 +726,23 @@ local function requestAuthorizedWeaponReload()
 
   local ped = getPed()
   local weaponHash = ped and (tonumber(authorized.weapon_hash) or getWeaponHash(authorized.weapon)) or nil
-  if not ped or not weaponHash or GetSelectedPedWeapon(ped) ~= weaponHash then
+  if not ped or not weaponHash then
     return
   end
 
   local totalAmmo = math.max(0, math.floor(tonumber(GetAmmoInPedWeapon(ped, weaponHash)) or tonumber(authorized.ammo) or 0))
+  local selectedWeapon = GetSelectedPedWeapon(ped)
+  local autoHolsteredEmptyWeapon = selectedWeapon == WEAPON_UNARMED
+    and totalAmmo == 0
+    and HasPedGotWeapon(ped, weaponHash, false)
+  if selectedWeapon ~= weaponHash and not autoHolsteredEmptyWeapon then
+    return
+  end
+
+  if autoHolsteredEmptyWeapon then
+    applyAuthorizedAmmoDisplayToPed(ped, weaponHash, authorized)
+  end
+
   local clipAmmo = getWeaponClipAmmoNative(ped, weaponHash)
   if clipAmmo == nil then
     clipAmmo = math.max(0, math.floor(tonumber(authorized.clipAmmo) or 0))
@@ -731,7 +757,8 @@ local function requestAuthorizedWeaponReload()
       equip_nonce = authorized.equip_nonce,
       ammo_revision = math.max(0, math.floor(tonumber(authorized.ammo_revision) or 0)),
       ammo = totalAmmo,
-      clip_ammo = clipAmmo
+      clip_ammo = clipAmmo,
+      reason = tostring(reason or 'manual_reload')
     })
 
     if type(response) == 'table' and response.ok == true then
@@ -744,6 +771,16 @@ local function requestAuthorizedWeaponReload()
       errorCode = errorCode.internal_code or errorCode.code
     end
     errorCode = tostring(errorCode or 'weapon_reload_failed')
+    if errorCode == 'weapon_reload_no_ammo'
+      and MZClient.InventoryWeapons.authorized == authorized then
+      authorized.inventoryAmmo = 0
+      setAuthorizedAmmoDisplay(authorized, authorized.ammo, authorized.clipAmmo)
+      publishWeaponHudState('reload_no_inventory_ammo')
+    end
+
+    if tostring(reason or '') == 'auto_empty' then
+      return
+    end
     notifyInventoryWeapon(ReloadErrorMessages[errorCode] or 'Não foi possível recarregar a arma.', errorCode == 'weapon_clip_full' and 'info' or 'error')
   end)
 
@@ -985,7 +1022,7 @@ local function applyAuthorizedAmmo(payload)
   publishWeaponHudState('ammo_apply')
 
   local reloadAmount = tonumber(payload.reload_amount)
-  if reloadAmount and reloadAmount > 0 then
+  if reloadAmount and reloadAmount > 0 and tostring(payload.reload_reason or '') ~= 'auto_empty' then
     notifyInventoryWeapon(('Recarregado: +%s municoes.'):format(math.floor(reloadAmount)), 'success')
   end
 end
@@ -1067,10 +1104,19 @@ end
 
 CreateThread(function()
   while true do
-    if type(MZClient.InventoryWeapons.authorized) == 'table' then
+    local authorized = MZClient.InventoryWeapons.authorized
+    if type(authorized) == 'table' then
       DisableControlAction(0, RELOAD_CONTROL, true)
       if IsDisabledControlJustPressed(0, RELOAD_CONTROL) then
         requestAuthorizedWeaponReload()
+      end
+
+      if getWeaponConfig().autoReloadFromInventory ~= false
+        and MZClient.InventoryWeapons.reloading ~= true
+        and math.max(0, math.floor(tonumber(authorized.ammo) or 0)) == 0
+        and math.max(0, math.floor(tonumber(authorized.clipAmmo) or 0)) == 0
+        and math.max(0, math.floor(tonumber(authorized.inventoryAmmo) or 0)) > 0 then
+        requestAuthorizedWeaponReload('auto_empty')
       end
     end
 
@@ -1116,8 +1162,11 @@ CreateThread(function()
           end
         else
           local authorizedHash = tonumber(authorized.weapon_hash) or getWeaponHash(authorized.weapon)
-          if authorizedHash and selectedWeapon ~= WEAPON_UNARMED and selectedWeapon ~= authorizedHash then
-            reportUnauthorizedWeapon(selectedWeapon, 'different_weapon_selected')
+          if authorizedHash and selectedWeapon ~= authorizedHash then
+            if selectedWeapon ~= WEAPON_UNARMED then
+              reportUnauthorizedWeapon(selectedWeapon, 'different_weapon_selected')
+            end
+
             if HasPedGotWeapon(ped, authorizedHash, false) then
               applyAuthorizedAmmoDisplayToPed(ped, authorizedHash, authorized)
             else

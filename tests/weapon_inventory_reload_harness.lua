@@ -209,12 +209,35 @@ expect(MZInventoryService.updateEquippedWeaponAmmo(1, {
   instance_uid = 'MZINV-MG-RELOAD', equip_nonce = nonce,
   ammo_revision = 1, ammo = 0, clip_ammo = 0
 }) == true, 'zerar municao para o cenario sem reserva falhou')
-deleteRow(5)
+
+local autoOk, autoResult = MZInventoryService.reloadEquippedWeaponFromInventory(1, {
+  instance_uid = 'MZINV-MG-RELOAD', equip_nonce = nonce,
+  ammo_revision = 1, ammo = 0, clip_ammo = 0, reason = 'auto_empty'
+})
+expect(autoOk == true and autoResult.ammo == 26 and autoResult.clip_ammo == 26, 'recarga automatica do pente vazio falhou')
+expect(autoResult.ammo_items_consumed == 26 and findRow(5) == nil, 'recarga automatica nao consumiu a reserva restante')
+expect(appliedPayload and appliedPayload.reload_reason == 'auto_empty', 'cliente nao recebeu o motivo da recarga automatica')
+
+expect(MZInventoryService.updateEquippedWeaponAmmo(1, {
+  instance_uid = 'MZINV-MG-RELOAD', equip_nonce = nonce,
+  ammo_revision = 2, ammo = 0, clip_ammo = 0
+}) == true, 'zerar o pente depois da recarga automatica falhou')
 local noAmmoOk, noAmmoErr = MZInventoryService.reloadEquippedWeaponFromInventory(1, {
   instance_uid = 'MZINV-MG-RELOAD', equip_nonce = nonce,
-  ammo_revision = 1, ammo = 0, clip_ammo = 0
+  ammo_revision = 2, ammo = 0, clip_ammo = 0
 })
 expect(noAmmoOk == false and noAmmoErr == 'weapon_reload_no_ammo', 'ausencia de municao compativel nao foi detectada')
+
+expect(MZInventoryService.usePlayerItem(1, 4) == true, 'desequipar arma vazia falhou')
+rows = {
+  {
+    slot = 4, item = 'weapon_pistol', amount = 1, instance_uid = 'MZINV-PISTOL-LEGACY',
+    metadata = { uid = 'MZINV-PISTOL-LEGACY', ammo = 99, clip_ammo = 99, ammo_revision = 7 }
+  }
+}
+expect(MZInventoryService.usePlayerItem(1, 4) == true, 'equip de arma legada falhou')
+local legacyState = MZInventoryService.getEquippedWeaponState(1)
+expect(legacyState.ammo == 12 and legacyState.clipAmmo == 12, 'reserva antiga permaneceu escondida dentro da arma')
 
 local clientSource = assert(io.open('client/inventory.lua', 'rb')):read('*a')
 expect(clientSource:find('DisableControlAction(0, RELOAD_CONTROL, true)', 1, true) ~= nil, 'controle nativo de recarga nao foi interceptado')
@@ -227,6 +250,12 @@ expect(clientSource:find('clip_ammo = clipForServer', 1, true) ~= nil, 'pente na
 expect(clientSource:find("sendWeaponAmmoUpdate('before_hotbar_use', true)", 1, true) ~= nil, 'hotbar nao persiste disparos antes da troca')
 expect(clientSource:find("exports('FlushEquippedWeaponAmmo'", 1, true) ~= nil, 'export de flush para o inventario ausente')
 expect(clientSource:find("if type(MZClient.InventoryWeapons.authorized) ~= 'table' then", 1, true) ~= nil, 'primeiro equipamento e bloqueado por flush sem arma autorizada')
+expect(clientSource:find('autoHolsteredAfterLastShot', 1, true) ~= nil, 'ultima bala e recusada quando o GTA guarda a arma automaticamente')
+expect(clientSource:find('autoHolsteredEmptyWeapon', 1, true) ~= nil, 'arma vazia guardada pelo GTA nao pode solicitar recarga')
+expect(clientSource:find('autoReloadFromInventory', 1, true) ~= nil, 'recarga automatica ao esvaziar o pente nao foi ligada')
+expect(clientSource:find('and math.max(0, math.floor(tonumber(authorized.inventoryAmmo) or 0)) > 0', 1, true) ~= nil, 'recarga automatica ignora o saldo do inventario')
+expect(clientSource:find("requestAuthorizedWeaponReload('auto_empty')", 1, true) ~= nil, 'pente vazio nao inicia a recarga automatica')
+expect(clientSource:find("publishWeaponHudState('reload_no_inventory_ammo')", 1, true) ~= nil, 'saldo de reserva desatualizado causa repeticao infinita da recarga')
 local clipResultCheck = assert(clientSource:find("if type(clip) == 'number' then", 1, true))
 local boolResultCheck = assert(clientSource:find("if type(ok) == 'number' then", 1, true))
 expect(clipResultCheck < boolResultCheck, 'quantidade real do pente nao tem prioridade sobre o BOOL numerico')
@@ -247,5 +276,11 @@ end
 
 local prepareSource = assert(io.open('server/prepare.lua', 'rb')):read('*a')
 expect(prepareSource:find('inventory_ammo_individual_rounds_v1', 1, true) ~= nil, 'migracao idempotente de pacotes para balas ausente')
+
+local serviceSource = assert(io.open('server/inventory/service.lua', 'rb')):read('*a')
+expect(serviceSource:find('local maxLoadedAmmo = clipSize > 0 and clipSize', 1, true) ~= nil, 'arma ainda pode manter reserva invisivel fora do pente')
+
+local configSource = assert(io.open('config.lua', 'rb')):read('*a')
+expect(configSource:find('autoReloadFromInventory = true', 1, true) ~= nil, 'recarga automatica nao esta habilitada na configuracao')
 
 print('weapon_inventory_reload_harness: ok')
