@@ -19,6 +19,7 @@ local HouseStashMaxWeight = 1000000
 local enforceEquippedWeaponStillOwned
 local applyEquippedAmmoToMovingWeapon
 local cleanupInvalidHotbarRefsForPlayer
+local refreshEquippedWeaponInventoryAmmo
 local cloneTable
 
 local function trimString(value)
@@ -936,6 +937,10 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
     cleanupInvalidHotbarRefsForPlayer(actorPlayer.source, mutationName or 'inventory_mutation')
   end
 
+  if actorPlayer and refreshEquippedWeaponInventoryAmmo then
+    refreshEquippedWeaponInventoryAmmo(actorPlayer.source, mutationName or 'inventory_mutation')
+  end
+
   if plan.result ~= nil then
     return true, plan.result
   end
@@ -1711,6 +1716,23 @@ local function isAmmoItemDefinition(itemDef)
     and tostring(itemDef.ammoType or '') ~= ''
 end
 
+local function countCompatibleAmmoRounds(rows, ammoType)
+  ammoType = tostring(ammoType or '')
+  if ammoType == '' then
+    return 0
+  end
+
+  local total = 0
+  for _, row in ipairs(type(rows) == 'table' and rows or {}) do
+    local ammoDef = getItemDefinition(row.item)
+    if isAmmoItemDefinition(ammoDef) and tostring(ammoDef.ammoType or '') == ammoType then
+      total = total + math.max(0, math.floor(tonumber(row.amount) or 0)) * getAmmoReloadAmount(ammoDef)
+    end
+  end
+
+  return total
+end
+
 local function getWeaponNameFromDefinition(itemDef)
   if type(itemDef) ~= 'table' then
     return nil
@@ -1832,7 +1854,7 @@ local function findPlayerWeaponRowByInstance(ctx, instanceUid)
   return nil
 end
 
-local function buildWeaponClientPayload(row, itemDef, source, action)
+local function buildWeaponClientPayload(row, itemDef, source, action, inventoryRows)
   local metadata = normalizeMetadataTable(row.metadata)
   local weaponName = getWeaponNameFromDefinition(itemDef)
   local ammo = clampWeaponAmmo(itemDef, metadata.ammo or itemDef.defaultAmmo or 0)
@@ -1852,6 +1874,7 @@ local function buildWeaponClientPayload(row, itemDef, source, action)
     equip_nonce = equipNonce,
     ammo = ammo,
     clip_ammo = clipAmmo,
+    inventory_ammo = countCompatibleAmmoRounds(inventoryRows, itemDef.ammoType),
     ammo_revision = math.max(0, math.floor(tonumber(metadata.ammo_revision) or 0)),
     clipSize = tonumber(itemDef.clipSize) or nil,
     durability = tonumber(metadata.durability) or 100,
@@ -1969,6 +1992,7 @@ local function setEquippedWeaponState(source, player, row, payload)
     equip_nonce = tostring(payload.equip_nonce or ''),
     ammo = math.max(0, math.floor(tonumber(payload.ammo) or 0)),
     clip_ammo = math.max(0, math.floor(tonumber(payload.clip_ammo or payload.clipAmmo) or 0)),
+    inventory_ammo = math.max(0, math.floor(tonumber(payload.inventory_ammo or payload.inventoryAmmo) or 0)),
     ammo_revision = math.max(0, math.floor(tonumber(payload.ammo_revision) or 0)),
     serial = payload.serial,
     durability = payload.durability,
@@ -1983,6 +2007,37 @@ local function setEquippedWeaponState(source, player, row, payload)
   if state.citizenid ~= '' then
     EquippedWeaponSourceByCitizenId[state.citizenid] = source
   end
+end
+
+refreshEquippedWeaponInventoryAmmo = function(source, reason)
+  source = tonumber(source)
+  local equipped = source and EquippedWeaponsBySource[source] or nil
+  if type(equipped) ~= 'table' or tostring(equipped.instance_uid or '') == '' then
+    return false
+  end
+
+  local ctx = getPlayerInventoryContext(source)
+  if not ctx then
+    return false
+  end
+
+  local rows = getInventoryRowsFromContext(ctx)
+  local weaponRow = findPlayerWeaponRowByInstance(ctx, equipped.instance_uid)
+  local weaponDef = weaponRow and getItemDefinition(weaponRow.item) or nil
+  if not isWeaponItemDefinition(weaponDef) then
+    return false
+  end
+
+  local inventoryAmmo = countCompatibleAmmoRounds(rows, weaponDef.ammoType)
+  equipped.inventory_ammo = inventoryAmmo
+  TriggerClientEvent('mz_core:client:inventory:weaponInventoryAmmo', source, {
+    instance_uid = equipped.instance_uid,
+    equip_nonce = equipped.equip_nonce,
+    ammo_revision = equipped.ammo_revision,
+    inventory_ammo = inventoryAmmo,
+    reason = tostring(reason or 'inventory_mutation')
+  })
+  return true
 end
 
 local function clearEquippedWeaponState(source, reason, options)
@@ -2038,7 +2093,7 @@ local function clearEquippedWeaponState(source, reason, options)
   return true
 end
 
-local function updateWeaponAmmoMetadata(source, instanceUid, ammo, clipAmmo, reason, equipNonce, ammoRevision)
+local function updateWeaponAmmoMetadata(source, instanceUid, ammo, clipAmmo, reason, equipNonce, ammoRevision, bypassRateLimit)
   local player, playerErr = getPlayerBySource(source)
   if not player then
     return false, playerErr
@@ -2074,7 +2129,7 @@ local function updateWeaponAmmoMetadata(source, instanceUid, ammo, clipAmmo, rea
     return false, 'weapon_ammo_revision_mismatch'
   end
 
-  if allowedMode ~= 'pending' and isWeaponAmmoUpdateRateLimited(source, instanceUid) then
+  if bypassRateLimit ~= true and allowedMode ~= 'pending' and isWeaponAmmoUpdateRateLimited(source, instanceUid) then
     return false, 'weapon_ammo_rate_limited'
   end
 
@@ -2226,6 +2281,7 @@ local function handleAmmoItemUse(payload)
   end
 
   local rows = getInventoryRowsFromContext(ctx)
+  local inventoryAmmoBeforeUse = countCompatibleAmmoRounds(rows, ammoType)
   local ammoRow = findRowBySlot(rows, slot)
   if not ammoRow or tostring(ammoRow.item or '') ~= tostring(payload.item or '') or (tonumber(ammoRow.amount) or 0) <= 0 then
     return {
@@ -2292,6 +2348,7 @@ local function handleAmmoItemUse(payload)
     nextRevision,
     addAmmo
   )
+  clientPayload.inventory_ammo = math.max(0, inventoryAmmoBeforeUse - getAmmoReloadAmount(ammoDef))
 
   return {
     ok = true,
@@ -2310,6 +2367,7 @@ local function handleAmmoItemUse(payload)
 
       currentEquipped.ammo = newAmmo
       currentEquipped.clip_ammo = newClipAmmo
+      currentEquipped.inventory_ammo = clientPayload.inventory_ammo
       currentEquipped.slot = tonumber(weaponRow.slot) or weaponRow.slot
       currentEquipped.ammo_revision = nextRevision
 
@@ -2356,7 +2414,8 @@ local function handleWeaponItemUse(payload)
   end
 
   local slot = tonumber(payload.slot)
-  local row = findRowBySlot(getInventoryRowsFromContext(ctx), slot)
+  local inventoryRows = getInventoryRowsFromContext(ctx)
+  local row = findRowBySlot(inventoryRows, slot)
   if not row or tostring(row.item or '') ~= tostring(payload.item or '') then
     return {
       ok = false,
@@ -2411,7 +2470,7 @@ local function handleWeaponItemUse(payload)
     queuePendingWeaponAmmoUpdate(source, current)
   end
 
-  local clientPayload = buildWeaponClientPayload(row, itemDef, source, 'equip')
+  local clientPayload = buildWeaponClientPayload(row, itemDef, source, 'equip', inventoryRows)
   setEquippedWeaponState(source, ctx.player, row, clientPayload)
 
   logWeaponInventoryAction('weapon_equip', source, ctx.player, row, {
@@ -3848,7 +3907,7 @@ function MZInventoryService.usePlayerItemByInstanceUid(source, instanceUid)
   end)
 end
 
-function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
+function MZInventoryService.updateEquippedWeaponAmmo(source, payload, bypassRateLimit)
   if not playerActionAllowed(source, 'weapon.use') then return false, 'player_state_blocked' end
   payload = type(payload) == 'table' and payload or {}
   local instanceUid = tostring(payload.instance_uid or payload.instanceUid or ''):gsub('^%s+', ''):gsub('%s+$', '')
@@ -3868,7 +3927,8 @@ function MZInventoryService.updateEquippedWeaponAmmo(source, payload)
     payload.clip_ammo or payload.clipAmmo,
     payload.reason or 'client_update',
     equipNonce,
-    payload.ammo_revision or payload.ammoRevision
+    payload.ammo_revision or payload.ammoRevision,
+    bypassRateLimit == true
   )
 end
 
@@ -3948,8 +4008,10 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
     local currentClip = normalizeWeaponClipAmmo(weaponDef, currentAmmo, payload.clip_ammo or payload.clipAmmo, math.min(knownClip, currentAmmo))
     local maxAmmo = getWeaponMaxAmmo(weaponDef, 120) or 120
     local ammoType = tostring(weaponDef.ammoType or '')
+    local inventoryAmmoBeforeReload = countCompatibleAmmoRounds(rows, ammoType)
     local statements = {}
     local consumedItems = 0
+    local inventoryRoundsConsumed = 0
     local roundsAdded = 0
     local newAmmo = currentAmmo
 
@@ -3970,6 +4032,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
             roundsAdded = roundsAdded + (nextAmmo - newAmmo)
             newAmmo = nextAmmo
             consumeFromRow = consumeFromRow + 1
+            inventoryRoundsConsumed = inventoryRoundsConsumed + reloadAmount
           end
 
           if consumeFromRow > 0 then
@@ -4013,6 +4076,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
       roundsAdded
     )
     clientPayload.animate_reload = true
+    clientPayload.inventory_ammo = math.max(0, inventoryAmmoBeforeReload - inventoryRoundsConsumed)
 
     return {
       statements = statements,
@@ -4026,6 +4090,7 @@ function MZInventoryService.reloadEquippedWeaponFromInventory(source, payload)
 
         currentEquipped.ammo = newAmmo
         currentEquipped.clip_ammo = newClipAmmo
+        currentEquipped.inventory_ammo = clientPayload.inventory_ammo
         currentEquipped.slot = tonumber(weaponRow.slot) or weaponRow.slot
         currentEquipped.ammo_revision = nextRevision
 
@@ -4098,6 +4163,7 @@ function MZInventoryService.getEquippedWeaponState(source)
     serial = equipped.serial and tostring(equipped.serial):sub(1, 96) or nil,
     ammo = math.max(0, math.floor(tonumber(equipped.ammo) or 0)),
     clipAmmo = math.max(0, math.floor(tonumber(equipped.clip_ammo) or 0)),
+    inventoryAmmo = math.max(0, math.floor(tonumber(equipped.inventory_ammo) or 0)),
     ammoRevision = math.max(0, math.floor(tonumber(equipped.ammo_revision) or 0)),
     durability = tonumber(equipped.durability),
     equippedAt = math.max(0, math.floor(tonumber(equipped.equipped_at) or 0)),

@@ -411,6 +411,11 @@ local statements = {
     KEY idx_mz_inventory_item (item)
   )]],
 
+  [[CREATE TABLE IF NOT EXISTS mz_schema_migrations (
+    migration_key VARCHAR(96) NOT NULL PRIMARY KEY,
+    applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  )]],
+
   [[CREATE TABLE IF NOT EXISTS mz_player_hotbar (
     id INT AUTO_INCREMENT PRIMARY KEY,
     citizenid VARCHAR(32) NOT NULL,
@@ -737,6 +742,49 @@ local function runPrepare()
 
     for index, statement in ipairs(statements) do
       runPrepareQuery(('statement_%03d'):format(index), statement)
+    end
+
+    local ammoUnitMigrationKey = 'inventory_ammo_individual_rounds_v1'
+    local ammoUnitMigration = MySQL.single.await([[
+      SELECT migration_key
+      FROM mz_schema_migrations
+      WHERE migration_key = ?
+      LIMIT 1
+    ]], { ammoUnitMigrationKey })
+
+    if not ammoUnitMigration then
+      MZCoreState.prepareStage = 'migrate_inventory_ammo_individual_rounds_v1'
+      local migrationOk = MySQL.transaction.await({
+        {
+          query = [[
+            UPDATE mz_inventory_items
+            SET amount = LEAST(2147483647, amount * CASE item
+              WHEN 'ammo_pistol' THEN 12
+              WHEN 'ammo_smg' THEN 30
+              WHEN 'ammo_shotgun' THEN 8
+              WHEN 'ammo_rifle' THEN 30
+              WHEN 'ammo_sniper' THEN 5
+              WHEN 'ammo_heavy' THEN 20
+              ELSE 1
+            END)
+            WHERE item IN (
+              'ammo_pistol', 'ammo_smg', 'ammo_shotgun', 'ammo_rifle',
+              'ammo_sniper', 'ammo_heavy', 'ammo_rpg'
+            )
+          ]],
+          parameters = {}
+        },
+        {
+          query = 'INSERT INTO mz_schema_migrations (migration_key) VALUES (?)',
+          parameters = { ammoUnitMigrationKey }
+        }
+      })
+
+      if migrationOk ~= true then
+        error('[migrate_inventory_ammo_individual_rounds_v1] transaction_failed', 0)
+      end
+
+      print('[mz_core][migration] inventory ammunition converted to individual rounds')
     end
 
     validateTableStructure('mz_financial_outbox', {

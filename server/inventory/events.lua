@@ -97,6 +97,10 @@ lib.callback.register('mz_core:server:inventory:reloadWeapon', function(source, 
   return buildHotbarCallbackResponse(MZInventoryService.reloadEquippedWeaponFromInventory(source, payload))
 end)
 
+lib.callback.register('mz_core:server:inventory:syncWeaponAmmo', function(source, payload)
+  return buildHotbarCallbackResponse(MZInventoryService.updateEquippedWeaponAmmo(source, payload, true))
+end)
+
 RegisterNetEvent('mz_core:server:inventory:updateWeaponAmmo', function(payload)
   MZInventoryService.updateEquippedWeaponAmmo(source, payload)
 end)

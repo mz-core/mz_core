@@ -220,32 +220,32 @@ Config.Weapons = {
   ammoTypes = {
     ammo_pistol = {
       label = 'Munição de Pistola',
-      reloadAmount = 12,
+      reloadAmount = 1,
       maxAmmo = 120
     },
     ammo_smg = {
       label = 'Munição de SMG',
-      reloadAmount = 30,
+      reloadAmount = 1,
       maxAmmo = 180
     },
     ammo_shotgun = {
       label = 'Cartucho Calibre 12',
-      reloadAmount = 8,
+      reloadAmount = 1,
       maxAmmo = 48
     },
     ammo_rifle = {
       label = 'Munição de Fuzil',
-      reloadAmount = 30,
+      reloadAmount = 1,
       maxAmmo = 210
     },
     ammo_sniper = {
       label = 'Munição de Sniper',
-      reloadAmount = 5,
+      reloadAmount = 1,
       maxAmmo = 40
     },
     ammo_heavy = {
       label = 'Munição Pesada',
-      reloadAmount = 20,
+      reloadAmount = 1,
       maxAmmo = 100
     },
     ammo_rpg = {
