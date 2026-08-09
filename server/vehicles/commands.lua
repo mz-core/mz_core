@@ -19,10 +19,6 @@ local function canUseVehicleCommand(source)
     return true
   end
 
-  if Config and Config.Debug == true then
-    return true
-  end
-
   return isAceAllowed(source, 'mzcore.vehicles') or isAceAllowed(source, 'mzcore.debug')
 end
 

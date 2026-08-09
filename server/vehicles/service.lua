@@ -6,6 +6,9 @@ local STATE_OUT = VehicleStates.OUT or 'out'
 local STATE_IMPOUNDED = VehicleStates.IMPOUNDED or VehicleStates.IMPOUND or 'impounded'
 local SnapshotRateLimit = {}
 local RestoreDebounce = {}
+local ImpoundActionRateLimit = {}
+local ImpoundSecurityAuditRateLimit = {}
+local IMPOUND_ACTION_INTERVAL_MS = 1500
 
 local function normalizeVehicleState(state)
   state = tostring(state or ''):lower()
@@ -39,6 +42,69 @@ end
 local function normalizePlate(plate)
   plate = tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
   return plate
+end
+
+local function trimLimited(value, maximum)
+  value = tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if value == '' then return nil end
+  if #value > maximum then value = value:sub(1, maximum) end
+  return value
+end
+
+local function validActorSession(source)
+  source = tonumber(source)
+  if not source or source <= 0 or source % 1 ~= 0 then
+    return false, 'invalid_source'
+  end
+
+  if not MZPlayerService or not MZPlayerService.isPlayerLoaded or not MZPlayerService.isPlayerLoaded(source) then
+    return false, 'player_not_loaded'
+  end
+
+  local player = MZPlayerService.getPlayer and MZPlayerService.getPlayer(source) or nil
+  local session = MZPlayerService.getPlayerSession and MZPlayerService.getPlayerSession(source) or nil
+  if type(player) ~= 'table' or type(session) ~= 'table'
+    or session.isActive ~= true
+    or tonumber(session.source) ~= source
+    or tostring(session.citizenid or '') == ''
+    or tostring(session.citizenid) ~= tostring(player.citizenid or '') then
+    return false, 'invalid_session'
+  end
+
+  return true, player
+end
+
+local function canManageImpound(source)
+  source = tonumber(source)
+  if source == 0 then return true end
+
+  local sessionOk = validActorSession(source)
+  if not sessionOk then return false end
+
+  if type(IsPlayerAceAllowed) == 'function' then
+    if IsPlayerAceAllowed(source, 'mzcore.vehicles') == true
+      or IsPlayerAceAllowed(source, 'mzcore.debug') == true then
+      return true
+    end
+  end
+
+  return MZOrgService and MZOrgService.hasGlobalPermission
+    and MZOrgService.hasGlobalPermission(source, 'staff.garages.manage') == true
+end
+
+local function consumeImpoundAction(source, action)
+  source = tonumber(source)
+  if source == 0 then return true end
+
+  local now = type(GetGameTimer) == 'function' and GetGameTimer() or math.floor(os.clock() * 1000)
+  local key = ('%s:%s'):format(tostring(source), tostring(action))
+  local previous = ImpoundActionRateLimit[key]
+  if previous and now >= previous and now - previous < IMPOUND_ACTION_INTERVAL_MS then
+    return false
+  end
+
+  ImpoundActionRateLimit[key] = now
+  return true
 end
 
 local function getOrgByCode(orgCode)
@@ -106,8 +172,12 @@ local function clampNumber(value, minValue, maxValue, fallback)
 end
 
 local function buildImpoundData(reason, actorSource, extraData)
+  if reason ~= nil and type(reason) ~= 'string' then
+    return false, 'invalid_impound_reason'
+  end
+  reason = trimLimited(reason, 160) or 'impounded'
   local payload = {
-    reason = tostring(reason or 'impounded'),
+    reason = reason,
     at = os.time()
   }
 
@@ -134,13 +204,45 @@ local function buildImpoundData(reason, actorSource, extraData)
     end
   end
 
-  if type(extraData) == 'table' then
-    for k, v in pairs(extraData) do
-      payload[k] = v
+  if extraData ~= nil and type(extraData) ~= 'table' then
+    return false, 'invalid_impound_data'
+  end
+
+  extraData = extraData or {}
+  local allowed = { fee = true, location = true, reference = true, debug = true }
+  for key in pairs(extraData) do
+    if allowed[key] ~= true then
+      return false, 'invalid_impound_data'
     end
   end
 
-  return payload
+  if extraData.fee ~= nil then
+    if type(extraData.fee) ~= 'number' then return false, 'invalid_impound_data' end
+    local fee = extraData.fee
+    if not fee or fee ~= fee or fee < 0 or fee > 10000000 then
+      return false, 'invalid_impound_data'
+    end
+    payload.fee = math.floor(fee)
+  end
+
+  if extraData.location ~= nil then
+    if type(extraData.location) ~= 'string' then return false, 'invalid_impound_data' end
+    payload.location = trimLimited(extraData.location, 64)
+    if not payload.location then return false, 'invalid_impound_data' end
+  end
+
+  if extraData.reference ~= nil then
+    if type(extraData.reference) ~= 'string' then return false, 'invalid_impound_data' end
+    payload.reference = trimLimited(extraData.reference, 96)
+    if not payload.reference then return false, 'invalid_impound_data' end
+  end
+
+  if extraData.debug ~= nil then
+    if type(extraData.debug) ~= 'boolean' then return false, 'invalid_impound_data' end
+    payload.debug = extraData.debug
+  end
+
+  return true, payload
 end
 
 local function normalizeVehicleMetadata(metadata)
@@ -559,6 +661,25 @@ local function logVehicleAction(action, vehicle, actorSource, beforeState, after
     after = afterState or {},
     meta = meta or {}
   })
+end
+
+local function denyImpoundAction(action, actorSource, plate, reason)
+  reason = tostring(reason or 'not_authorized')
+  local now = type(GetGameTimer) == 'function' and GetGameTimer() or math.floor(os.clock() * 1000)
+  local auditKey = ('%s:%s:%s'):format(tostring(actorSource), action, reason)
+  local previous = ImpoundSecurityAuditRateLimit[auditKey]
+  if (not previous or now < previous or now - previous >= 5000)
+    and MZLogService and MZLogService.createDetailed then
+    ImpoundSecurityAuditRateLimit[auditKey] = now
+    pcall(MZLogService.createDetailed, 'vehicles', action .. '_rejected', {
+      actor = buildVehicleActor(actorSource),
+      target = { type = 'vehicle', id = trimLimited(plate, 16) or 'unknown' },
+      context = { operation = action },
+      after = { allowed = false },
+      meta = { result = 'rejected', reason = reason }
+    })
+  end
+  return false, reason
 end
 
 
@@ -1536,22 +1657,53 @@ function MZVehicleService.storeVehicle(source, plate, garage, props, fuel, engin
 end
 
 function MZVehicleService.impoundVehicle(plate, reason, actorSource, extraData)
+  if type(plate) ~= 'string' then
+    return denyImpoundAction('impound_vehicle', actorSource, nil, 'invalid_plate')
+  end
   plate = normalizePlate(plate)
-  if plate == '' then
-    return false, 'invalid_plate'
+  if plate == '' or #plate > 16 then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'invalid_plate')
+  end
+
+  actorSource = tonumber(actorSource)
+  if actorSource ~= 0 then
+    local sessionOk, sessionErr = validActorSession(actorSource)
+    if not sessionOk then
+      return denyImpoundAction('impound_vehicle', actorSource, plate, sessionErr)
+    end
+  end
+
+  if not canManageImpound(actorSource) then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'not_authorized')
+  end
+
+  if not consumeImpoundAction(actorSource, 'impound') then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'rate_limited')
   end
 
   local vehicle = MZVehicleRepository.getByPlate(plate)
   if not vehicle then
-    return false, 'vehicle_not_found'
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'vehicle_not_found')
+  end
+
+  local currentState = normalizeVehicleState(vehicle.state)
+  if currentState == STATE_IMPOUNDED then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'vehicle_already_impounded')
+  end
+  if currentState ~= STATE_STORED and currentState ~= STATE_OUT then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, 'invalid_vehicle_state')
+  end
+
+  local impoundDataOk, impoundData = buildImpoundData(reason, actorSource, extraData)
+  if not impoundDataOk then
+    return denyImpoundAction('impound_vehicle', actorSource, plate, impoundData)
   end
 
   local beforeState = buildVehicleSnapshot(vehicle)
 
-  local impoundData = buildImpoundData(reason, actorSource, extraData)
   local nextMetadata = mergeTable(vehicle.metadata_json or {}, buildFlowMetadataPatch('impound', actorSource, {
     last_known_garage = tostring(vehicle.garage or ''),
-    last_impound_reason = tostring(reason or 'impounded')
+    last_impound_reason = impoundData.reason
   }))
 
   MZVehicleRepository.updateVehicleFlowById(vehicle.id, {
@@ -1565,10 +1717,14 @@ function MZVehicleService.impoundVehicle(plate, reason, actorSource, extraData)
     metadata_json = nextMetadata
   })
 
+  if MZVehicleWorldService and MZVehicleWorldService.clearWorldState then
+    MZVehicleWorldService.clearWorldState(plate, actorSource)
+  end
+
   local updatedVehicle = MZVehicleRepository.getById(vehicle.id) or vehicle
 
   logVehicleAction('impound_vehicle', updatedVehicle, actorSource, beforeState, buildVehicleSnapshot(updatedVehicle), {
-    reason = tostring(reason or 'impounded'),
+    reason = impoundData.reason,
     impound_data = impoundData
   })
 
@@ -1576,24 +1732,50 @@ function MZVehicleService.impoundVehicle(plate, reason, actorSource, extraData)
 end
 
 function MZVehicleService.releaseImpound(plate, garage, actorSource)
+  if type(plate) ~= 'string' then
+    return denyImpoundAction('release_impound_vehicle', actorSource, nil, 'invalid_plate')
+  end
+  if type(garage) ~= 'string' then
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, 'invalid_garage')
+  end
   plate = normalizePlate(plate)
-  garage = tostring(garage or '')
+  garage = garage:gsub('^%s+', ''):gsub('%s+$', '')
 
-  if plate == '' then
-    return false, 'invalid_plate'
+  if plate == '' or #plate > 16 then
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, 'invalid_plate')
   end
 
-  if garage == '' then
-    return false, 'invalid_garage'
+  if garage == '' or #garage > 64 then
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, 'invalid_garage')
   end
 
-  local vehicle = MZVehicleRepository.getByPlate(plate)
-  if not vehicle then
-    return false, 'vehicle_not_found'
+  actorSource = tonumber(actorSource)
+  if actorSource ~= 0 then
+    local sessionOk, sessionErr = validActorSession(actorSource)
+    if not sessionOk then
+      return denyImpoundAction('release_impound_vehicle', actorSource, plate, sessionErr)
+    end
   end
 
+  if not consumeImpoundAction(actorSource, 'release') then
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, 'rate_limited')
+  end
+
+  local accessOk, vehicleOrErr
+  if canManageImpound(actorSource) then
+    vehicleOrErr = MZVehicleRepository.getByPlate(plate)
+    accessOk = vehicleOrErr ~= nil
+    if not accessOk then vehicleOrErr = 'vehicle_not_found' end
+  else
+    accessOk, vehicleOrErr = MZVehicleService.canAccessVehicle(actorSource, plate)
+  end
+  if not accessOk then
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, vehicleOrErr)
+  end
+
+  local vehicle = vehicleOrErr
   if not isImpoundedState(vehicle.state) then
-    return false, 'vehicle_not_impounded'
+    return denyImpoundAction('release_impound_vehicle', actorSource, plate, 'vehicle_not_impounded')
   end
 
   local beforeState = buildVehicleSnapshot(vehicle)
@@ -1621,4 +1803,16 @@ function MZVehicleService.releaseImpound(plate, garage, actorSource)
   })
 
   return true, updatedVehicle
+end
+
+if type(AddEventHandler) == 'function' then
+  AddEventHandler('playerDropped', function()
+    local sourceId = tonumber(source)
+    if not sourceId then return end
+    ImpoundActionRateLimit[('%s:impound'):format(sourceId)] = nil
+    ImpoundActionRateLimit[('%s:release'):format(sourceId)] = nil
+    for key in pairs(ImpoundSecurityAuditRateLimit) do
+      if key:find(('^%s:'):format(sourceId)) then ImpoundSecurityAuditRateLimit[key] = nil end
+    end
+  end)
 end

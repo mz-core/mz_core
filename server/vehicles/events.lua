@@ -8,6 +8,30 @@ local function normalizePlate(plate)
   return tostring(plate or ''):upper():gsub('^%s+', ''):gsub('%s+$', '')
 end
 
+local RejectedImpoundEvents = {}
+
+local function rejectPrivilegedVehicleEvent(source, eventName, resultEvent)
+  source = tonumber(source) or 0
+  local now = type(GetGameTimer) == 'function' and GetGameTimer() or math.floor(os.clock() * 1000)
+  local key = ('%s:%s'):format(source, eventName)
+  local previous = RejectedImpoundEvents[key]
+
+  if not previous or now < previous or now - previous >= 5000 then
+    RejectedImpoundEvents[key] = now
+    if MZLogService and MZLogService.createDetailed then
+      pcall(MZLogService.createDetailed, 'vehicles', 'privileged_net_event_rejected', {
+        actor = { type = 'player', id = ('source:%s'):format(source), source = source },
+        target = { type = 'net_event', id = eventName },
+        context = { source = source, operation = eventName },
+        after = { allowed = false },
+        meta = { result = 'rejected', reason = 'server_only_contract' }
+      })
+    end
+  end
+
+  TriggerClientEvent(resultEvent, source, false, 'not_authorized')
+end
+
 RegisterNetEvent('mz_core:server:vehicle:takeOut', function(plate, garage)
   local source = source
   local ok, result = MZVehicleService.takeOutVehicle(source, plate, garage)
@@ -20,16 +44,19 @@ RegisterNetEvent('mz_core:server:vehicle:store', function(plate, garage, props, 
   TriggerClientEvent('mz_core:client:vehicle:storeResult', source, ok, result)
 end)
 
-RegisterNetEvent('mz_core:server:vehicle:impound', function(plate, reason, extraData)
-  local source = source
-  local ok, result = MZVehicleService.impoundVehicle(plate, reason, source, extraData)
-  TriggerClientEvent('mz_core:client:vehicle:impoundResult', source, ok, result)
+RegisterNetEvent('mz_core:server:vehicle:impound', function()
+  rejectPrivilegedVehicleEvent(source, 'mz_core:server:vehicle:impound', 'mz_core:client:vehicle:impoundResult')
 end)
 
-RegisterNetEvent('mz_core:server:vehicle:releaseImpound', function(plate, garage)
-  local source = source
-  local ok, result = MZVehicleService.releaseImpound(plate, garage, source)
-  TriggerClientEvent('mz_core:client:vehicle:releaseImpoundResult', source, ok, result)
+RegisterNetEvent('mz_core:server:vehicle:releaseImpound', function()
+  rejectPrivilegedVehicleEvent(source, 'mz_core:server:vehicle:releaseImpound', 'mz_core:client:vehicle:releaseImpoundResult')
+end)
+
+AddEventHandler('playerDropped', function()
+  local sourceId = tonumber(source)
+  if not sourceId then return end
+  RejectedImpoundEvents[('%s:%s'):format(sourceId, 'mz_core:server:vehicle:impound')] = nil
+  RejectedImpoundEvents[('%s:%s'):format(sourceId, 'mz_core:server:vehicle:releaseImpound')] = nil
 end)
 
 RegisterNetEvent('mz_core:vehicles:server:checkWorldVehiclesNear', function(coords)

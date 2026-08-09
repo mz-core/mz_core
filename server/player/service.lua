@@ -5,6 +5,24 @@ local CORE_READY_WAIT_TIMEOUT_MS = 15000
 local LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS = 15000
 local LoadInFlightBySource = {}
 
+local function finiteNumber(value)
+  value = tonumber(value)
+  if not value or value ~= value or value == math.huge or value == -math.huge then return nil end
+  return value
+end
+
+local function normalizePersistedPosition(coords)
+  if type(coords) ~= 'table' then return nil end
+  local x = finiteNumber(coords.x)
+  local y = finiteNumber(coords.y)
+  local z = finiteNumber(coords.z)
+  local heading = finiteNumber(coords.heading or 0.0)
+  if not x or not y or not z or not heading then return nil end
+  if math.abs(x) > 20000.0 or math.abs(y) > 20000.0 or z < -2000.0 or z > 3000.0 then return nil end
+  heading = heading % 360.0
+  return { x = x, y = y, z = z, heading = heading }
+end
+
 local function getLicense(source)
   for _, identifier in ipairs(GetPlayerIdentifiers(source)) do
     if identifier:find('license:') == 1 then
@@ -425,33 +443,25 @@ function MZPlayerService.getLastPosition(source)
     return nil
   end
 
-  return {
+  return normalizePersistedPosition({
     x = tonumber(row.pos_x),
     y = tonumber(row.pos_y),
     z = tonumber(row.pos_z),
     heading = tonumber(row.heading or 0.0)
-  }
+  })
 end
 
 function MZPlayerService.savePosition(source, coords)
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, 'player_not_loaded' end
-  if type(coords) ~= 'table' then return false, 'invalid_coords' end
-
-  local x = tonumber(coords.x)
-  local y = tonumber(coords.y)
-  local z = tonumber(coords.z)
-  local heading = tonumber(coords.heading or 0.0)
-
-  if not x or not y or not z then
-    return false, 'invalid_coords'
-  end
+  local normalized = normalizePersistedPosition(coords)
+  if not normalized then return false, 'invalid_coords' end
 
   MZPlayerRepository.updatePosition(player.citizenid, {
-    x = x,
-    y = y,
-    z = z,
-    heading = heading
+    x = normalized.x,
+    y = normalized.y,
+    z = normalized.z,
+    heading = normalized.heading
   })
 
   return true

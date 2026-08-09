@@ -4,6 +4,19 @@ local function debugVehicleWorld(message)
   end
 end
 
+local function rejectConsoleActor(contract, plate, invokingResource)
+  if MZLogService and MZLogService.createDetailed then
+    pcall(MZLogService.createDetailed, 'vehicles', contract .. '_rejected', {
+      actor = { type = 'resource', id = tostring(invokingResource or 'unknown') },
+      target = { type = 'vehicle', id = tostring(plate or 'unknown'):sub(1, 16) },
+      context = { operation = contract, invoking_resource = tostring(invokingResource or 'unknown') },
+      after = { allowed = false },
+      meta = { result = 'rejected', reason = 'console_actor_forbidden' }
+    })
+  end
+  return false, 'console_actor_forbidden'
+end
+
 exports('GetVehicleById', function(id)
   return MZVehicleService.getVehicleById(id)
 end)
@@ -144,9 +157,17 @@ exports('StoreVehicle', function(source, plate, garage, props, fuel, engine, bod
 end)
 
 exports('ImpoundVehicle', function(plate, reason, actorSource, extraData)
+  local invokingResource = type(GetInvokingResource) == 'function' and GetInvokingResource() or nil
+  if tonumber(actorSource) == 0 and invokingResource and invokingResource ~= 'mz_core' then
+    return rejectConsoleActor('impound_vehicle', plate, invokingResource)
+  end
   return MZVehicleService.impoundVehicle(plate, reason, actorSource, extraData)
 end)
 
 exports('ReleaseImpoundVehicle', function(plate, garage, actorSource)
+  local invokingResource = type(GetInvokingResource) == 'function' and GetInvokingResource() or nil
+  if tonumber(actorSource) == 0 and invokingResource and invokingResource ~= 'mz_core' then
+    return rejectConsoleActor('release_impound_vehicle', plate, invokingResource)
+  end
   return MZVehicleService.releaseImpound(plate, garage, actorSource)
 end)

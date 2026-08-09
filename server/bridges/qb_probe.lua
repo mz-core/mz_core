@@ -14,6 +14,10 @@ local function isAceAllowed(src, ace)
 end
 
 local function isDebugAllowed(source)
+  if not Config or Config.Debug ~= true then
+    return false
+  end
+
   if source == 0 then
     return DEBUG_ALLOW_CONSOLE
   end

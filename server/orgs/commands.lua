@@ -40,6 +40,11 @@ RegisterCommand('mzcore_ace_test', function(source)
     return
   end
 
+  if not isAceAllowed(src, 'mzcore.debug')
+    and not isAceAllowed(src, (Config and Config.OwnerAce) or 'group.mz_owner') then
+    return
+  end
+
   local ownerAce = (Config and Config.OwnerAce) or 'group.mz_owner'
   local rawOwner = IsPlayerAceAllowed(src, 'group.mz_owner')
   local rawOwnerCfg = IsPlayerAceAllowed(src, ownerAce)

@@ -19,12 +19,12 @@ local function isAceAllowed(src, ace)
 end
 
 local function isDebugAllowed(source)
-  if source == 0 then
-    return DEBUG_ALLOW_CONSOLE
+  if not Config or Config.Debug ~= true then
+    return false
   end
 
-  if Config and Config.Debug == true then
-    return true
+  if source == 0 then
+    return DEBUG_ALLOW_CONSOLE
   end
 
   return isAceAllowed(source, DEBUG_ACE)
