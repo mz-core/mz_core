@@ -1,159 +1,53 @@
-<p align="center">
-  <img src="./assets/logo.svg" alt="mz_core logo" width="260">
-</p>
+---
+title: mz_core — Repository README
+status: REFERENCE
+authority: LEVEL_4_REFERENCE
+owner: mz_core
+last_reviewed: 2026-08-09
+applies_to: [mz_core, contributors]
+related_contracts: [MZ-CORE-BOUNDARY-v1, MZ-DOCS-v1]
+---
 
-<p align="center">
-  Framework própria para FiveM, modular e focada em núcleo limpo.
-</p>
+# `mz_core`
 
-Esta versao documenta o estado real do recurso como base v1.0 do core. Isso nao significa framework completo, compatibilidade total com recursos externos ou ecossistema pronto. Significa que os modulos centrais do proprio `mz_core` ja sustentam uma base tecnica coerente para bootstrap, player, orgs, accounts, inventory, vehicles, logs e API publica do core.
+Fundação da MZ Framework para bootstrap/readiness, identity, session, player lifecycle, estado fundamental necessário ao spawn, autorização global e audit essencial.
 
-## Filosofia do projeto
+O repository ainda contém código CURRENT de org, economy, inventory, vehicles, bridges e tooling que pertence a outros boundaries TARGET. Essa localização transitória não transfere ownership e somente será alterada em waves próprias.
 
-- O core deve ser dono da base tecnica do servidor: identidade, sessao, orgs, economy base, inventory base, vehicles base, logs e persistencia.
-- O banco e a fonte de verdade. `config.lua` define parametros operacionais, nao o estado real do servidor.
-- A organizacao do codigo e por dominio. Cada dominio deve concentrar service, repository, exports, events e commands quando fizer sentido.
-- UI, HUD, phone, garagem visual, targets e gameplay especifico devem ficar fora do coracao do core.
-- Bridges sao adaptadores opcionais. O core nao deve ser moldado pelos contratos de frameworks externos.
+## Dependências e start
 
-## Escopo real atual
+O manifest declara:
 
-| Area                              | Status                 | Observacao                                                                                     |
-| --------------------------------- | ---------------------- | ---------------------------------------------------------------------------------------------- |
-| Prepare / bootstrap / seed        | Validado               | Schema, migracoes defensivas, seed padrao e gate de readiness existem                          |
-| Player / identidade / sessao      | Validado com ressalvas | Load, unload, cache, sessao e posicao existem; multichar nao existe                            |
-| Orgs / grades / permissoes        | Validado               | Dominio forte e funcional no escopo atual                                                      |
-| Accounts / org accounts / payroll | Validado com ressalvas | Core funciona; payroll ainda nao e atomico                                                     |
-| Inventory multi-contexto          | Validado               | Main, personal stash, org stash, house stash via grant, trunk, glovebox e world drop existem   |
-| Vehicles base                     | Validado com ressalvas | Ownership, acesso, estado, flow base e persistencia de veiculos fora da garagem existem         |
-| Logs estruturados                 | Validado com ressalvas | Existe padrao util, mas ainda pode ser refinado                                                |
-| Surface client minima             | Parcial                | Spawn base, cache client e runtime client de veiculos persistentes existem                     |
-| Bridge QB                         | Parcial                | Existe contrato inicial, mas nao e bridge fechada nem validada como compatibilidade total      |
-| Bridge ESX / vRP                  | Placeholder            | Arquivos existem, contrato real nao                                                            |
-| Comandos de debug e prova         | Temporario             | Utilitarios de validacao fazem parte do repositorio, nao do contrato do produto                |
+- `oxmysql`;
+- `ox_lib`.
 
-## Modulos existentes
-
-- `server/prepare.lua`: schema bootstrap e migracoes defensivas
-- `server/bootstrap.lua`: seed final e readiness do core
-- `server/player`: identidade, metadata, charinfo, sessao, posicao, exports e lifecycle
-- `server/orgs`: orgs, grades, permissoes, memberships e overrides
-- `server/accounts`: dinheiro do player, org accounts e payroll
-- `server/inventory`: persistencia e regra multi-contexto
-- `server/vehicles`: ownership, acesso, estado, metadata, flow base e `mz_vehicle_world_state`
-- `client/vehicles.lua`: runtime client de veiculos persistentes; aplica state bags, fallback de restore e condicao destroyed
-- `server/logs`: log estruturado por dominio
-- `server/bridges`: adapters de compatibilidade
-- `client/main.lua`, `client/spawn.lua`, `client/player.lua`, `client/orgs.lua`: camada client minima do core
-- `shared/utils.lua`, `shared/items.lua`, `shared/constants.lua`, `shared/version.lua`: utilitarios e definicoes compartilhadas
-
-## Dependencias
-
-- `oxmysql`
-- `ox_lib`
-- `spawnmanager` para o spawn base atual
-
-## Contrato inventory house_stash
-
-O container de bau de casa usa a persistencia real do inventario em `mz_inventory_items`, sem tabela propria de itens no resource de casas.
-
-Fluxo esperado:
-
-1. Um resource server-side confiavel valida acesso ao bau.
-2. O resource chama `exports['mz_core']:CreateHouseStashAccessGrant(source, descriptor)`.
-3. O core retorna um descriptor `type = 'house_stash'` com token temporario.
-4. O client abre a UI com `exports['mz_inventory']:OpenTargetView(descriptor)`.
-5. O core so resolve o `house_stash` se o token existir, pertencer ao mesmo source e ainda estiver valido.
-
-Descriptor aceito pelo grant:
-
-```lua
-{
-  houseCode = 'casa_teste_01',
-  stashId = 'house:casa_teste_01',
-  label = 'Bau da Casa',
-  slots = 50,
-  weight = 100000
-}
-```
-
-O `houseCode` aceita letras, numeros, `_` e `-`. O `stashId` precisa seguir `house:<houseCode>`.
-
-## Ordem recomendada de start
+O fluxo CURRENT de spawn também usa `spawnmanager`. Garanta essas dependências antes do core:
 
 ```cfg
 ensure oxmysql
 ensure ox_lib
 ensure spawnmanager
-ensure mapmanager
-ensure sessionmanager
 ensure mz_core
-ensure mz_vehicles
-ensure mz_garagem
-ensure mz_hud
-ensure mz_creator
-ensure mz_clothing
 ```
 
-## O que a v1.0 cobre
+Cada owner/produto adicional deve declarar e respeitar suas próprias dependências. Não use o core como agregador de readiness de features.
 
-- prepare, bootstrap, seed padrao e readiness do core
-- bootstrap de player por `license`, `citizenid`, metadata, charinfo e conta inicial
-- persistencia de sessao em `mz_player_sessions`
-- ciclo base de `load`, `unload`, `playerDropped` e save de posicao
-- orgs, grades, permissoes, memberships, duty, primary, promote e demote
-- dinheiro do player, org accounts e payroll com bloqueio de inconsistencias de shared account
-- inventory multi-contexto com regras de stack, metadata, peso e uso de item
-- contrato `house_stash` por grant temporario para resources server-side confiaveis, usado pelo `mz_houses`
-- vehicles base com ownership, acesso, garage, state, impound, release e persistencia de veiculos `out`
-- logs estruturados por dominio
-- exports, callbacks e eventos suficientes para consumir o core nativo
+## Documentação oficial
 
-## O que a v1.0 nao promete
+- [Portal da MZ Framework](../mz_docs/README.md)
+- [Documentação do core](../mz_docs/core/README.md)
+- [Player lifecycle](../mz_docs/core/PLAYER_LIFECYCLE.md)
+- [Autorização global](../mz_docs/core/AUTHORIZATION.md)
+- [Guia de integração](../mz_docs/guides/CORE_INTEGRATION.md)
+- [API documentation](../mz_docs/api/README.md)
 
-- compatibilidade total com `qb-core`
-- qualquer compatibilidade real com ESX ou vRP
-- multichar ou character selector
-- HUD, phone, NUI, target ou camada visual de gameplay
-- garagem visual e layout de garagem
-- handlers completos para todos os itens do inventario
-- suite automatizada de testes ou pipeline de CI
+Os arquivos em `docs/` e `reports/` incluem contratos anteriores, planos, auditorias, worklogs e resultados datados. Eles permanecem preservados para classificação/revisão na Wave 1A, mas não constituem automaticamente a documentação oficial vigente.
 
-## Limites conhecidos no estado atual
+## Desenvolvimento e testes
 
-- `server/bridges/qb.lua` ainda nao pode ser tratado como bridge totalmente fechada. O wrapper atual ainda tem limitacao real de call style.
-- `server/bridges/esx.lua` e `server/bridges/vrp.lua` continuam placeholders.
-- `server/accounts/payroll.lua` ainda nao faz debito da org e credito do player de forma atomica.
-- `server/inventory/events.lua` continua reservado para evolucao futura e nao representa uma surface publica fechada.
-- `client/vehicles.lua` nao e placeholder: ele e o runtime client dos veiculos persistentes.
-- `client/inventory.lua` continua placeholder.
-- `mz_vehicle_world_state` e a fonte de verdade para veiculos fora da garagem.
-- `metadata_json.condition` guarda condicao persistente quando um veiculo danificado/destruido volta para a garagem.
-- Proximity respawn existe como capacidade experimental, mas deve ficar desligado por padrao em release candidate.
-- Os comandos administrativos e probes do repositorio existem para validacao e operacao tecnica. Eles nao definem o contrato oficial do produto.
+- Não altere public API, ownership ou persistence sem revisar rules/ADRs e consumers.
+- Harnesses locais permanecem em `tests/` até a Wave 1B e podem ser executados individualmente com Lua 5.4.
+- Harness offline, análise estática e runtime FiveM/OneSync/MySQL são classes distintas de evidência.
+- Nenhum probe/debug helper define autorização ou contrato de produto.
 
-## Status atual do core
-
-O `mz_core` esta pronto para ser tratado como base v1.0 do proprio core, desde que a leitura de v1.0 seja a correta:
-
-- v1.0 do coracao server-side do projeto
-- nao v1.0 do ecossistema completo
-- nao v1.0 de bridges externas
-- nao v1.0 de UI/gameplay final
-
-Em outras palavras, o que esta estabilizado e a base nativa do recurso. O que continua parcial ou fora de escopo precisa continuar explicitado como tal.
-
-## Proximos passos apos a v1.0
-
-- hardening da bridge QB
-- definicao real do que sera suportado ou nao em bridges externas
-- melhoria de atomicidade em economy, principalmente payroll
-- refinamento final de padrao de logs
-- testes automatizados e CI
-- docs de consumo para resources externas
-
-## Documentacao relacionada
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/V1_SCOPE.md](docs/V1_SCOPE.md)
-- [docs/checklist.md](docs/checklist.md)
+Versão declarada pelo manifest: `1.0.0`.
