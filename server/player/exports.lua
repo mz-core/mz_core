@@ -23,23 +23,6 @@ if identityDebugEnabled() then
   print('[mz_core][player/exports] loaded')
 end
 
-local LegacyPlayerReadWarnings = {}
-local function warnLegacyPlayerRead(contract)
-  local invokingResource = type(GetInvokingResource) == 'function' and GetInvokingResource() or nil
-  if type(invokingResource) ~= 'string' or invokingResource == '' then return end
-  local key = invokingResource .. ':' .. contract
-  if LegacyPlayerReadWarnings[key] then return end
-  LegacyPlayerReadWarnings[key] = true
-  print(('[mz_core][deprecated] resource=%s contract=%s replacement=%s'):format(
-    invokingResource, contract, contract == 'GetPlayer' and 'GetPlayerSnapshot' or 'GetPlayerByCitizenIdSnapshot'
-  ))
-end
-
-exports('GetPlayer', function(source)
-  warnLegacyPlayerRead('GetPlayer')
-  return MZPlayerService.getPlayer(source)
-end)
-
 exports('GetPlayerSnapshot', function(source)
   return MZPlayerService.getPlayerSnapshot(source)
 end)
@@ -310,11 +293,6 @@ exports('EnsurePlayerLoaded', function(source)
   end
 
   return player, 'loaded'
-end)
-
-exports('GetPlayerByCitizenId', function(citizenid)
-  warnLegacyPlayerRead('GetPlayerByCitizenId')
-  return MZPlayerService.getPlayerByCitizenId(citizenid)
 end)
 
 exports('GetPlayerByCitizenIdSnapshot', function(citizenid)

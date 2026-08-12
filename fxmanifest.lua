@@ -27,22 +27,25 @@ server_scripts {
   'server/player/events.lua',
   'server/player/exports.lua',
   'server/player/state_exports.lua',
-  'server/player/state_staging.lua',
   'server/staff/repository.lua',
   'server/staff/service.lua',
   'server/staff/exports.lua',
-  'server/orgs/*.lua',
+  'server/orgs/commands.lua',
+  'server/orgs/events.lua',
+  'server/orgs/exports.lua',
+  'server/orgs/repository.lua',
+  'server/orgs/service.lua',
+  'server/orgs/staff_mutation_repository.lua',
+  'server/orgs/staff_mutations.lua',
   'server/vehicles/repository.lua',
   'server/vehicles/world_service.lua',
   'server/vehicles/service.lua',
   'server/vehicles/events.lua',
   'server/vehicles/exports.lua',
   'server/vehicles/commands.lua',
-  'server/vehicles/debug.lua',
   'server/inventory/*.lua',
   'server/accounts/*.lua',
   'server/logs/*.lua',
-  'server/bridges/*.lua',
   'server/seed/*.lua',
   'server/bootstrap.lua',
   'server/main.lua'
@@ -61,5 +64,6 @@ client_scripts {
 
 dependencies {
   'oxmysql',
-  'ox_lib'
+  'ox_lib',
+  'spawnmanager'
 }

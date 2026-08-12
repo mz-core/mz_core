@@ -9,20 +9,27 @@ local function expect(condition, message)
   if not condition then error('[player_state_bridge_hardening_harness] ' .. message, 2) end
 end
 
-local adapter = read('mz_core/server/bridges/adapter.lua')
-local qb = read('mz_core/server/bridges/qb.lua')
+local function exists(path)
+  local file = io.open(path, 'rb')
+  if not file then return false end
+  file:close()
+  return true
+end
+
 local state = read('mz_core/server/player/state_service.lua')
 local exportsFile = read('mz_core/server/player/exports.lua')
 
-expect(qb:find('MZBridgeAdapter.getPlayerSnapshot', 1, true), 'alias QB nao usa snapshot')
-expect(adapter:find('invokingResource = GetInvokingResource()', 1, true), 'bridge nao preserva invoking resource')
+expect(not exists('mz_core/server/bridges/adapter.lua')
+  and not exists('mz_core/server/bridges/qb.lua')
+  and not exists('mz_core/server/bridges/qb_probe.lua'),
+  'compatibilidade QB externa permanece no core')
 expect(state:find('PROTECTED_METADATA[key]', 1, true), 'metadata sensivel nao e fechada')
-expect(state:find('applyBridgeMetadataPatch', 1, true) and state:find('statusAuthorization(key)', 1, true),
-  'patch bridge ignora allowlist de status')
-expect(not qb:find('RegisterNetEvent', 1, true), 'bridge criou evento client arbitrario')
-expect(not qb:find('MarkPlayerDead', 1, true) and not qb:find('RevivePlayer', 1, true),
-  'bridge aceita boolean/transicao de morte')
-expect(adapter:find('warnBridgeDeprecation', 1, true), 'wrapper legado nao emite warning controlado')
-expect(exportsFile:find('LegacyPlayerReadWarnings', 1, true), 'GetPlayer mutavel nao emite warning controlado')
+expect(not state:find('applyBridgeMetadataPatch', 1, true),
+  'patch de metadata da compatibility QB permanece no core')
+expect(not exportsFile:find("exports('GetPlayer',", 1, true)
+  and not exportsFile:find("exports('GetPlayerByCitizenId',", 1, true)
+  and exportsFile:find("exports('GetPlayerSnapshot',", 1, true)
+  and exportsFile:find("exports('GetPlayerByCitizenIdSnapshot',", 1, true),
+  'deprecated player reads permanecem ou replacements foram removidos')
 
-print('[player_state_bridge_hardening_harness] PASS aliases=1 sensitive=3 events=2 warnings=2')
+print('[player_state_bridge_hardening_harness] PASS qb_compat=removed sensitive=3 legacy_reads=removed')

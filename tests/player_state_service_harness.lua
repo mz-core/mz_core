@@ -206,22 +206,8 @@ ok = MZPlayerStateService.flush(5, 'retry', true, internal)
 expect(ok and next(MZPlayerStateService._test.getRuntime(5).dirty) == nil, 'retry nao limpou dirty')
 
 freshPlayer(6)
-ok, result = MZPlayerStateService.applyBridgeMetadataPatch(6, {
-  hunger = 10,
-  appearance_updated_at = 123,
-  otherDomain = { preserved = 'changed' }
-}, { invokingResource = 'allowed_status' })
-expect(ok and result.revision == 1 and players[6].metadata.hunger == 10, 'patch atomico da bridge falhou')
-expect(players[6].metadata.otherDomain.preserved == 'changed', 'patch removeu metadata de outro dominio')
-ok, result = MZPlayerStateService.applyBridgeMetadataPatch(6, { isdead = true }, { invokingResource = 'allowed_medical' })
-expect(not ok and result.code == 'protected_metadata' and players[6].metadata.deathState == 'alive', 'bridge contornou maquina de morte')
-local bridgeProtectedLogs = {}
-for _, entry in ipairs(_G.__playerStateHarnessLogs) do
-  if entry.action == 'protected_metadata_blocked' and entry.payload and entry.payload.context and entry.payload.context.operation == 'bridge_metadata_patch' then
-    bridgeProtectedLogs[#bridgeProtectedLogs + 1] = entry
-  end
-end
-expect(#bridgeProtectedLogs >= 1, 'bridge patch protegido nao foi registrado no canal central')
+expect(MZPlayerStateService.applyBridgeMetadataPatch == nil,
+  'patch de metadata da compatibility QB permanece no state service')
 
 ok, result = MZPlayerStateService.canPerformAction(6, 'inventory.open')
 expect(ok and result.allowed == true, 'acao de alive foi bloqueada')
