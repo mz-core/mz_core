@@ -110,6 +110,31 @@ exports('GetOrgByCode', function(orgCode)
   return MZOrgService.getOrgByCode(orgCode)
 end)
 
+exports('GetOrganizationReadiness', function()
+  local state = MZCoreState or {}
+  local ready = state.ready == true
+  local terminal = false
+  local reason = 'organization_owner_preparing'
+
+  if state.prepareDone == true and state.prepareOk ~= true then
+    terminal = true
+    reason = 'organization_schema_prepare_failed'
+  elseif state.prepareDone == true and state.prepareOk == true and state.seedDone ~= true then
+    reason = 'organization_seed_pending'
+  elseif state.seedDone == true and state.seedOk ~= true then
+    terminal = true
+    reason = 'organization_seed_failed'
+  elseif ready then
+    reason = 'ready'
+  end
+
+  return {
+    ready = ready,
+    terminal = terminal,
+    reason = reason
+  }
+end)
+
 exports('ListOrgs', function(orgTypeCode)
   return MZOrgService.listOrgs(orgTypeCode)
 end)
