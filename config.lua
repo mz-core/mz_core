@@ -147,6 +147,7 @@ Config.PlayerStates = {
     'bank.use',
     'garage.use',
     'phone.use',
+    'radio.use',
     'property.use',
     'emote.use',
     'command.use',
