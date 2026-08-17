@@ -72,6 +72,11 @@ local function normalizeReason(value)
   return value
 end
 
+local function bankActionAllowed(source)
+  local ok, result = MZPlayerStateService.canPerformAction(source, 'bank.use')
+  return ok == true and type(result) == 'table' and result.allowed == true
+end
+
 local ledgerSequence = 0
 
 local function nextLedgerRef(prefix, orgCode)
@@ -576,6 +581,7 @@ function MZOrgAccountService.deposit(source, orgCode, amount, reason)
   if not source or source <= 0 then return false, 'invalid_source' end
   if not orgCode then return false, 'invalid_org' end
   if amount <= 0 then return false, 'invalid_amount' end
+  if not bankActionAllowed(source) then return false, 'player_state_blocked' end
 
   local actorPlayer = MZPlayerService.getPlayer(source)
   if not actorPlayer or not actorPlayer.citizenid then
@@ -634,6 +640,7 @@ function MZOrgAccountService.withdraw(source, orgCode, amount, reason)
   if not source or source <= 0 then return false, 'invalid_source' end
   if not orgCode then return false, 'invalid_org' end
   if amount <= 0 then return false, 'invalid_amount' end
+  if not bankActionAllowed(source) then return false, 'player_state_blocked' end
 
   local actorPlayer = MZPlayerService.getPlayer(source)
   if not actorPlayer or not actorPlayer.citizenid then
