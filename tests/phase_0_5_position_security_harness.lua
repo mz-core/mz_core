@@ -2,6 +2,14 @@ local function expect(condition, message)
   if not condition then error(message, 2) end
 end
 
+local serviceFile = assert(io.open('server/player/service.lua', 'r'))
+local serviceSource = serviceFile:read('*a')
+serviceFile:close()
+expect(serviceSource:find('return value == true or tonumber(value) == 1', 1, true),
+  'normalizacao de boolean do banco nao aceita true, 1 e "1"')
+expect(serviceSource:find('databaseBoolean(sessionRow.is_active)', 1, true),
+  'sessao nao normaliza is_active numerico/string/boolean do banco')
+
 local now = 1000
 local events = {}
 local saved = {}

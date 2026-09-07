@@ -11,6 +11,10 @@ local function finiteNumber(value)
   return value
 end
 
+local function databaseBoolean(value)
+  return value == true or tonumber(value) == 1
+end
+
 local function normalizePersistedPosition(coords)
   if type(coords) ~= 'table' then return nil end
   local x = finiteNumber(coords.x)
@@ -83,7 +87,7 @@ local function buildSessionData(source, player, sessionRow)
     droppedAt = sessionRow.dropped_at,
     disconnectReason = sessionRow.disconnect_reason,
     sessionSeconds = sessionRow.session_seconds or 0,
-    isActive = sessionRow.is_active == 1
+    isActive = databaseBoolean(sessionRow.is_active)
   }
 end
 

@@ -21,6 +21,7 @@ MZPlayerStateService = {
   beginShutdown = function() calls[#calls + 1] = 'shutdown' end,
   beginUnload = function(source, reason)
     calls[#calls + 1] = ('state:%s:%s'):format(source, reason)
+    _G.source = nil -- simula perda do source implicito depois de um await
     return source ~= 8, source == 8 and { code = 'persistence_failed' } or { code = 'flushed' }
   end,
   clearRuntime = function() calls[#calls + 1] = 'clear' end

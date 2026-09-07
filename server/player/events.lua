@@ -287,21 +287,25 @@ RegisterNetEvent('mz_core:server:savePosition', function(coords)
 end)
 
 AddEventHandler('playerDropped', function(reason)
-  persistObservedPosition(source, nil, 'player_dropped', false)
-  LoadingPlayers[source] = nil
   local sourceId = tonumber(source)
+  if not sourceId or sourceId <= 0 then
+    return
+  end
+
+  persistObservedPosition(sourceId, nil, 'player_dropped', false)
+  LoadingPlayers[sourceId] = nil
   PositionSaveAttempts[sourceId] = nil
   for key in pairs(PositionRejectionAudit) do
     if key:find(('^%s:'):format(sourceId)) then PositionRejectionAudit[key] = nil end
   end
 
-  local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(source, reason or 'player_dropped')
+  local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(sourceId, reason or 'player_dropped')
 
   if MZInventoryService and MZInventoryService.handlePlayerDropped then
-    MZInventoryService.handlePlayerDropped(source, reason)
+    MZInventoryService.handlePlayerDropped(sourceId, reason)
   end
 
-  MZPlayerService.unloadPlayer(source, reason, true, stateFlushOk, stateFlushResult)
+  MZPlayerService.unloadPlayer(sourceId, reason, true, stateFlushOk, stateFlushResult)
 end)
 
 AddEventHandler('onResourceStop', function(resourceName)

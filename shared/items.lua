@@ -1,4 +1,16 @@
 MZItems = {
+  notebook = {
+    image = 'notebook.png',
+    label = 'Notebook',
+    weight = 2200,
+    stack = false,
+    unique = true,
+    usable = true,
+    closeOnUse = true,
+    bindOnReceive = false,
+    generateSerial = true
+  },
+
   water = {
     image = 'water.png',
     label = 'Água',
