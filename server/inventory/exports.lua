@@ -160,6 +160,27 @@ exports('RegisterItemUseHandler', function(itemName, handler)
   return MZInventoryService.registerItemUseHandler(itemName, handler)
 end)
 
+-- Server-only item custody contracts. Only mz_phone may obtain these opaque tokens.
+exports('AcquireInventoryItemAccess', function(source, instanceUid, itemName, purpose)
+  return MZInventoryService.acquireItemAccess(source, instanceUid, itemName, purpose, GetInvokingResource())
+end)
+
+exports('ValidateInventoryItemAccess', function(source, accessToken)
+  return MZInventoryService.validateItemAccess(source, accessToken, GetInvokingResource())
+end)
+
+exports('BeginInventoryItemOperation', function(source, accessToken)
+  return MZInventoryService.beginItemOperation(source, accessToken, GetInvokingResource())
+end)
+
+exports('EndInventoryItemOperation', function(source, permitToken)
+  return MZInventoryService.endItemOperation(source, permitToken, GetInvokingResource())
+end)
+
+exports('ReleaseInventoryItemAccess', function(source, accessToken)
+  return MZInventoryService.releaseItemAccess(source, accessToken, GetInvokingResource())
+end)
+
 exports('UsePlayerItem', function(source, slot)
   return MZInventoryService.usePlayerItem(source, slot)
 end)

@@ -751,6 +751,14 @@ end
 
 local InventoryMutationLocks = {}
 local InventoryMutationLockTimeoutMs = 5000
+local ItemAccessLeases = {}
+local ItemAccessByInstance = {}
+local ItemOperationPermits = {}
+local ItemCustodyVersions = {}
+local ItemAccessLeaseTtlMs = 20 * 60 * 1000
+local ItemOperationPermitTtlMs = 15000
+local snapshotInstanceLocations
+local invalidateChangedInstanceLocations
 
 local function buildContainerLockKey(ctx)
   return ('%s:%s:%s'):format(
@@ -854,6 +862,7 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
   if not lockHandle then
     return false, lockErr
   end
+  local beforeInstanceLocations = snapshotInstanceLocations(contexts)
 
   local ok, planOrFalse, planErr = xpcall(function()
     return buildPlan()
@@ -916,6 +925,13 @@ local function executeInventoryMutation(actorPlayer, contexts, mutationName, bui
       plan.result.data.effect = cloneTable(commitHookResult)
     end
   end
+
+  local afterInstanceLocations = snapshotInstanceLocations(contexts)
+  invalidateChangedInstanceLocations(
+    beforeInstanceLocations,
+    afterInstanceLocations,
+    mutationName or 'inventory_mutation'
+  )
 
   releaseContainerLocks(lockHandle)
 
@@ -2013,6 +2029,229 @@ local function setEquippedWeaponState(source, player, row, payload)
   end
 end
 
+local function inventoryNowMs()
+  return tonumber(GetGameTimer()) or 0
+end
+
+local function trimItemAccessValue(value)
+  return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+local function itemAccessCallerAllowed(invokingResource)
+  if rawget(_G, 'MZ_INVENTORY_PHONE_ACCESS_TESTING') == true then return true end
+  return trimItemAccessValue(invokingResource) == 'mz_phone'
+end
+
+local function releaseItemOperationPermit(permitToken)
+  permitToken = trimItemAccessValue(permitToken)
+  local permit = ItemOperationPermits[permitToken]
+  if not permit then return false end
+  ItemOperationPermits[permitToken] = nil
+  releaseContainerLocks(permit.lockHandle)
+  return true
+end
+
+local function revokeItemAccessToken(accessToken, reason)
+  accessToken = trimItemAccessValue(accessToken)
+  local lease = ItemAccessLeases[accessToken]
+  if not lease then return false end
+  ItemAccessLeases[accessToken] = nil
+  if ItemAccessByInstance[lease.instance_uid] == accessToken then
+    ItemAccessByInstance[lease.instance_uid] = nil
+  end
+  for permitToken, permit in pairs(ItemOperationPermits) do
+    if permit.accessToken == accessToken then releaseItemOperationPermit(permitToken) end
+  end
+  if type(TriggerEvent) == 'function' then
+    TriggerEvent(
+      'mz_core:server:inventory:itemAccessInvalidated',
+      lease.instance_uid,
+      tonumber(ItemCustodyVersions[lease.instance_uid]) or 0,
+      tostring(reason or 'revoked')
+    )
+  end
+  return true
+end
+
+local function invalidateItemInstance(instanceUid, reason)
+  instanceUid = trimItemAccessValue(instanceUid)
+  if instanceUid == '' then return end
+  ItemCustodyVersions[instanceUid] = (tonumber(ItemCustodyVersions[instanceUid]) or 0) + 1
+  local accessToken = ItemAccessByInstance[instanceUid]
+  if accessToken then revokeItemAccessToken(accessToken, reason or 'custody_changed') end
+end
+
+snapshotInstanceLocations = function(contexts)
+  local locations = {}
+  for _, ctx in ipairs(type(contexts) == 'table' and contexts or {}) do
+    if ctx then
+      local key = buildContainerLockKey(ctx)
+      local rows = MZInventoryRepository.getInventory(ctx.ownerType, ctx.ownerId, ctx.inventoryType) or {}
+      for _, row in ipairs(rows) do
+        local instanceUid = trimItemAccessValue(row.instance_uid)
+        if instanceUid ~= '' then
+          locations[instanceUid] = ('%s:%s'):format(key, tostring(row.slot or ''))
+        end
+      end
+    end
+  end
+  return locations
+end
+
+invalidateChangedInstanceLocations = function(beforeLocations, afterLocations, reason)
+  local seen = {}
+  for instanceUid in pairs(beforeLocations or {}) do seen[instanceUid] = true end
+  for instanceUid in pairs(afterLocations or {}) do seen[instanceUid] = true end
+  for instanceUid in pairs(seen) do
+    if beforeLocations[instanceUid] ~= afterLocations[instanceUid] then
+      invalidateItemInstance(instanceUid, reason)
+    end
+  end
+end
+
+local function findPlayerItemForAccess(ctx, instanceUid, itemName)
+  instanceUid = trimItemAccessValue(instanceUid)
+  itemName = trimItemAccessValue(itemName)
+  local matches = {}
+  for _, row in ipairs(MZInventoryRepository.getInventory(ctx.ownerType, ctx.ownerId, ctx.inventoryType) or {}) do
+    local rowInstanceUid = trimItemAccessValue(row.instance_uid)
+    if rowInstanceUid ~= ''
+      and (instanceUid == '' or rowInstanceUid == instanceUid)
+      and (itemName == '' or tostring(row.item or '') == itemName) then
+      matches[#matches + 1] = row
+    end
+  end
+  if instanceUid == '' and #matches > 1 then return nil, 'item_selection_required' end
+  if #matches == 0 then return nil, 'item_not_held' end
+  return matches[1]
+end
+
+function MZInventoryService.acquireItemAccess(source, instanceUid, itemName, purpose, invokingResource)
+  if not itemAccessCallerAllowed(invokingResource) then return false, 'not_authorized' end
+  local ctx, ctxErr = getPlayerInventoryContext(source)
+  if not ctx then return false, ctxErr end
+  local lockHandle, lockErr = acquireContainerLocks({ ctx })
+  if not lockHandle then return false, lockErr end
+  local row, rowErr = findPlayerItemForAccess(ctx, instanceUid, itemName)
+  if not row then
+    releaseContainerLocks(lockHandle)
+    return false, rowErr
+  end
+
+  local resolvedInstanceUid = trimItemAccessValue(row.instance_uid)
+  local previousToken = ItemAccessByInstance[resolvedInstanceUid]
+  if previousToken then revokeItemAccessToken(previousToken, 'replaced') end
+  local accessToken = MZUtils.generateInstanceUid('MZACCESS')
+  local version = tonumber(ItemCustodyVersions[resolvedInstanceUid]) or 0
+  local now = inventoryNowMs()
+  local lease = {
+    token = accessToken,
+    source = tonumber(source),
+    citizenid = tostring(ctx.ownerId or ''),
+    instance_uid = resolvedInstanceUid,
+    item = tostring(row.item or ''),
+    slot = tonumber(row.slot) or row.slot,
+    custody_version = version,
+    purpose = trimItemAccessValue(purpose),
+    expires_at = now + ItemAccessLeaseTtlMs
+  }
+  ItemAccessLeases[accessToken] = lease
+  ItemAccessByInstance[resolvedInstanceUid] = accessToken
+  releaseContainerLocks(lockHandle)
+  return true, {
+    access_token = accessToken,
+    source = lease.source,
+    citizenid = lease.citizenid,
+    instance_uid = lease.instance_uid,
+    item = lease.item,
+    slot = lease.slot,
+    metadata = cloneTable(type(row.metadata) == 'table' and row.metadata or {}),
+    custody_version = version,
+    expires_at = lease.expires_at
+  }
+end
+
+function MZInventoryService.validateItemAccess(source, accessToken, invokingResource)
+  if not itemAccessCallerAllowed(invokingResource) then return false, 'not_authorized' end
+  accessToken = trimItemAccessValue(accessToken)
+  local lease = ItemAccessLeases[accessToken]
+  if not lease then return false, 'item_access_invalid' end
+  if tonumber(lease.source) ~= tonumber(source) then return false, 'item_access_holder_mismatch' end
+  if inventoryNowMs() >= tonumber(lease.expires_at or 0) then
+    revokeItemAccessToken(accessToken, 'expired')
+    return false, 'item_access_expired'
+  end
+  if tonumber(ItemCustodyVersions[lease.instance_uid] or 0) ~= tonumber(lease.custody_version or 0) then
+    revokeItemAccessToken(accessToken, 'custody_changed')
+    return false, 'item_access_revoked'
+  end
+  local player = MZPlayerService.getPlayer(tonumber(source))
+  if not player or tostring(player.citizenid or '') ~= tostring(lease.citizenid or '') then
+    revokeItemAccessToken(accessToken, 'identity_changed')
+    return false, 'item_access_identity_changed'
+  end
+  lease.expires_at = inventoryNowMs() + ItemAccessLeaseTtlMs
+  return true, cloneTable(lease)
+end
+
+function MZInventoryService.beginItemOperation(source, accessToken, invokingResource)
+  local valid, leaseOrErr = MZInventoryService.validateItemAccess(source, accessToken, invokingResource)
+  if not valid then return false, leaseOrErr end
+  local lease = leaseOrErr
+  local ctx, ctxErr = getPlayerInventoryContext(source)
+  if not ctx then return false, ctxErr end
+  local lockHandle, lockErr = acquireContainerLocks({ ctx })
+  if not lockHandle then return false, lockErr end
+  local row, rowErr = findPlayerItemForAccess(ctx, lease.instance_uid, lease.item)
+  if not row then
+    releaseContainerLocks(lockHandle)
+    invalidateItemInstance(lease.instance_uid, rowErr or 'item_not_held')
+    return false, rowErr
+  end
+  local permitToken = MZUtils.generateInstanceUid('MZPERMIT')
+  -- A permit owns the inventory container lock until the caller explicitly
+  -- finishes the operation. Its deadline is diagnostic only: releasing the
+  -- lock on a timer could let the item move while mz_phone is still committing.
+  lease.expires_at = math.max(
+    tonumber(lease.expires_at) or 0,
+    inventoryNowMs() + ItemAccessLeaseTtlMs
+  )
+  ItemOperationPermits[permitToken] = {
+    accessToken = accessToken,
+    source = tonumber(source),
+    instance_uid = lease.instance_uid,
+    custody_version = lease.custody_version,
+    expires_at = inventoryNowMs() + ItemOperationPermitTtlMs,
+    lockHandle = lockHandle
+  }
+  return true, {
+    permit_token = permitToken,
+    instance_uid = lease.instance_uid,
+    custody_version = lease.custody_version,
+    expires_at = ItemOperationPermits[permitToken].expires_at
+  }
+end
+
+function MZInventoryService.endItemOperation(source, permitToken, invokingResource)
+  if not itemAccessCallerAllowed(invokingResource) then return false, 'not_authorized' end
+  permitToken = trimItemAccessValue(permitToken)
+  local permit = ItemOperationPermits[permitToken]
+  if not permit then return false, 'item_operation_invalid' end
+  if tonumber(permit.source) ~= tonumber(source) then return false, 'item_operation_holder_mismatch' end
+  releaseItemOperationPermit(permitToken)
+  return true
+end
+
+function MZInventoryService.releaseItemAccess(source, accessToken, invokingResource)
+  if not itemAccessCallerAllowed(invokingResource) then return false, 'not_authorized' end
+  accessToken = trimItemAccessValue(accessToken)
+  local lease = ItemAccessLeases[accessToken]
+  if not lease then return true end
+  if tonumber(lease.source) ~= tonumber(source) then return false, 'item_access_holder_mismatch' end
+  revokeItemAccessToken(accessToken, 'released')
+  return true
+end
+
 refreshEquippedWeaponInventoryAmmo = function(source, reason)
   source = tonumber(source)
   local equipped = source and EquippedWeaponsBySource[source] or nil
@@ -2937,6 +3176,7 @@ local function buildUsePlayerItemMutationPlan(ctx, source, slot, expectedInstanc
     slot = slot,
     item = row.item,
     amount = tonumber(row.amount) or 0,
+    instance_uid = tostring(row.instance_uid or ''),
     metadata = normalizeMetadataTable(row.metadata),
     definition = itemDef
   }
@@ -5544,6 +5784,47 @@ end
 
 function MZInventoryService.cleanupInvalidHotbarRefs(source)
   return cleanupInvalidHotbarRefsForPlayer(source, 'manual_cleanup')
+end
+
+if type(CreateThread) == 'function' then
+  CreateThread(function()
+    while true do
+      Wait(5000)
+      local now = inventoryNowMs()
+      local expiredLeases = {}
+      for accessToken, lease in pairs(ItemAccessLeases) do
+        local hasActivePermit = false
+        for _, permit in pairs(ItemOperationPermits) do
+          if permit.accessToken == accessToken then
+            hasActivePermit = true
+            break
+          end
+        end
+        if not hasActivePermit and now >= tonumber(lease.expires_at or 0) then
+          expiredLeases[#expiredLeases + 1] = accessToken
+        end
+      end
+      for _, accessToken in ipairs(expiredLeases) do revokeItemAccessToken(accessToken, 'expired') end
+    end
+  end)
+end
+
+if type(AddEventHandler) == 'function' then
+  AddEventHandler('playerDropped', function()
+    local droppedSource = tonumber(source)
+    local tokens = {}
+    for accessToken, lease in pairs(ItemAccessLeases) do
+      if tonumber(lease.source) == droppedSource then tokens[#tokens + 1] = accessToken end
+    end
+    for _, accessToken in ipairs(tokens) do revokeItemAccessToken(accessToken, 'player_dropped') end
+  end)
+
+  AddEventHandler('onResourceStop', function(resourceName)
+    if tostring(resourceName or '') ~= 'mz_phone' then return end
+    local tokens = {}
+    for accessToken in pairs(ItemAccessLeases) do tokens[#tokens + 1] = accessToken end
+    for _, accessToken in ipairs(tokens) do revokeItemAccessToken(accessToken, 'consumer_resource_stopped') end
+  end)
 end
 
 function MZInventoryService.getPublicInventoryErrorCatalog()
