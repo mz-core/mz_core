@@ -112,21 +112,12 @@ local function sanitizePayload(payload)
 end
 
 local function isGlobalLogViewer(source)
-  if not MZOrgService or not MZOrgService.hasGlobalPermission then
+  if not MZStaffService or not MZStaffService.HasGlobalPermission then
     return false
   end
 
-  return MZOrgService.hasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
-    or MZOrgService.hasGlobalPermission(source, 'staff.logs.view') == true
-end
-
-local function canViewOrgLogs(source, orgCode)
-  if not orgCode or not MZOrgService or not MZOrgService.canOrg then
-    return false
-  end
-
-  return isGlobalLogViewer(source)
-    or MZOrgService.canOrg(source, orgCode, 'logs.view') == true
+  return MZStaffService.HasGlobalPermission(source, (Config and Config.OwnerAce) or 'group.mz_owner') == true
+    or MZStaffService.HasGlobalPermission(source, 'staff.logs.view') == true
 end
 
 local function sanitizeFilters(filters)
@@ -388,19 +379,10 @@ function MZLogService.createDetailed(scope, action, payload)
   )
 end
 
-function MZLogService.listOrgLogsSecure(source, orgCode, filters)
-  source = tonumber(source)
-  if not source or source <= 0 then
-    return false, 'invalid_source'
-  end
-
+function MZLogService.listOrganizationLogs(orgCode, filters)
   filters = sanitizeFilters(filters)
   orgCode = limitString(orgCode or filters.orgCode, 64)
   if not orgCode then return false, 'invalid_org' end
-  if not MZOrgRepository or not MZOrgRepository.getOrgByCode or not MZOrgRepository.getOrgByCode(orgCode) then
-    return false, 'invalid_org'
-  end
-  if not canViewOrgLogs(source, orgCode) then return false, 'forbidden' end
 
   local sql, params = buildLogQuery(filters, 'org', orgCode)
   local rows = MySQL.query.await(sql, params) or {}
@@ -437,8 +419,6 @@ end
 
 function MZLogService.listLogs(source, filters)
   filters = sanitizeFilters(filters)
-  if filters.orgCode then
-    return MZLogService.listOrgLogsSecure(source, filters.orgCode, filters)
-  end
+  if filters.orgCode then return false, 'organization_authority_required' end
   return MZLogService.listGlobalLogsSecure(source, filters)
 end

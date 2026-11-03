@@ -46,6 +46,7 @@ local administratorPermissions = extend(moderatorPermissions, {
   'staff.whitelist.manage',
   'staff.warns.revoke',
   'staff.players.godmode',
+  'staff.restraints.manage',
   'staff.vehicles.spawn',
   'staff.vehicles.delete',
   'staff.garages.view',

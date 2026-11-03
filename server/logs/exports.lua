@@ -2,8 +2,9 @@ exports('ListLogs', function(source, filters)
   return MZLogService.listLogs(source, filters)
 end)
 
-exports('ListOrgLogsSecure', function(source, orgCode, filters)
-  return MZLogService.listOrgLogsSecure(source, orgCode, filters)
+exports('ListOrganizationLogs', function(orgCode, filters)
+  if GetInvokingResource() ~= 'mz_org' then return false, 'forbidden_caller' end
+  return MZLogService.listOrganizationLogs(orgCode, filters)
 end)
 
 exports('ListGlobalLogsSecure', function(source, filters)

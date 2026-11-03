@@ -1,31 +1,11 @@
 MZPlayerRepository = {}
 
-function MZPlayerRepository.getByLicense(license)
-  return MySQL.single.await('SELECT * FROM mz_players WHERE license = ? LIMIT 1', { license })
+function MZPlayerRepository.getByCharacterId(characterId)
+  return MySQL.single.await('SELECT * FROM mz_players WHERE id = ? LIMIT 1', { characterId })
 end
 
 function MZPlayerRepository.getByCitizenId(citizenid)
   return MySQL.single.await('SELECT * FROM mz_players WHERE citizenid = ? LIMIT 1', { citizenid })
-end
-
-function MZPlayerRepository.create(data)
-  MySQL.insert.await([[
-    INSERT INTO mz_players (
-      license, citizenid, firstname, lastname, birthdate, gender, nationality, phone, metadata
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ]], {
-    data.license,
-    data.citizenid,
-    data.firstname or '',
-    data.lastname or '',
-    data.birthdate or '',
-    data.gender or '',
-    data.nationality or '',
-    data.phone or '',
-    MZUtils.jsonEncode(data.metadata or Config.Player.defaultMetadata or {})
-  })
-
-  return MZPlayerRepository.getByCitizenId(data.citizenid)
 end
 
 function MZPlayerRepository.updateMetadata(citizenid, metadata)
@@ -57,101 +37,6 @@ function MZPlayerRepository.updatePhone(citizenid, phone)
     phone or '',
     citizenid
   })
-end
-
-function MZPlayerRepository.ensureAccount(citizenid)
-  MySQL.insert.await([[
-    INSERT INTO mz_player_accounts (citizenid, wallet, bank, dirty)
-    VALUES (?, ?, ?, ?)
-    ON DUPLICATE KEY UPDATE citizenid = citizenid
-  ]], {
-    citizenid,
-    Config.StarterMoney.wallet,
-    Config.StarterMoney.bank,
-    Config.StarterMoney.dirty
-  })
-end
-
-function MZPlayerRepository.getAccount(citizenid)
-  return MySQL.single.await('SELECT * FROM mz_player_accounts WHERE citizenid = ? LIMIT 1', { citizenid })
-end
-
-
-function MZPlayerRepository.createSession(data)
-  local sessionId = MySQL.insert.await([[
-    INSERT INTO mz_player_sessions (
-      citizenid, license, source, disconnect_reason, is_active
-    ) VALUES (?, ?, ?, ?, 1)
-  ]], {
-    data.citizenid,
-    data.license,
-    data.source or 0,
-    data.disconnectReason or ''
-  })
-
-  return sessionId and MZPlayerRepository.getSessionById(sessionId) or nil
-end
-
-function MZPlayerRepository.getSessionById(sessionId)
-  return MySQL.single.await('SELECT * FROM mz_player_sessions WHERE id = ? LIMIT 1', { sessionId })
-end
-
-function MZPlayerRepository.getActiveSession(citizenid)
-  return MySQL.single.await([[SELECT * FROM mz_player_sessions WHERE citizenid = ? AND is_active = 1 ORDER BY id DESC LIMIT 1]], { citizenid })
-end
-
-function MZPlayerRepository.closeActiveSessionsByCitizenId(citizenid, reason)
-  citizenid = tostring(citizenid or '')
-  if citizenid == '' then return 0 end
-
-  return MySQL.update.await([[
-    UPDATE mz_player_sessions
-    SET
-      dropped_at = CURRENT_TIMESTAMP,
-      last_seen_at = CURRENT_TIMESTAMP,
-      disconnect_reason = ?,
-      session_seconds = TIMESTAMPDIFF(SECOND, joined_at, CURRENT_TIMESTAMP),
-      is_active = 0
-    WHERE citizenid = ? AND is_active = 1
-  ]], {
-    reason or 'replaced_by_new_load',
-    citizenid
-  }) or 0
-end
-
-function MZPlayerRepository.touchSession(sessionId, source)
-  if not sessionId then return false end
-
-  MySQL.update.await([[
-    UPDATE mz_player_sessions
-    SET source = ?, last_seen_at = CURRENT_TIMESTAMP
-    WHERE id = ?
-  ]], {
-    source or 0,
-    sessionId
-  })
-
-  return true
-end
-
-function MZPlayerRepository.closeSession(sessionId, reason)
-  if not sessionId then return false end
-
-  MySQL.update.await([[
-    UPDATE mz_player_sessions
-    SET
-      dropped_at = CURRENT_TIMESTAMP,
-      last_seen_at = CURRENT_TIMESTAMP,
-      disconnect_reason = ?,
-      session_seconds = TIMESTAMPDIFF(SECOND, joined_at, CURRENT_TIMESTAMP),
-      is_active = 0
-    WHERE id = ?
-  ]], {
-    reason or '',
-    sessionId
-  })
-
-  return true
 end
 
 function MZPlayerRepository.updatePosition(citizenid, coords)

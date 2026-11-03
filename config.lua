@@ -10,45 +10,18 @@ Config.DefaultSpawn = {
   z = 20.17,
   heading = 329.0
 }
-
-Config.StarterMoney = {
-  wallet = 500,
-  bank = 5000,
-  dirty = 0
-}
-
--- Fase 3 / P3-D: escrita e dispatcher permanecem desligados por padrão.
--- O dispatcher processa somente a outbox; nunca altera saldo.
-Config.FinancialOutbox = {
-  enabled = false,
-  writesEnabled = false,
-  schemaVersion = 1,
-  dispatcher = {
-    enabled = false,
-    pollMs = 1000,
-    batchSize = 25,
-    leaseSeconds = 30,
-    maxAttempts = 10,
-    backoffBaseSeconds = 5,
-    backoffMaxSeconds = 900,
-    jitterPercent = 20
-  },
-  administration = {
-    enabled = false,
-    ace = 'mz_core.financial_outbox.manage',
-    command = 'mz_core_outbox',
-    allowApply = false,
-    applyEnableConvar = 'mz_core_p3e_reprocess_apply',
-    previewTtlSeconds = 120,
-    confirmationPhrase = 'REPROCESS_DEAD_LETTER',
-    pendingSlaSeconds = 300,
-    processedRetentionDays = 90,
-    reportLimit = 50
+Config.Multichar = {
+  debugLifecycle = true,
+  defaultSlots = 3,
+  maximumSlots = 10,
+  requestWindowMs = 10000,
+  maximumRequestsPerWindow = 12,
+  allowHotSwitch = false,
+  mutationCallers = {
+    mz_multichar = true,
+    mz_creator = true
   }
 }
-
-Config.Player = {}
-
 -- Autoridade server-side dos estados persistidos do jogador. As listas vazias
 -- negam writers externos por padrao; chamadas internas do mz_core usam um
 -- contexto privado que nao e exposto por exports.
@@ -155,136 +128,4 @@ Config.PlayerStates = {
     'craft.use',
     'trade.use'
   }
-}
-
--- Contrato legado preservado, derivado da configuracao canonica acima.
-Config.Player.defaultMetadata = {
-  hunger = Config.PlayerStates.status.hunger.default,
-  thirst = Config.PlayerStates.status.thirst.default,
-  stress = Config.PlayerStates.status.stress.default,
-  health = Config.PlayerStates.status.health.default,
-  armor = Config.PlayerStates.status.armor.default,
-  deathState = Config.PlayerStates.death.default,
-  isdead = false,
-  inlaststand = false
-}
-
-Config.Inventory = {
-  defaultSlots = 40,
-  defaultWeight = 50000,
-  playerTransferDistance = 3.0,
-  hotbarSlots = 5,
-  hotbarKeys = {
-    [1] = '1',
-    [2] = '2',
-    [3] = '3',
-    [4] = '4',
-    [5] = '5'
-  },
-
-  medicalReservation = {
-    writers = { 'mz_medical' },
-    readers = { 'mz_medical', 'mz_admin' },
-    terminalRetentionSeconds = 900,
-    maximumTtlSeconds = 60
-  },
-
-  personalStash = {
-    slots = 40,
-    weight = 75000
-  },
-
-  orgStash = {
-    slots = 80,
-    weight = 200000
-  },
-
-    trunk = {
-    slots = 30,
-    weight = 120000
-  },
-  
-    glovebox = {
-    slots = 8,
-    weight = 15000
-  }
-
-
-}
-
-Config.Weapons = {
-  blockWeaponWheel = true,
-  enforceInventoryWeapons = true,
-  autoReloadFromInventory = true,
-  ammoSaveIntervalMs = 5000,
-  ammoUpdateMinIntervalMs = 750,
-  unauthorizedLogIntervalMs = 5000,
-  ammoTypes = {
-    ammo_pistol = {
-      label = 'Munição de Pistola',
-      reloadAmount = 1,
-      maxAmmo = 120
-    },
-    ammo_smg = {
-      label = 'Munição de SMG',
-      reloadAmount = 1,
-      maxAmmo = 180
-    },
-    ammo_shotgun = {
-      label = 'Cartucho Calibre 12',
-      reloadAmount = 1,
-      maxAmmo = 48
-    },
-    ammo_rifle = {
-      label = 'Munição de Fuzil',
-      reloadAmount = 1,
-      maxAmmo = 210
-    },
-    ammo_sniper = {
-      label = 'Munição de Sniper',
-      reloadAmount = 1,
-      maxAmmo = 40
-    },
-    ammo_heavy = {
-      label = 'Munição Pesada',
-      reloadAmount = 1,
-      maxAmmo = 100
-    },
-    ammo_rpg = {
-      label = 'Foguete RPG',
-      reloadAmount = 1,
-      maxAmmo = 5
-    }
-  }
-}
-
-Config.SeedOrgTypes = {
-  { code = 'job', name = 'Job' },
-  { code = 'gang', name = 'Gang' },
-  { code = 'staff', name = 'Staff' },
-  { code = 'vip', name = 'VIP' },
-  { code = 'business', name = 'Business' },
-  { code = 'government', name = 'Government' },
-  { code = 'event', name = 'Event' }
-}
-
-Config.Payroll = {
-  enabled = true,
-  intervalMinutes = 30,
-  requireDuty = true
-}
-
-Config.VehicleWorld = {
-  restoreOnPlayerJoin = false,
-  enableProximityRespawn = false,
-  autoReturnMissingOutsideVehicle = false,
-  blockDuplicateOutsideSpawn = true,
-  proximityRadius = 200.0,
-  checkIntervalMs = 15000,
-  maxRespawnsPerTick = 3,
-  respawnDestroyed = true,
-  debug = false,
-  snapshotRateLimitMs = 5000,
-  snapshotMaxDistance = 250.0,
-  restoreDebounceMs = 5000
 }

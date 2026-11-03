@@ -19,31 +19,12 @@ local ERROR_MESSAGES = {
   persistence_pending = 'State changed in memory but persistence is pending.',
   feature_disabled = 'Player-state service is disabled.',
   internal_error = 'Player-state operation failed unexpectedly.',
-  protected_metadata = 'Sensitive metadata must be changed through a specific player-state API.',
   invalid_action = 'Action is not registered.',
   invalid_patch = 'Status patch has an invalid schema.',
   invalid_state = 'Player state does not allow this operation.',
   invalid_deadline = 'Death-state deadline is invalid.',
   revision_mismatch = 'Player-state revision no longer matches the operation.',
   no_benefit = 'The operation would not change player state.'
-}
-
-local PROTECTED_METADATA = {
-  hunger = 'SetStatus',
-  thirst = 'SetStatus',
-  stress = 'SetStatus',
-  health = 'SetStatus',
-  armor = 'SetStatus',
-  deathState = 'MarkPlayerDowned/MarkPlayerDead/RevivePlayer/BeginPlayerRespawn/CompletePlayerRespawn',
-  isdead = 'death-state APIs',
-  inlaststand = 'death-state APIs',
-  downedAt = 'death-state APIs',
-  downedExpiresAt = 'death-state APIs',
-  deadAt = 'death-state APIs',
-  respawnAvailableAt = 'death-state APIs',
-  reviveAt = 'death-state APIs',
-  respawnStartedAt = 'death-state APIs',
-  respawnCompletedAt = 'death-state APIs'
 }
 
 local TRANSITIONS = {
@@ -235,8 +216,9 @@ local function getPlayerAndRuntime(source)
   local player = MZPlayerService and MZPlayerService.getPlayer and MZPlayerService.getPlayer(source) or nil
   if not player then return nil, nil, 'player_not_found' end
   if not player.state or player.state.loaded ~= true then return player, nil, 'player_not_loaded' end
+  local playerSessionId = player.session and tonumber(player.session.id or player.session.sessionId) or nil
   local runtime = RuntimeStates[source]
-  if not runtime or runtime.citizenid ~= player.citizenid or runtime.sessionId ~= (player.session and player.session.id or nil) then
+  if not runtime or runtime.citizenid ~= player.citizenid or runtime.sessionId ~= playerSessionId then
     return player, nil, 'player_not_loaded'
   end
   return player, runtime
@@ -447,14 +429,6 @@ local function syncPresentation(source, reason, options)
     return
   end
 
-  if MZPlayerHUDService and MZPlayerHUDService.syncToClient then
-    local ok, err = pcall(MZPlayerHUDService.syncToClient, source)
-    if not ok then
-      print(('[mz_core][player_state][presentation_sync_failed] source=%s error=%s'):format(
-        tostring(source), tostring(err)
-      ))
-    end
-  end
 end
 
 local function flushLocked(source, player, runtime, reason)
@@ -513,11 +487,12 @@ local function criticalFlushLocked(source, player, runtime, reason)
 end
 
 function MZPlayerStateService.initializePlayer(source, corrections)
+  source = tonumber(source)
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, errorResult('player_not_found') end
   RuntimeStates[source] = {
     citizenid = player.citizenid,
-    sessionId = player.session and player.session.id or nil,
+    sessionId = player.session and tonumber(player.session.id or player.session.sessionId) or nil,
     syncSessionToken = opaqueToken('session', source),
     observationToken = opaqueToken('observation', source),
     revision = 0,
@@ -818,9 +793,9 @@ local function applyDeathMetadata(metadata, nextState, operation, context)
   local timestamp = os.time()
   context = type(context) == 'table' and context or {}
   metadata.deathState = nextState
-  local legacy = MZPlayerStateNormalizer.getLegacyFlags(nextState)
-  metadata.isdead = legacy.isdead
-  metadata.inlaststand = legacy.inlaststand
+  local flags = MZPlayerStateNormalizer.getDerivedDeathFlags(nextState)
+  metadata.isdead = flags.isdead
+  metadata.inlaststand = flags.inlaststand
   local changedFields = { 'deathState', 'isdead', 'inlaststand' }
   if operation == 'mark_downed' then
     metadata.downedAt = timestamp
@@ -1229,39 +1204,6 @@ function MZPlayerStateService.flush(source, reason, force, context)
   end)
 end
 
-function MZPlayerStateService.setGenericMetadata(source, key, value, context)
-  if PROTECTED_METADATA[key] then
-    safeLog('protected_metadata_blocked', source, {
-      operation = 'set_metadata', statusName = key, reason = context and context.reason,
-      invokingResource = context and context.invokingResource, actorSource = context and context.actorSource,
-      result = 'rejected', error = 'protected_metadata'
-    })
-    safeSuspiciousActivity(source, {
-      operation = 'set_metadata', statusName = key, reason = context and context.reason,
-      invokingResource = context and context.invokingResource, actorSource = context and context.actorSource,
-      result = 'rejected', error = 'protected_metadata', attemptedValue = value
-    })
-    return false, errorResult('protected_metadata', { key = key, use = PROTECTED_METADATA[key] })
-  end
-  if type(key) ~= 'string' or key == '' then return false, errorResult('invalid_value', { field = 'key' }) end
-  local player, runtime, playerErr = getPlayerAndRuntime(source)
-  if not player or not runtime then return false, errorResult(playerErr) end
-  if runtime.unloading then return unloadingError(source, 'set_metadata', context, runtime) end
-  return withLock(source, 'set_metadata', false, function(lockedRuntime)
-    if player.metadata[key] == value then
-      return true, successResult(lockedRuntime, buildSnapshot(player, lockedRuntime), false, 'unchanged')
-    end
-    player.metadata[key] = clone(value)
-    markDirty(lockedRuntime, key)
-    local persisted, persistResult = flushLocked(source, player, lockedRuntime, 'legacy_metadata_set')
-    if not persisted then return false, errorResult('persistence_pending', { persistenceError = persistResult }) end
-    if MZPlayerHUDService and MZPlayerHUDService.syncToClient then
-      MZPlayerHUDService.syncToClient(source)
-    end
-    return true, successResult(lockedRuntime, buildSnapshot(player, lockedRuntime), true)
-  end)
-end
-
 function MZPlayerStateService.getSyncIdentity(source)
   local player, runtime, playerErr = getPlayerAndRuntime(source)
   if not player or not runtime then return false, errorResult(playerErr) end
@@ -1447,10 +1389,6 @@ function MZPlayerStateService.internalContext(reason, extra)
   context.internal = true
   context.invokingResource = GetCurrentResourceName and GetCurrentResourceName() or 'mz_core'
   return context
-end
-
-function MZPlayerStateService.isProtectedMetadataKey(key)
-  return PROTECTED_METADATA[key] ~= nil, PROTECTED_METADATA[key]
 end
 
 if rawget(_G, 'MZ_PLAYER_STATE_TESTING') == true then

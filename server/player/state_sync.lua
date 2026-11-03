@@ -194,14 +194,6 @@ function MZPlayerStateSyncService.sync(source, reason, options)
 
   TriggerClientEvent(SYNC_EVENT, source, payload)
   if MZPlayerStateObservability then MZPlayerStateObservability.increment('state_syncs_total', 1) end
-  if MZPlayerHUDService and MZPlayerHUDService.syncToClient then
-    local hudOk, hudErr = pcall(MZPlayerHUDService.syncToClient, source)
-    if not hudOk then
-      print(('[mz_core][player_state][hud_adapter_failed] source=%s error=%s'):format(
-        tostring(source), tostring(hudErr)
-      ))
-    end
-  end
   return { ok = true, revision = payload.revision, payload = clone(payload), stateBags = bagsOk }
 end
 

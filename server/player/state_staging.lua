@@ -155,31 +155,6 @@ RegisterCommand('mz_state_metrics', function(source)
   reply(source, encode(MZPlayerStateObservability and MZPlayerStateObservability.snapshot() or { error = 'unavailable' }))
 end, false)
 
-RegisterCommand('mz_medical_diag', function(source, args)
-  if not authorizeCommand(source, 'mz_medical_diag') then return end
-  local target = targetFrom(args)
-  if not target then return reply(source, 'uso: mz_medical_diag <source>') end
-  if GetResourceState('mz_medical') ~= 'started' then return reply(source, 'mz_medical: unavailable') end
-  local callOk, ok, result = pcall(function() return exports['mz_medical']:GetMedicalState(target) end)
-  reply(source, encode({ ok = callOk and ok == true, result = callOk and result or 'export_failed' }))
-end, false)
-
-RegisterCommand('mz_medical_ops', function(source)
-  if not authorizeCommand(source, 'mz_medical_ops') then return end
-  if GetResourceState('mz_medical') ~= 'started' then return reply(source, 'mz_medical: unavailable') end
-  local callOk, ok, result = pcall(function() return exports['mz_medical']:GetMedicalOperations() end)
-  reply(source, encode({ ok = callOk and ok == true, result = callOk and result or 'export_failed' }))
-end, false)
-
-RegisterCommand('mz_medical_recover', function(source, args)
-  if not authorizeCommand(source, 'mz_medical_recover') then return end
-  local operationId = tostring(type(args) == 'table' and args[1] or '')
-  if operationId == '' or #operationId > 128 then return reply(source, 'uso: mz_medical_recover <operationId>') end
-  if GetResourceState('mz_medical') ~= 'started' then return reply(source, 'mz_medical: unavailable') end
-  local callOk, ok, result = pcall(function() return exports['mz_medical']:RecoverMedicalOperation(operationId) end)
-  reply(source, encode({ ok = callOk and ok == true, result = callOk and result or 'export_failed' }))
-end, false)
-
 AddEventHandler('playerDropped', function()
   StagingWindows[tonumber(source)] = nil
 end)

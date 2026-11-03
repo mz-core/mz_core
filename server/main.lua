@@ -1,50 +1,18 @@
 lib.callback.register('mz_core:server:getPlayerData', function(source)
-  local player = MZPlayerService.getPlayer(source)
-  if not player then
-    player = MZPlayerService.loadPlayer(source)
-  end
-
-  if player then
-    MZPlayerService.touchPlayer(source)
-    MZOrgService.loadPlayerOrgs(source)
-
-    CreateThread(function()
-      Wait(5000)
-      local cfg = Config and Config.VehicleWorld or {}
-      if cfg.restoreOnPlayerJoin == true and GetPlayerName(source) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
-        MZVehicleService.restoreWorldVehiclesForPlayer(source, 'get_player_data')
-      elseif cfg.debug == true then
-        print(('[mz_vehicle_world] vehicle_restore_auto_disabled reason=get_player_data source=%s'):format(tostring(source)))
-      end
-    end)
-  end
-
-  return player
+  if not MZPlayerService.isPlayerLoaded(source) then return nil end
+  MZPlayerService.touchPlayer(source)
+  return MZPlayerService.getPlayerSnapshot(source)
 end)
 
 lib.callback.register('mz_core:server:getPlayerSession', function(source)
   MZPlayerService.touchPlayer(source)
-  return MZPlayerService.getPlayerSession(source)
-end)
-
-lib.callback.register('mz_core:server:getHUDState', function(source)
-  MZPlayerService.touchPlayer(source)
-  return MZPlayerHUDService.getStateForSource(source)
+  return MZIdentityService.getSessionSnapshot(source)
 end)
 
 lib.callback.register('mz_core:server:getSpawnData', function(source)
   local player = MZPlayerService.getPlayer(source)
-  if not player then
-    player = MZPlayerService.loadPlayer(source)
-  end
-
-  if not player then return nil end
-
-  local appearance = type(player.metadata) == 'table' and player.metadata.appearance or nil
-  local model = type(appearance) == 'table' and tostring(appearance.model or '') or ''
-  if model ~= 'mp_m_freemode_01' and model ~= 'mp_f_freemode_01' then
-    model = 'mp_m_freemode_01'
-  end
+  if not player or not MZPlayerService.isPlayerLoaded(source) then return nil end
+  local model = 'mp_m_freemode_01'
 
   local lastPosition = MZPlayerService.getLastPosition(source)
   local spawnData
@@ -112,9 +80,7 @@ exports('SpawnPlayerForMedical', function(source, request)
   end
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, 'player_not_loaded' end
-  local appearance = type(player.metadata) == 'table' and player.metadata.appearance or nil
-  local model = type(appearance) == 'table' and tostring(appearance.model or '') or ''
-  if model ~= 'mp_m_freemode_01' and model ~= 'mp_f_freemode_01' then model = 'mp_m_freemode_01' end
+  local model = 'mp_m_freemode_01'
 
   if GetResourceState('mz_banguard') == 'started' then
     pcall(function()

@@ -73,110 +73,13 @@ local function logIdentityResolve(source, message)
   print(('[mz_core][ResolvePlayerIdentity][src:%s] %s'):format(tostring(source), tostring(message or '')))
 end
 
-local function buildIdentityFromRow(source, row, loadedFrom)
-  if type(row) ~= 'table' or tostring(row.citizenid or '') == '' then
-    return nil
-  end
-
-  return {
-    ok = true,
-    source = tonumber(source),
-    license = tostring(row.license or ''),
-    citizenid = tostring(row.citizenid or ''),
-    firstname = tostring(row.firstname or ''),
-    lastname = tostring(row.lastname or ''),
-    phone = tostring(row.phone or ''),
-    loadedFrom = loadedFrom
-  }
-end
-
-local function buildIdentityFromPlayer(source, player, loadedFrom)
-  if type(player) ~= 'table' or tostring(player.citizenid or '') == '' then
-    return nil
-  end
-
-  local charinfo = type(player.charinfo) == 'table' and player.charinfo or {}
-
-  return {
-    ok = true,
-    source = tonumber(source),
-    license = tostring(player.license or ''),
-    citizenid = tostring(player.citizenid or ''),
-    firstname = tostring(charinfo.firstname or player.firstname or ''),
-    lastname = tostring(charinfo.lastname or player.lastname or ''),
-    phone = tostring(charinfo.phone or player.phone or ''),
-    loadedFrom = loadedFrom
-  }
-end
-
 local function resolvePlayerIdentityInternal(source)
-  logIdentityResolve(source, ('source=%s type=%s'):format(tostring(source), type(source)))
-  source = tonumber(source)
-  logIdentityResolve(source, 'start')
-  logIdentityResolve(source, ('start identifiers=%s'):format(summarizeIdentifiers(source)))
-
-  if not source or source <= 0 then
-    logIdentityResolve(source, 'result error=invalid_source')
-    return { ok = false, error = 'invalid_source' }
-  end
-
-  local player = MZPlayerService.getPlayer(source)
-  local identity = buildIdentityFromPlayer(source, player, 'cache')
-  if identity then
-    logIdentityResolve(source, ('result ok source=cache citizenid=%s phone=%s'):format(maskValue(identity.citizenid), identity.phone ~= '' and 'set' or 'empty'))
-    return identity
-  end
-
-  local session = MZPlayerService.getPlayerSession(source)
-  logIdentityResolve(source, ('cache=nil session=%s'):format(type(session)))
-  if type(session) == 'table' and tostring(session.citizenid or '') ~= '' then
-    local ok, row = pcall(function()
-      return MZPlayerRepository.getByCitizenId(session.citizenid)
-    end)
-
-    if not ok then
-      logIdentityResolve(source, ('result error=database_error stage=session detail=%s'):format(tostring(row)))
-      return { ok = false, error = 'database_error', detail = tostring(row) }
-    end
-
-    identity = buildIdentityFromRow(source, row, 'session')
-    if identity then
-      logIdentityResolve(source, ('result ok source=session citizenid=%s phone=%s'):format(maskValue(identity.citizenid), identity.phone ~= '' and 'set' or 'empty'))
-      return identity
-    end
-  end
-
-  local license = getLicenseForSource(source)
-  if not license then
-    logIdentityResolve(source, 'result error=missing_license')
-    return { ok = false, error = 'missing_license' }
-  end
-
-  logIdentityResolve(source, ('license=%s'):format(maskValue(license)))
-  logIdentityResolve(source, ('query mz_players by license=%s'):format(maskValue(license)))
-
-  local ok, row = pcall(function()
-    return MySQL.single.await([[
-      SELECT id, license, citizenid, firstname, lastname, phone
-      FROM mz_players
-      WHERE license = ?
-      LIMIT 1
-    ]], { license })
-  end)
-
-  if not ok then
-    logIdentityResolve(source, ('result error=database_error detail=%s'):format(tostring(row)))
-    return { ok = false, error = 'database_error', detail = tostring(row) }
-  end
-
-  identity = buildIdentityFromRow(source, row, 'database')
-  if identity then
-    logIdentityResolve(source, ('result ok source=database citizenid=%s phone=%s'):format(maskValue(identity.citizenid), identity.phone ~= '' and 'set' or 'empty'))
-    return identity
-  end
-
-  logIdentityResolve(source, 'result error=player_not_found')
-  return { ok = false, error = 'player_not_found' }
+  local identity = MZIdentityService.resolvePlayerIdentity(source)
+  logIdentityResolve(source, ('result ok=%s error=%s account=%s character=%s'):format(
+    tostring(identity and identity.ok), tostring(identity and identity.error),
+    tostring(identity and identity.accountId), tostring(identity and identity.characterId)
+  ))
+  return identity
 end
 
 exports('ResolvePlayerIdentity', function(source)
@@ -225,6 +128,7 @@ RegisterCommand('mzcore_identity_debug', function(commandSource, args)
 end, false)
 
 exports('SetPlayerPhoneByCitizenId', function(citizenid, phone)
+  if GetInvokingResource() ~= 'mz_phone' then return false, 'not_authorized' end
   citizenid = tostring(citizenid or '')
   phone = tostring(phone or '')
 
@@ -249,84 +153,135 @@ exports('SetPlayerPhoneByCitizenId', function(citizenid, phone)
   return true
 end)
 
-exports('EnsurePlayerLoaded', function(source)
-  source = tonumber(source)
-  if not source or source <= 0 then
-    return nil, 'invalid_source'
-  end
-
-  local player = MZPlayerService.getPlayer(source)
-  if player then
-    MZPlayerService.touchPlayer(source)
-    return player, 'already_loaded'
-  end
-
-  local loadErr
-  player, loadErr = MZPlayerService.loadPlayer(source)
-  if not player then
-    return nil, loadErr or 'load_failed'
-  end
-
-  if MZOrgService and MZOrgService.loadPlayerOrgs then
-    local orgOk, orgErr = pcall(function()
-      MZOrgService.loadPlayerOrgs(source)
-    end)
-
-    if not orgOk then
-      print(('[mz_core] EnsurePlayerLoaded org load failed source=%s error=%s'):format(tostring(source), tostring(orgErr)))
-    end
-  end
-
-  local identityOk, syncIdentity = MZPlayerStateService.getSyncIdentity(source)
-  TriggerClientEvent(
-    'mz_core:client:playerLoaded',
-    source,
-    player,
-    identityOk and syncIdentity.sessionToken or nil
-  )
-
-  if MZPlayerStateSyncService and MZPlayerStateSyncService.sync then
-    MZPlayerStateSyncService.sync(source, 'ensure_player_loaded', {
-      forcePhysicalApply = true,
-      sessionReset = true
-    })
-  end
-
-  return player, 'loaded'
-end)
-
 exports('GetPlayerByCitizenIdSnapshot', function(citizenid)
   return MZPlayerService.getPlayerByCitizenIdSnapshot(citizenid)
+end)
+
+exports('GetCharacterByCitizenId', function(citizenid)
+  citizenid = tostring(citizenid or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  if citizenid == '' then return nil end
+  local row = MZPlayerRepository.getByCitizenId(citizenid)
+  if type(row) ~= 'table' then return nil end
+  return {
+    id = tonumber(row.id),
+    accountId = tonumber(row.account_id),
+    citizenid = tostring(row.citizenid or ''),
+    firstname = tostring(row.firstname or ''),
+    lastname = tostring(row.lastname or ''),
+    phone = tostring(row.phone or ''),
+    characterStatus = tostring(row.character_status or 'active')
+  }
+end)
+
+exports('SearchCharacters', function(search, page, pageSize)
+  search = tostring(search or ''):gsub('%c', ' '):gsub('%s+', ' '):gsub('^%s+', ''):gsub('%s+$', ''):sub(1, 64)
+  if #search < 2 then
+    return { items = {}, total = 0, page = 1, pageSize = 25, hasMore = false }
+  end
+  page = math.max(1, math.floor(tonumber(page) or 1))
+  pageSize = math.max(1, math.min(50, math.floor(tonumber(pageSize) or 25)))
+  local rows, total = MZIdentityRepository.searchCharacters(search, pageSize, (page - 1) * pageSize)
+  local items = {}
+  for _, row in ipairs(rows or {}) do
+    items[#items + 1] = {
+      characterId = tonumber(row.id),
+      accountId = tonumber(row.account_id),
+      citizenid = tostring(row.citizenid or ''),
+      firstname = tostring(row.firstname or ''),
+      lastname = tostring(row.lastname or ''),
+      characterStatus = tostring(row.character_status or 'active')
+    }
+  end
+  total = math.max(0, tonumber(total) or 0)
+  return {
+    items = items,
+    total = total,
+    page = page,
+    pageSize = pageSize,
+    hasMore = page * pageSize < total
+  }
 end)
 
 exports('GetSourceByCitizenId', function(citizenid)
   return MZPlayerService.getSourceByCitizenId(citizenid)
 end)
 
-exports('SetMetadataValue', function(source, key, value)
-  return MZPlayerService.setMetadataValue(source, key, value, {
-    internal = false,
-    invokingResource = GetInvokingResource(),
-    reason = 'legacy_metadata_export'
-  })
-end)
-
-exports('GetMetadataValue', function(source, key)
-  return MZPlayerService.getMetadataValue(source, key)
-end)
-
 exports('SetCharinfo', function(source, charinfo)
+  if GetInvokingResource() ~= 'mz_creator' then return false, 'not_authorized' end
   return MZPlayerService.setCharinfo(source, charinfo)
 end)
 
 exports('GetPlayerSession', function(source)
-  return MZPlayerService.getPlayerSession(source)
+  return MZIdentityService.getSessionSnapshot(source)
 end)
 
 exports('IsPlayerLoaded', function(source)
   return MZPlayerService.isPlayerLoaded(source)
 end)
 
-exports('GetHUDState', function(source)
-  return MZPlayerHUDService.getStateForSource(source)
+exports('GetAccountId', function(source)
+  return MZIdentityService.getAccountId(source)
+end)
+
+exports('GetActiveCharacterId', function(source)
+  return MZIdentityService.getActiveCharacterId(source)
+end)
+
+exports('GetActiveCharacter', function(source)
+  local characterId = MZIdentityService.getActiveCharacterId(source)
+  return characterId and MZIdentityService.getCharacterSnapshot(characterId) or nil
+end)
+
+exports('GetCharacterSnapshot', function(characterId)
+  return MZIdentityService.getCharacterSnapshot(characterId)
+end)
+
+exports('GetCharactersForAccount', function(accountId)
+  return MZIdentityService.getCharactersForAccount(accountId)
+end)
+
+exports('IsCharacterActive', function(source)
+  local session = MZIdentityService.getSession(source)
+  return session ~= nil and session.isActive == true
+    and session.lifecycle == 'CHARACTER_ACTIVE'
+    and session.activeCharacterId ~= nil
+end)
+
+exports('GetCharacterRosterForSource', function(source)
+  return MZIdentityService.getRosterForSource(source)
+end)
+
+exports('GetPendingCharacterSnapshot', function(source)
+  return MZIdentityService.getPendingCharacterSnapshot(source)
+end)
+
+local function mutationCallerAllowed(expected)
+  local caller = GetInvokingResource()
+  if expected then return caller == expected end
+  return caller and (Config.Multichar or {}).mutationCallers
+    and Config.Multichar.mutationCallers[caller] == true
+end
+
+exports('CreateCharacterDraft', function(source, requestKey)
+  if not mutationCallerAllowed('mz_multichar') then return nil, 'not_authorized' end
+  return MZIdentityService.createCharacterDraft(source, requestKey)
+end)
+
+exports('ActivateCharacter', function(source, characterId, requestKey)
+  if not mutationCallerAllowed('mz_multichar') then return nil, 'not_authorized' end
+  return MZIdentityService.activateCharacter(source, characterId, requestKey)
+end)
+
+exports('FinalizePendingCharacter', function(source, charinfo, requestKey)
+  if not mutationCallerAllowed('mz_creator') then return nil, 'not_authorized' end
+  return MZIdentityService.finalizePendingCharacter(source, charinfo, requestKey)
+end)
+
+exports('CancelPendingCharacter', function(source)
+  if not mutationCallerAllowed() then return false, 'not_authorized' end
+  return MZIdentityService.cancelPendingCharacter(source)
+end)
+
+exports('ReturnToCharacterSelection', function()
+  return false, 'hot_switch_not_safe'
 end)

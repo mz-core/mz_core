@@ -33,6 +33,15 @@ local function actorPlayer(source)
   return player and player.citizenid and player or nil
 end
 
+local function runtimeIdentity(source)
+  local identity = MZIdentityService and MZIdentityService.resolvePlayerIdentity(source) or nil
+  if type(identity) ~= 'table' or identity.ok ~= true then return nil end
+  identity.accountId = tonumber(identity.accountId)
+  identity.characterId = tonumber(identity.characterId)
+  if not identity.accountId or not identity.characterId then return nil end
+  return identity
+end
+
 local function permissionList(roleId)
   local list, set = {}, {}
   for _, row in ipairs(MZStaffRepository.getRolePermissions(roleId) or {}) do
@@ -46,20 +55,21 @@ local function permissionList(roleId)
   return list, set
 end
 
-local function loadCitizenContext(citizenid)
-  citizenid = trim(citizenid, 32)
-  if not citizenid then return nil end
-  if ContextCache[citizenid] ~= nil then return ContextCache[citizenid] or nil end
+local function loadAccountContext(accountId)
+  accountId = tonumber(accountId)
+  if not accountId or accountId <= 0 then return nil end
+  if ContextCache[accountId] ~= nil then return ContextCache[accountId] or nil end
 
-  local assignment = MZStaffRepository.getAssignment(citizenid)
+  local assignment = MZStaffRepository.getAssignment(accountId)
   if not assignment or not asBool(assignment.active) or not asBool(assignment.role_active) then
-    ContextCache[citizenid] = false
+    ContextCache[accountId] = false
     return nil
   end
 
   local permissions, permissionSet = permissionList(assignment.role_id)
   local context = {
-    citizenid = citizenid,
+    accountId = accountId,
+    contextCharacterId = tonumber(assignment.context_character_id),
     assignmentId = tonumber(assignment.id),
     role = {
       id = tonumber(assignment.role_id),
@@ -71,17 +81,18 @@ local function loadCitizenContext(citizenid)
     permissions = permissions,
     permissionSet = permissionSet
   }
-  ContextCache[citizenid] = context
+  ContextCache[accountId] = context
   return context
 end
 
-local function invalidate(citizenid)
-  if citizenid then ContextCache[tostring(citizenid)] = nil else ContextCache = {} end
+local function invalidate(accountId)
+  if accountId then ContextCache[tonumber(accountId)] = nil else ContextCache = {} end
 end
 
 local function actorContext(source)
   local player = actorPlayer(source)
-  if not player then return nil, 'player_not_loaded' end
+  local identity = runtimeIdentity(source)
+  if not player or not identity then return nil, 'player_not_loaded' end
   if owner(source) then
     local permissions = {}
     for _, definition in ipairs(MZStaffPermissionCatalog or {}) do
@@ -89,6 +100,8 @@ local function actorContext(source)
     end
     return {
       owner = true,
+      accountId = identity.accountId,
+      characterId = identity.characterId,
       citizenid = tostring(player.citizenid),
       name = GetPlayerName(source),
       level = OWNER_LEVEL,
@@ -97,14 +110,14 @@ local function actorContext(source)
     }
   end
 
-  local context = loadCitizenContext(player.citizenid)
-  local allowed = MZOrgService
-    and MZOrgService.hasGlobalPermission
-    and MZOrgService.hasGlobalPermission(source, 'staff.roles.manage') == true
+  local context = loadAccountContext(identity.accountId)
+  local allowed = MZStaffService.HasGlobalPermission(source, 'staff.roles.manage') == true
   if not allowed then return nil, 'permission_denied' end
 
   return {
     owner = false,
+    accountId = identity.accountId,
+    characterId = identity.characterId,
     citizenid = tostring(player.citizenid),
     name = GetPlayerName(source),
     level = context and tonumber(context.role.level) or 0,
@@ -116,9 +129,12 @@ end
 local function audit(source, action, target, before, after, reason)
   if not MZLogService or type(MZLogService.createDetailed) ~= 'function' then return end
   local actor = actorPlayer(source)
+  local identity = runtimeIdentity(source)
   pcall(MZLogService.createDetailed, 'staff', action, {
     actor = {
       type = 'player', source = source,
+      accountId = identity and identity.accountId,
+      characterId = identity and identity.characterId,
       citizenid = actor and actor.citizenid,
       name = GetPlayerName(source)
     },
@@ -146,10 +162,12 @@ local function manageable(actor, role)
   return actor.owner == true or (tonumber(role.level) or 0) < (tonumber(actor.level) or 0)
 end
 
-local function playerTargetDto(source, player, context, isOwner)
+local function playerTargetDto(source, player, identity, context, isOwner)
   local role = context and context.role or nil
   return {
     source = sourceId(source),
+    accountId = identity and identity.accountId,
+    characterId = identity and identity.characterId,
     citizenid = tostring(player.citizenid),
     name = tostring(GetPlayerName(source) or player.citizenid),
     owner = isOwner == true,
@@ -165,9 +183,20 @@ function MZStaffService.HasPermission(source, permission)
   permission = trim(permission, 128)
   if not permission or not MZStaffPermissionSet[permission] then return false end
   local player = actorPlayer(source)
-  if not player then return false end
-  local context = loadCitizenContext(player.citizenid)
+  local identity = runtimeIdentity(source)
+  if not player or not identity then return false end
+  local context = loadAccountContext(identity.accountId)
   return context ~= nil and context.permissionSet[permission] == true
+end
+
+function MZStaffService.HasGlobalPermission(source, permission)
+  permission = trim(permission, 128)
+  source = sourceId(source)
+  if not source or not permission then return false end
+  if owner(source) then return true end
+  local ace = IsPlayerAceAllowed(source, permission)
+  if ace == true or ace == 1 or tostring(ace):lower() == 'true' then return true end
+  return MZStaffService.HasPermission(source, permission) == true
 end
 
 function MZStaffService.CanActOnPlayer(actorSource, targetSource)
@@ -180,13 +209,17 @@ function MZStaffService.CanActOnPlayer(actorSource, targetSource)
   local target = actorPlayer(targetSource)
   if not target then return false, 'target_not_loaded' end
 
+  local actorIdentity = runtimeIdentity(actorSource)
+  local targetIdentity = runtimeIdentity(targetSource)
+  if not actorIdentity or not targetIdentity then return false, 'identity_unavailable' end
+
   local actorOwner = owner(actorSource)
   local targetOwner = owner(targetSource)
-  local actorContextValue = loadCitizenContext(actor.citizenid)
-  local targetContextValue = loadCitizenContext(target.citizenid)
+  local actorContextValue = loadAccountContext(actorIdentity.accountId)
+  local targetContextValue = loadAccountContext(targetIdentity.accountId)
   local context = {
-    actor = playerTargetDto(actorSource, actor, actorContextValue, actorOwner),
-    target = playerTargetDto(targetSource, target, targetContextValue, targetOwner)
+    actor = playerTargetDto(actorSource, actor, actorIdentity, actorContextValue, actorOwner),
+    target = playerTargetDto(targetSource, target, targetIdentity, targetContextValue, targetOwner)
   }
 
   if actorSource == targetSource then
@@ -225,15 +258,21 @@ end
 
 function MZStaffService.GetContext(source)
   local player = actorPlayer(source)
-  if not player then return nil end
+  local identity = runtimeIdentity(source)
+  if not player or not identity then return nil end
   if owner(source) then
-    return { owner = true, citizenid = player.citizenid, role = { code = 'owner', name = 'Owner', level = OWNER_LEVEL } }
+    return {
+      owner = true, accountId = identity.accountId, characterId = identity.characterId,
+      citizenid = player.citizenid, role = { code = 'owner', name = 'Owner', level = OWNER_LEVEL }
+    }
   end
-  local context = loadCitizenContext(player.citizenid)
+  local context = loadAccountContext(identity.accountId)
   if not context then return nil end
   return {
     owner = false,
-    citizenid = context.citizenid,
+    accountId = identity.accountId,
+    characterId = identity.characterId,
+    citizenid = player.citizenid,
     role = context.role,
     permissions = context.permissions
   }
@@ -251,8 +290,9 @@ function MZStaffService.ListManagement(source)
     if manageable(actor, { level = row.role_level }) then
       local fullName = (tostring(row.firstname or '') .. ' ' .. tostring(row.lastname or '')):gsub('^%s+', ''):gsub('%s+$', '')
       assignments[#assignments + 1] = {
-        citizenid = tostring(row.citizenid),
-        name = fullName ~= '' and fullName or tostring(row.citizenid),
+        accountId = tonumber(row.account_id),
+        contextCharacterId = tonumber(row.context_character_id),
+        name = fullName ~= '' and fullName or ('Conta #%s'):format(tostring(row.account_id)),
         active = asBool(row.active),
         roleCode = tostring(row.role_code),
         roleName = tostring(row.role_name),
@@ -329,7 +369,7 @@ function MZStaffService.SetRolePermissions(source, code, permissions, reason)
   for _, permission in ipairs(type(permissions) == 'table' and permissions or {}) do
     permission = tostring(permission or '')
     if not MZStaffPermissionSet[permission] then return false, 'invalid_permission' end
-    if not actor.owner and not MZOrgService.hasGlobalPermission(source, permission) then
+    if not actor.owner and not MZStaffService.HasGlobalPermission(source, permission) then
       return false, 'permission_above_actor'
     end
     selected[permission] = true
@@ -343,14 +383,14 @@ function MZStaffService.SetRolePermissions(source, code, permissions, reason)
   return true, after
 end
 
-function MZStaffService.Assign(source, targetCitizenId, roleCode, reason)
+function MZStaffService.Assign(source, targetAccountId, roleCode, reason)
   local actor, err = actorContext(source)
   if not actor then return false, err end
-  local target = trim(targetCitizenId, 32)
+  local target = tonumber(targetAccountId)
   reason = trim(reason, 255)
-  if not target or not reason or #reason < 3 then return false, 'invalid_request' end
-  if target == actor.citizenid then return false, 'cannot_manage_self' end
-  if not MZPlayerRepository.getByCitizenId(target) then return false, 'player_not_found' end
+  if not target or target <= 0 or not reason or #reason < 3 then return false, 'invalid_request' end
+  if target == actor.accountId then return false, 'cannot_manage_self' end
+  if not MZIdentityRepository.getAccount(target) then return false, 'account_not_found' end
   local role = MZStaffRepository.getRoleByCode(trim(roleCode, 48))
   if not role or not asBool(role.active) then return false, 'role_not_found' end
   if not manageable(actor, role) then return false, 'target_higher_or_equal' end
@@ -359,28 +399,28 @@ function MZStaffService.Assign(source, targetCitizenId, roleCode, reason)
     return false, 'target_higher_or_equal'
   end
   MZStaffRepository.assign({
-    citizenid = target, role_id = role.id,
-    actor_citizenid = actor.citizenid, reason = reason
+    account_id = target, role_id = role.id,
+    actor_account_id = actor.accountId, actor_character_id = actor.characterId, reason = reason
   })
   invalidate(target)
-  audit(source, 'staff.assignment.set', { type = 'player', id = target, citizenid = target }, current or {}, {
-    citizenid = target, roleCode = role.code, roleName = role.name, roleLevel = role.level
+  audit(source, 'staff.assignment.set', { type = 'account', id = tostring(target), accountId = target }, current or {}, {
+    accountId = target, roleCode = role.code, roleName = role.name, roleLevel = role.level
   }, reason)
-  return true, { citizenid = target, role = roleDto(role), active = true }
+  return true, { accountId = target, role = roleDto(role), active = true }
 end
 
-function MZStaffService.Revoke(source, targetCitizenId, reason)
+function MZStaffService.Revoke(source, targetAccountId, reason)
   local actor, err = actorContext(source)
   if not actor then return false, err end
-  local target = trim(targetCitizenId, 32)
+  local target = tonumber(targetAccountId)
   reason = trim(reason, 255)
-  if not target or not reason or #reason < 3 then return false, 'invalid_request' end
-  if target == actor.citizenid then return false, 'cannot_manage_self' end
+  if not target or target <= 0 or not reason or #reason < 3 then return false, 'invalid_request' end
+  if target == actor.accountId then return false, 'cannot_manage_self' end
   local current = MZStaffRepository.getAssignment(target)
   if not current or not asBool(current.active) then return false, 'assignment_not_found' end
   if not manageable(actor, { level = current.role_level }) then return false, 'target_higher_or_equal' end
-  MZStaffRepository.revoke(target, actor.citizenid, reason)
+  MZStaffRepository.revoke(target, actor.accountId, actor.characterId, reason)
   invalidate(target)
-  audit(source, 'staff.assignment.revoked', { type = 'player', id = target, citizenid = target }, current, { active = false }, reason)
-  return true, { citizenid = target, active = false }
+  audit(source, 'staff.assignment.revoked', { type = 'account', id = tostring(target), accountId = target }, current, { active = false }, reason)
+  return true, { accountId = target, active = false }
 end

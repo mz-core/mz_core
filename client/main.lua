@@ -8,6 +8,11 @@ RegisterNetEvent('mz_core:client:playerLoaded', function(playerData)
   MZClient.PlayerSession = playerData and playerData.session or nil
 end)
 
+RegisterNetEvent('mz_core:client:characterSelectionRequired', function()
+  MZClient.PlayerData = nil
+  MZClient.PlayerSession = nil
+end)
+
 CreateThread(function()
   Wait(2000)
   local data = lib.callback.await('mz_core:server:getPlayerData', false)

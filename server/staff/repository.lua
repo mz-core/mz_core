@@ -25,15 +25,15 @@ function MZStaffRepository.getRolePermissions(roleId)
   ]], { roleId }) or {}
 end
 
-function MZStaffRepository.getAssignment(citizenid)
+function MZStaffRepository.getAssignment(accountId)
   return MySQL.single.await([[
     SELECT a.*, r.code AS role_code, r.name AS role_name, r.level AS role_level,
            r.active AS role_active, r.revision AS role_revision
     FROM mz_staff_assignments a
     INNER JOIN mz_staff_roles r ON r.id = a.role_id
-    WHERE a.citizenid = ?
+    WHERE a.account_id = ?
     LIMIT 1
-  ]], { citizenid })
+  ]], { accountId })
 end
 
 function MZStaffRepository.listAssignments()
@@ -42,8 +42,8 @@ function MZStaffRepository.listAssignments()
            r.active AS role_active, p.firstname, p.lastname
     FROM mz_staff_assignments a
     INNER JOIN mz_staff_roles r ON r.id = a.role_id
-    LEFT JOIN mz_players p ON p.citizenid = a.citizenid
-    ORDER BY a.active DESC, r.level DESC, a.citizenid ASC
+    LEFT JOIN mz_players p ON p.id = a.context_character_id
+    ORDER BY a.active DESC, r.level DESC, a.account_id ASC
   ]]) or {}
 end
 
@@ -110,23 +110,29 @@ end
 function MZStaffRepository.assign(data)
   MySQL.insert.await([[
     INSERT INTO mz_staff_assignments (
-      citizenid, role_id, active, assigned_by_citizenid, reason, assigned_at, revoked_at
-    ) VALUES (?, ?, 1, ?, ?, CURRENT_TIMESTAMP, NULL)
+      account_id, context_character_id, role_id, active,
+      assigned_by_account_id, assigned_by_character_id, reason, assigned_at, revoked_at
+    ) VALUES (?, ?, ?, 1, ?, ?, ?, CURRENT_TIMESTAMP, NULL)
     ON DUPLICATE KEY UPDATE
       role_id = VALUES(role_id),
       active = 1,
-      assigned_by_citizenid = VALUES(assigned_by_citizenid),
+      context_character_id = VALUES(context_character_id),
+      assigned_by_account_id = VALUES(assigned_by_account_id),
+      assigned_by_character_id = VALUES(assigned_by_character_id),
       reason = VALUES(reason),
       assigned_at = CURRENT_TIMESTAMP,
       revoked_at = NULL
-  ]], { data.citizenid, data.role_id, data.actor_citizenid, data.reason })
+  ]], {
+    data.account_id, data.context_character_id, data.role_id,
+    data.actor_account_id, data.actor_character_id, data.reason
+  })
 end
 
-function MZStaffRepository.revoke(citizenid, actorCitizenId, reason)
+function MZStaffRepository.revoke(accountId, actorAccountId, actorCharacterId, reason)
   return MySQL.update.await([[
     UPDATE mz_staff_assignments
-    SET active = 0, assigned_by_citizenid = ?, reason = ?,
+    SET active = 0, assigned_by_account_id = ?, assigned_by_character_id = ?, reason = ?,
         revoked_at = CURRENT_TIMESTAMP
-    WHERE citizenid = ? AND active = 1
-  ]], { actorCitizenId, reason, citizenid })
+    WHERE account_id = ? AND active = 1
+  ]], { actorAccountId, actorCharacterId, reason, accountId })
 end

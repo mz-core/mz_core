@@ -26,19 +26,6 @@ function MZUtils.generateCitizenId(length)
   return result
 end
 
-function MZUtils.tableClone(tbl)
-  if type(tbl) ~= 'table' then return tbl end
-  local out = {}
-  for k, v in pairs(tbl) do
-    out[k] = MZUtils.tableClone(v)
-  end
-  return out
-end
-
-function MZUtils.now()
-  return os.time()
-end
-
 function MZUtils.generateInstanceUid(prefix)
   local chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
   local function part(size)
@@ -52,11 +39,4 @@ function MZUtils.generateInstanceUid(prefix)
 
   local pfx = prefix or 'MZI'
   return ('%s-%s-%s-%s'):format(pfx, part(4), part(4), part(6))
-end
-
-function MZUtils.generateItemSerial(itemName)
-  local prefix = (itemName or 'ITEM'):upper():gsub('[^A-Z0-9]', '')
-  prefix = prefix:sub(1, 6)
-  if prefix == '' then prefix = 'ITEM' end
-  return ('%s-%s'):format(prefix, MZUtils.generateCitizenId(8))
 end

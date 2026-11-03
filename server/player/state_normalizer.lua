@@ -7,7 +7,7 @@ local VALID_DEATH_STATES = {
   respawning = true
 }
 
-local DEATH_LEGACY = {
+local DEATH_FLAGS = {
   alive = { isdead = false, inlaststand = false },
   downed = { isdead = false, inlaststand = true },
   dead = { isdead = true, inlaststand = false },
@@ -41,17 +41,6 @@ local function finiteNumber(value)
   return number
 end
 
-local function normalizeBoolean(value)
-  if value == true or value == 1 then return true, true end
-  if value == false or value == 0 then return false, true end
-  if type(value) == 'string' then
-    local normalized = value:lower():gsub('^%s+', ''):gsub('%s+$', '')
-    if normalized == 'true' or normalized == '1' or normalized == 'yes' then return true, true end
-    if normalized == 'false' or normalized == '0' or normalized == 'no' then return false, true end
-  end
-  return false, false
-end
-
 local function addCorrection(corrections, field, reason, previousValue, nextValue)
   corrections[#corrections + 1] = {
     field = field,
@@ -83,8 +72,13 @@ function MZPlayerStateNormalizer.isFiniteNumber(value)
   return finiteNumber(value) ~= nil
 end
 
-function MZPlayerStateNormalizer.getLegacyFlags(deathState)
-  return clone(DEATH_LEGACY[deathState] or DEATH_LEGACY.alive)
+function MZPlayerStateNormalizer.getDerivedDeathFlags(deathState)
+  return clone(DEATH_FLAGS[deathState] or DEATH_FLAGS.alive)
+end
+
+function MZPlayerStateNormalizer.buildDefaults()
+  local metadata = MZPlayerStateNormalizer.normalize(nil)
+  return metadata
 end
 
 function MZPlayerStateNormalizer.decodeAndNormalize(value)
@@ -153,30 +147,20 @@ function MZPlayerStateNormalizer.normalize(input)
   if not VALID_DEATH_STATES[configuredDefault] then configuredDefault = 'alive' end
 
   local currentDeathState = type(metadata.deathState) == 'string' and metadata.deathState:lower() or nil
-  local legacyDead, deadValid = normalizeBoolean(metadata.isdead)
-  local legacyDowned, downedValid = normalizeBoolean(metadata.inlaststand)
   local deathReason
 
   if not VALID_DEATH_STATES[currentDeathState] then
-    if deadValid and legacyDead then
-      currentDeathState = 'dead'
-      deathReason = downedValid and legacyDowned and 'legacy_conflict_isdead_precedence' or 'derived_from_isdead'
-    elseif downedValid and legacyDowned then
-      currentDeathState = 'downed'
-      deathReason = 'derived_from_inlaststand'
-    else
-      currentDeathState = configuredDefault
-      deathReason = metadata.deathState == nil and 'missing_defaulted' or 'invalid_death_state_defaulted'
-    end
+    currentDeathState = configuredDefault
+    deathReason = metadata.deathState == nil and 'missing_defaulted' or 'invalid_death_state_defaulted'
   elseif metadata.deathState ~= currentDeathState then
     deathReason = 'death_state_normalized'
   end
 
   if deathReason and setCorrected(metadata, corrections, 'deathState', currentDeathState, deathReason) then changed = true end
 
-  local expectedLegacy = DEATH_LEGACY[currentDeathState]
-  if setCorrected(metadata, corrections, 'isdead', expectedLegacy.isdead, 'derived_from_death_state') then changed = true end
-  if setCorrected(metadata, corrections, 'inlaststand', expectedLegacy.inlaststand, 'derived_from_death_state') then changed = true end
+  local expectedFlags = DEATH_FLAGS[currentDeathState]
+  if setCorrected(metadata, corrections, 'isdead', expectedFlags.isdead, 'derived_from_death_state') then changed = true end
+  if setCorrected(metadata, corrections, 'inlaststand', expectedFlags.inlaststand, 'derived_from_death_state') then changed = true end
 
   local healthDefinition = statusConfig().health or { min = 0 }
   local armorDefinition = statusConfig().armor or { min = 0 }

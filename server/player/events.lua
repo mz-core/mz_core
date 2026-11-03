@@ -191,74 +191,38 @@ local function scheduleLoadPlayer(src, reason)
       return
     end
 
-    local ok, playerData, loadErr = xpcall(function()
-      return MZPlayerService.loadPlayer(src)
+    local ok, session, sessionErr = xpcall(function()
+      return MZIdentityService.ensureSession(src)
     end, debug.traceback)
 
     if not ok then
       LoadingPlayers[src] = nil
-      print(('[mz_core] failed to load player source %s name=%s stage=loadPlayer error=%s reason=%s'):format(
+      print(('[mz_core] failed to resolve account source %s name=%s error=%s reason=%s'):format(
         tostring(src),
         tostring(GetPlayerName(src) or 'unknown'),
-        tostring(playerData),
+        tostring(session),
         tostring(reason or 'unknown')
       ))
       return
     end
 
-    if not playerData then
+    if not session then
       LoadingPlayers[src] = nil
-      print(('[mz_core] failed to load player source %s name=%s stage=loadPlayer error=%s reason=%s'):format(
+      print(('[mz_core] failed to create session source %s name=%s error=%s reason=%s'):format(
         tostring(src),
         tostring(GetPlayerName(src) or 'unknown'),
-        tostring(loadErr or 'unknown'),
-        tostring(reason or 'unknown')
-      ))
-      print(debug.traceback())
-      return
-    end
-
-    local orgOk, orgErr = xpcall(function()
-      MZOrgService.loadPlayerOrgs(src)
-    end, debug.traceback)
-
-    if not orgOk then
-      LoadingPlayers[src] = nil
-      print(('[mz_core] failed to load player orgs source %s name=%s error=%s reason=%s'):format(
-        tostring(src),
-        tostring(GetPlayerName(src) or 'unknown'),
-        tostring(orgErr),
+        tostring(sessionErr or 'unknown'),
         tostring(reason or 'unknown')
       ))
       return
     end
 
-    local identityOk, syncIdentity = MZPlayerStateService.getSyncIdentity(src)
-    TriggerClientEvent(
-      'mz_core:client:playerLoaded',
-      src,
-      playerData,
-      identityOk and syncIdentity.sessionToken or nil
-    )
-    local syncResult = MZPlayerStateSyncService.sync(src, 'player_loaded', {
-      forcePhysicalApply = true,
-      sessionReset = true
+    MZIdentityService.debugLifecycle('characterSelectionRequired', src, session)
+    TriggerClientEvent('mz_core:client:characterSelectionRequired', src, {
+      accountId = session.accountId,
+      sessionId = session.id,
+      lifecycle = session.lifecycle
     })
-    if syncResult.ok ~= true then
-      print(('[mz_core][player_state][initial_sync_failed] source=%s code=%s'):format(
-        tostring(src), tostring(syncResult.code)
-      ))
-    end
-
-    CreateThread(function()
-      Wait(5000)
-      local cfg = Config and Config.VehicleWorld or {}
-      if cfg.restoreOnPlayerJoin == true and GetPlayerName(src) and MZVehicleService and MZVehicleService.restoreWorldVehiclesForPlayer then
-        MZVehicleService.restoreWorldVehiclesForPlayer(src, 'player_loaded')
-      elseif cfg.debug == true then
-        print(('[mz_vehicle_world] vehicle_restore_auto_disabled reason=player_loaded source=%s'):format(tostring(src)))
-      end
-    end)
 
     LoadingPlayers[src] = nil
   end)
@@ -301,11 +265,8 @@ AddEventHandler('playerDropped', function(reason)
 
   local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(sourceId, reason or 'player_dropped')
 
-  if MZInventoryService and MZInventoryService.handlePlayerDropped then
-    MZInventoryService.handlePlayerDropped(sourceId, reason)
-  end
-
   MZPlayerService.unloadPlayer(sourceId, reason, true, stateFlushOk, stateFlushResult)
+  MZIdentityService.closeSession(sourceId, reason or 'player_dropped')
 end)
 
 AddEventHandler('onResourceStop', function(resourceName)
@@ -328,11 +289,17 @@ AddEventHandler('onResourceStop', function(resourceName)
     local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(src, 'resource_stop')
     if stateFlushOk then flushSucceeded = flushSucceeded + 1 else flushFailed = flushFailed + 1 end
 
-    if MZInventoryService and MZInventoryService.handlePlayerDropped then
-      MZInventoryService.handlePlayerDropped(src, 'resource_stop')
-    end
-
     MZPlayerService.unloadPlayer(src, 'resource_stop', true, stateFlushOk, stateFlushResult)
+  end
+
+  local remainingSessions = {}
+  for src in pairs(MZCache.sessionsBySource or {}) do
+    remainingSessions[#remainingSessions + 1] = src
+  end
+  for _, src in ipairs(remainingSessions) do
+    if MZIdentityService and MZIdentityService.closeSession then
+      MZIdentityService.closeSession(src, 'resource_stop')
+    end
   end
 
 

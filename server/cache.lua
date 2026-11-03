@@ -1,8 +1,8 @@
 MZCache = {
   playersBySource = {},
   playersByCitizenId = {},
-  orgTypesByCode = {},
-  orgsByCode = {},
-  gradesByOrgId = {},
-  permissionsByOrgId = {}
+  playersByCharacterId = {},
+  sessionsBySource = {},
+  activeSourcesByCharacterId = {},
+  sessionsByAccountId = {}
 }

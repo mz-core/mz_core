@@ -39,16 +39,8 @@ local function loadModel(model)
   return model
 end
 
-local function applyDefaultFreemodeSkin(ped)
+local function applyFreemodeBootstrap(ped)
   SetPedDefaultComponentVariation(ped)
-
-  SetPedComponentVariation(ped, 3, 15, 0, 0) -- braços
-  SetPedComponentVariation(ped, 4, 21, 0, 0) -- calça
-  SetPedComponentVariation(ped, 6, 34, 0, 0) -- sapato
-  SetPedComponentVariation(ped, 8, 15, 0, 0) -- undershirt
-  SetPedComponentVariation(ped, 11, 15, 0, 0) -- torso
-
-  ClearAllPedProps(ped)
 end
 
 local function doSpawn(spawnData)
@@ -90,7 +82,7 @@ local function doSpawn(spawnData)
     ClearPlayerWantedLevel(PlayerId())
 
     if GetEntityModel(ped) == joaat('mp_m_freemode_01') or GetEntityModel(ped) == joaat('mp_f_freemode_01') then
-      applyDefaultFreemodeSkin(ped)
+      applyFreemodeBootstrap(ped)
     end
 
     ShutdownLoadingScreen()
@@ -101,7 +93,6 @@ local function doSpawn(spawnData)
     if type(spawnData.securityLifecycleId) == 'string' and spawnData.securityLifecycleId ~= '' then
       TriggerServerEvent('mz_banguard:server:lifecycleReady', spawnData.securityLifecycleId)
     end
-    TriggerServerEvent('mz_core:vehicles:server:playerWorldReady')
     if type(spawnData.authorizedOperation) == 'table' then
       TriggerEvent('mz_core:client:authorizedSpawnReady', {
         operationId = spawnData.authorizedOperation.operationId,

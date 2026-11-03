@@ -88,7 +88,6 @@ local SENSITIVE_KEYS = {
 
 local SUSPICION_CATEGORIES = {
   not_authorized = true,
-  protected_metadata = true,
   player_state_rate_limited = true,
   player_state_stale_session = true,
   player_state_invalid_payload = true,
