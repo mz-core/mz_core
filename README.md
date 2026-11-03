@@ -1,13 +1,3 @@
----
-title: mz_core — Repository README
-status: REFERENCE
-authority: LEVEL_4_REFERENCE
-owner: mz_core
-last_reviewed: 2026-10-08
-applies_to: [mz_core, contributors]
-related_contracts: [MZ-CORE-BOUNDARY-v1, MZ-DOCS-v1]
----
-
 <div align="center">
   <a href="https://github.com/mz-core">
     <img src="https://github.com/mz-core/mz_core/blob/main/assets/logo.svg" alt="MZ Core — logo centralizada" width="400" />
