@@ -8,21 +8,61 @@ applies_to: [mz_core, contributors]
 related_contracts: [MZ-CORE-BOUNDARY-v1, MZ-DOCS-v1]
 ---
 
-# `mz_core`
+<div align="center">
+  <a href="https://github.com/mz-core">
+    <img src=".github/assets/mz-core-logo.svg" alt="MZ Core — logo centralizada" width="400" />
+  </a>
 
-Fundação da MZ Framework para bootstrap/readiness, identity, session, player lifecycle, estado fundamental necessário ao spawn, autorização global e audit essencial.
+  <p><strong>O núcleo do ecossistema MZ Core para servidores FiveM.</strong></p>
 
-Organization, Inventory, Vehicles e Economy já foram extraídos para seus owners canônicos. O core não contém implementação, schema, repository, facade ou writer financeiro. `mz_accounts` continua sendo Identity Account; saldos de Character vivem exclusivamente em `mz_economy`.
+  <p>
+    Identidade &nbsp;·&nbsp; Sessões &nbsp;·&nbsp; Ciclo de vida &nbsp;·&nbsp; Spawn &nbsp;·&nbsp; Autorização &nbsp;·&nbsp; Auditoria
+  </p>
 
-## Dependências e start
+  <p>
+    <code>v1.0.0</code> &nbsp;·&nbsp; <code>FiveM</code> &nbsp;·&nbsp; <code>Lua</code>
+  </p>
 
-O manifest declara:
+  <p>
+    <a href="#-visão-geral">Visão geral</a> &nbsp;·&nbsp;
+    <a href="#-instalação">Instalação</a> &nbsp;·&nbsp;
+    <a href="#-arquitetura">Arquitetura</a> &nbsp;·&nbsp;
+    <a href="#-documentação">Documentação</a> &nbsp;·&nbsp;
+    <a href="#-desenvolvimento-e-testes">Desenvolvimento</a>
+  </p>
+</div>
 
-- `oxmysql`;
-- `ox_lib`;
-- `spawnmanager`.
+---
 
-O fluxo de spawn também usa `spawnmanager`. Garanta essas dependências antes do core:
+## ✦ Visão geral
+
+O **`mz_core`** é a fundação do **MZ Core**. Ele concentra os serviços essenciais para iniciar e manter o ciclo de vida de um jogador, sem absorver funcionalidades que pertencem a outros resources.
+
+| Responsabilidade | O que pertence ao Core |
+| :-- | :-- |
+| **Bootstrap e readiness** | Inicialização e estado de prontidão essenciais |
+| **Identidade e sessão** | Identidade, sessão e ciclo de vida do jogador |
+| **Spawn** | Estado fundamental necessário ao fluxo de spawn |
+| **Autorização** | Verificações globais de autorização |
+| **Auditoria** | Registro essencial de eventos do Core |
+
+> **Princípio de arquitetura:** cada resource mantém a responsabilidade pelo próprio domínio. O Core não é um agregador de readiness de funcionalidades externas.
+
+## ◈ Instalação
+
+### Requisitos
+
+Instale e inicie estas dependências antes do `mz_core`:
+
+| Resource | Finalidade |
+| :-- | :-- |
+| `oxmysql` | Acesso ao banco de dados |
+| `ox_lib` | Biblioteca utilizada pelo resource |
+| `spawnmanager` | Integração com o fluxo de spawn |
+
+### Ordem de inicialização
+
+Adicione ao arquivo de configuração do servidor:
 
 ```cfg
 ensure oxmysql
@@ -31,26 +71,57 @@ ensure spawnmanager
 ensure mz_core
 ```
 
-Cada owner/produto adicional deve declarar e respeitar suas próprias dependências. Não use o core como agregador de readiness de features.
+Coloque a pasta `mz_core` no diretório de resources do servidor e mantenha o nome da pasta. Outros resources devem declarar e respeitar suas próprias dependências.
 
-## Documentação oficial
+> **Distribuição:** o ZIP de release contém os arquivos de execução do `mz_core`; as dependências acima devem ser instaladas separadamente. A homologação final requer validação em FXServer real.
 
-- [Portal da MZ Framework](../mz_docs/README.md)
-- [Documentação do core](../mz_docs/core/README.md)
-- [Referências detalhadas do core](../mz_docs/core/reference/README.md)
-- [Player lifecycle](../mz_docs/core/PLAYER_LIFECYCLE.md)
-- [Account, character and session](../mz_docs/core/ACCOUNT_CHARACTER_SESSION.md)
-- [Core architectural freeze](../mz_docs/core/CORE_ARCHITECTURAL_FREEZE.md)
-- [Identity API](../mz_docs/api/IDENTITY_API.md)
-- [Autorização global](../mz_docs/core/AUTHORIZATION.md)
-- [Guia de integração](../mz_docs/guides/CORE_INTEGRATION.md)
-- [API documentation](../mz_docs/api/README.md)
+## ⬡ Arquitetura
 
-## Desenvolvimento e testes
+O Core é responsável pelas capacidades fundamentais. Os sistemas de produto continuam em seus owners dedicados:
 
-- Não altere public API, ownership ou persistence sem revisar rules/ADRs e consumers.
-- Harnesses do resource ficam em [`mz_testkit/tests/mz_core`](../mz_testkit/tests/mz_core/) e são executados pelo runner central preservando o working directory do resource.
-- Harness offline, análise estática e runtime FiveM/OneSync/MySQL são classes distintas de evidência.
-- Nenhum probe/debug helper define autorização ou contrato de produto.
+| Domínio | Resource responsável |
+| :-- | :-- |
+| Organizações | `mz_org` |
+| Inventário | `mz_inventory` |
+| Veículos | `mz_vehicles` |
+| Economia e saldos de personagens | `mz_economy` |
 
-Versão declarada pelo manifest: `1.0.0`.
+**Limites importantes**
+
+- O `mz_core` não contém implementação, schema, repository, facade ou writer financeiro.
+- `mz_accounts` permanece como *Identity Account*; saldos de personagens pertencem exclusivamente ao `mz_economy`.
+- Mudanças em APIs públicas, ownership ou persistência exigem revisão dos contratos, das decisões de arquitetura e dos consumers.
+
+## 📚 Documentação
+
+A documentação detalhada é mantida no workspace `mz_docs`.
+
+| Assunto | Referência |
+| :-- | :-- |
+| Visão geral | [Portal de documentação](../mz_docs/README.md) |
+| Core | [Documentação do Core](../mz_docs/core/README.md) |
+| Referências | [Referências detalhadas](../mz_docs/core/reference/README.md) |
+| Jogador | [Player lifecycle](../mz_docs/core/PLAYER_LIFECYCLE.md) |
+| Conta e personagem | [Account, character and session](../mz_docs/core/ACCOUNT_CHARACTER_SESSION.md) |
+| Arquitetura | [Core architectural freeze](../mz_docs/core/CORE_ARCHITECTURAL_FREEZE.md) |
+| Identidade | [Identity API](../mz_docs/api/IDENTITY_API.md) |
+| Autorização | [Autorização global](../mz_docs/core/AUTHORIZATION.md) |
+| Integrações | [Guia de integração](../mz_docs/guides/CORE_INTEGRATION.md) |
+| APIs | [API documentation](../mz_docs/api/README.md) |
+
+> **Nota para repositórios separados:** os links acima seguem a estrutura do monorepo. Antes da publicação em um repositório GitHub independente, ajuste-os para os endereços publicados de `mz_docs`.
+
+## 🧪 Desenvolvimento e testes
+
+- Os harnesses do Core ficam em [`mz_testkit/tests/mz_core`](../mz_testkit/tests/mz_core/) e são executados pelo runner central preservando o diretório de trabalho do resource.
+- Testes offline, análise estática e execução em **FiveM / OneSync / MySQL** são evidências distintas; um resultado local não substitui a homologação em jogo.
+- Helpers de diagnóstico e debug não definem autorização nem contratos de produto.
+- Antes de alterar uma API pública, revise os contratos e seus consumidores.
+
+---
+
+<div align="center">
+  <p><strong>MZ.CORE</strong></p>
+  <p><sub>Fundação modular para o ecossistema FiveM · Versão declarada no manifesto: <code>1.0.0</code></sub></p>
+</div>
+
