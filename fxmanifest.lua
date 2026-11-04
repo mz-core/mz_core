@@ -2,6 +2,8 @@ fx_version 'cerulean'
 game 'gta5'
 lua54 'yes'
 
+files { 'locales/*.json' }
+
 name 'mz_core'
 author 'Mazus'
 description 'Modular FiveM core framework base'

@@ -71,7 +71,7 @@ end
 RegisterCommand('mz_state_diag', function(source, args)
   if not authorizeCommand(source, 'mz_state_diag') then return end
   local target = targetFrom(args)
-  if not target then return reply(source, 'uso: mz_state_diag <source>') end
+  if not target then return reply(source, ((type(locale) == 'function' and locale('staging.usage') or 'uso: %s')):format('mz_state_diag <source>')) end
   local ok, result = MZPlayerStateService.getState(target)
   reply(source, encode(ok and result or { ok = false, error = result and result.code }))
 end, false)
@@ -79,7 +79,7 @@ end, false)
 RegisterCommand('mz_state_runtime', function(source, args)
   if not authorizeCommand(source, 'mz_state_runtime') then return end
   local target = targetFrom(args)
-  if not target then return reply(source, 'uso: mz_state_runtime <source>') end
+  if not target then return reply(source, ((type(locale) == 'function' and locale('staging.usage') or 'uso: %s')):format('mz_state_runtime <source>')) end
   local stateOk, stateResult = MZPlayerStateService.getState(target)
   local identityOk, identityResult = MZPlayerStateService.getRuntimeIdentity(target)
   reply(source, encode({
@@ -101,7 +101,7 @@ end, false)
 RegisterCommand('mz_state_bags', function(source, args)
   if not authorizeCommand(source, 'mz_state_bags') then return end
   local target = targetFrom(args)
-  if not target then return reply(source, 'uso: mz_state_bags <source>') end
+  if not target then return reply(source, ((type(locale) == 'function' and locale('staging.usage') or 'uso: %s')):format('mz_state_bags <source>')) end
   local payload = { source = target }
   if type(Player) == 'function' then
     local ok, player = pcall(Player, target)
@@ -125,7 +125,7 @@ local function transitionCommand(command, handler)
   RegisterCommand(command, function(source, args)
     if not authorizeCommand(source, command) then return end
     local target = targetFrom(args)
-    if not target then return reply(source, ('uso: %s <source>'):format(command)) end
+    if not target then return reply(source, ((type(locale) == 'function' and locale('staging.usage') or 'uso: %s')):format(command .. ' <source>')) end
     local ok, result = handler(target, MZPlayerStateService.internalContext('staging_command', {
       actorSource = tonumber(source) or 0,
       administrative = command == 'mz_state_revive'
@@ -143,7 +143,7 @@ RegisterCommand('mz_status_set', function(source, args)
   local target = targetFrom(args)
   local statusName = tostring(type(args) == 'table' and args[2] or '')
   local value = tonumber(type(args) == 'table' and args[3] or nil)
-  if not target or value == nil then return reply(source, 'uso: mz_status_set <source> <status> <value>') end
+  if not target or value == nil then return reply(source, ((type(locale) == 'function' and locale('staging.usage') or 'uso: %s')):format('mz_status_set <source> <status> <value>')) end
   local ok, result = MZPlayerStateService.setStatus(target, statusName, value, MZPlayerStateService.internalContext('staging_status', {
     actorSource = tonumber(source) or 0
   }))

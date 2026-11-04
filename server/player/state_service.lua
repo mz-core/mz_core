@@ -6,25 +6,25 @@ local auditSequence = 0
 local tokenSequence = 0
 
 local ERROR_MESSAGES = {
-  player_not_found = 'Player was not found.',
-  player_not_loaded = 'Player is not loaded.',
-  invalid_status = 'Status is not registered.',
-  invalid_value = 'Value must be a finite number.',
-  invalid_transition = 'The requested death-state transition is not allowed.',
-  already_in_state = 'Player is already in the requested state.',
-  not_authorized = 'Invoking resource is not authorized for this operation.',
-  unloading = 'Player is unloading and no longer accepts mutations.',
-  lock_timeout = 'Timed out waiting for the player-state lock.',
-  persistence_failed = 'Player state could not be persisted.',
-  persistence_pending = 'State changed in memory but persistence is pending.',
-  feature_disabled = 'Player-state service is disabled.',
-  internal_error = 'Player-state operation failed unexpectedly.',
-  invalid_action = 'Action is not registered.',
-  invalid_patch = 'Status patch has an invalid schema.',
-  invalid_state = 'Player state does not allow this operation.',
-  invalid_deadline = 'Death-state deadline is invalid.',
-  revision_mismatch = 'Player-state revision no longer matches the operation.',
-  no_benefit = 'The operation would not change player state.'
+  player_not_found = 'Jogador não encontrado.',
+  player_not_loaded = 'O jogador não está carregado.',
+  invalid_status = 'Status não registrado.',
+  invalid_value = 'O valor deve ser um número finito.',
+  invalid_transition = 'A transição de estado de morte solicitada não é permitida.',
+  already_in_state = 'O jogador já está no estado solicitado.',
+  not_authorized = 'O resource solicitante não está autorizado a executar esta operação.',
+  unloading = 'O jogador está sendo descarregado e não aceita alterações.',
+  lock_timeout = 'Tempo esgotado ao aguardar o bloqueio do estado do jogador.',
+  persistence_failed = 'Não foi possível salvar o estado do jogador.',
+  persistence_pending = 'O estado mudou em memória, mas ainda não foi salvo.',
+  feature_disabled = 'O serviço de estado do jogador está desativado.',
+  internal_error = 'A operação de estado do jogador falhou inesperadamente.',
+  invalid_action = 'Ação não registrada.',
+  invalid_patch = 'A atualização de status tem uma estrutura inválida.',
+  invalid_state = 'O estado do jogador não permite esta operação.',
+  invalid_deadline = 'O prazo do estado de morte é inválido.',
+  revision_mismatch = 'A revisão do estado do jogador não corresponde mais à operação.',
+  no_benefit = 'A operação não alteraria o estado do jogador.'
 }
 
 local TRANSITIONS = {
@@ -64,7 +64,10 @@ end
 local function errorResult(code, extra)
   local result = clone(type(extra) == 'table' and extra or {})
   result.code = code
-  result.message = ERROR_MESSAGES[code] or ERROR_MESSAGES.internal_error
+  local key = 'state.' .. tostring(ERROR_MESSAGES[code] and code or 'internal_error')
+  local translated = type(locale) == 'function' and locale(key) or nil
+  result.message = type(translated) == 'string' and translated ~= key and translated ~= ''
+    and translated or ERROR_MESSAGES[code] or ERROR_MESSAGES.internal_error
   return result
 end
 

@@ -63,6 +63,12 @@ ensure mz_core
 
 Coloque a pasta `mz_core` no diretório de resources do servidor e mantenha o nome da pasta. Outros resources devem declarar e respeitar suas próprias dependências.
 
+O idioma das mensagens e do catálogo de permissões segue `ox:locale`: `pt-br`
+é o padrão e `en-us` é a alternativa; `pt` e `en` são aceitos como aliases.
+No catálogo retornado por `ListStaffManagement`, `code` é o identificador
+estável para autorização; `label` e `group` são textos de apresentação e podem
+variar conforme o idioma. Os nomes de cargos persistidos não são traduzidos.
+
 > **Distribuição:** o ZIP de release contém os arquivos de execução do `mz_core`; as dependências acima devem ser instaladas separadamente. A homologação final requer validação em FXServer real.
 
 ## ⬡ Arquitetura

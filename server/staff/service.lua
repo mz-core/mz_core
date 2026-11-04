@@ -278,6 +278,11 @@ function MZStaffService.GetContext(source)
   }
 end
 
+local function localizedText(key, fallback)
+  local text = type(locale) == 'function' and locale(key) or nil
+  return type(text) == 'string' and text ~= '' and text ~= key and text or fallback
+end
+
 function MZStaffService.ListManagement(source)
   local actor, err = actorContext(source)
   if not actor then return false, err end
@@ -292,7 +297,7 @@ function MZStaffService.ListManagement(source)
       assignments[#assignments + 1] = {
         accountId = tonumber(row.account_id),
         contextCharacterId = tonumber(row.context_character_id),
-        name = fullName ~= '' and fullName or ('Conta #%s'):format(tostring(row.account_id)),
+        name = fullName ~= '' and fullName or (localizedText('staff.account_fallback', 'Conta #%s')):format(tostring(row.account_id)),
         active = asBool(row.active),
         roleCode = tostring(row.role_code),
         roleName = tostring(row.role_name),
@@ -302,11 +307,19 @@ function MZStaffService.ListManagement(source)
       }
     end
   end
+  local catalog = {}
+  for _, definition in ipairs(MZStaffPermissionCatalog or {}) do
+    local entry = {}
+    for key, value in pairs(definition) do entry[key] = value end
+    entry.label = localizedText('permission_labels.' .. tostring(definition.code):gsub('%.', '_'), definition.label)
+    entry.group = localizedText('permission_groups.' .. tostring(definition.group or ''), definition.group)
+    catalog[#catalog + 1] = entry
+  end
   return true, {
     actor = { owner = actor.owner, level = actor.level, role = actor.role },
     roles = roles,
     assignments = assignments,
-    catalog = MZStaffPermissionCatalog
+    catalog = catalog
   }
 end
 
