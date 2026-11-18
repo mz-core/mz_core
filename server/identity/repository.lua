@@ -10,6 +10,15 @@ function MZIdentityRepository.getAccountByIdentifier(provider, identifier)
   ]], { provider, identifier })
 end
 
+function MZIdentityRepository.hasOtherLicense(accountId, identifier)
+  local count = MySQL.scalar.await([[
+    SELECT COUNT(*) FROM mz_account_identifiers
+    WHERE account_id = ? AND provider = 'license' AND identifier <> ?
+  ]], { accountId, identifier })
+  assert(tonumber(count), 'license lookup failed')
+  return tonumber(count) > 0
+end
+
 function MZIdentityRepository.createAccount(slots)
   return MySQL.insert.await([[
     INSERT INTO mz_accounts (status, character_slots) VALUES ('active', ?)
@@ -47,8 +56,15 @@ function MZIdentityRepository.getSessionById(sessionId)
   ]], { sessionId })
 end
 
-function MZIdentityRepository.closeSessionsBySource(source, reason)
-  return MySQL.update.await([[
+function MZIdentityRepository.getSessionIdWatermark()
+  local value = MySQL.scalar.await('SELECT COALESCE(MAX(id), 0) FROM mz_player_sessions')
+  assert(tonumber(value), 'session watermark unavailable')
+  return tonumber(value)
+end
+
+function MZIdentityRepository.closeSessionsBySource(source, reason, watermark)
+  assert(type(watermark) == 'number' and watermark >= 0 and watermark % 1 == 0, 'invalid session watermark')
+  local affected = MySQL.update.await([[
     UPDATE mz_player_sessions
     SET dropped_at = CURRENT_TIMESTAMP,
         last_seen_at = CURRENT_TIMESTAMP,
@@ -58,8 +74,10 @@ function MZIdentityRepository.closeSessionsBySource(source, reason)
         active_character_id = NULL,
         lifecycle = 'DISCONNECTED',
         revision = revision + 1
-    WHERE source = ? AND is_active = 1
-  ]], { reason or 'source_replaced', source }) or 0
+    WHERE source = ? AND is_active = 1 AND id <= ?
+  ]], { reason or 'source_replaced', source, watermark })
+  assert(tonumber(affected), 'session cleanup result unavailable')
+  return tonumber(affected)
 end
 
 function MZIdentityRepository.closeSession(sessionId, reason)
@@ -205,17 +223,117 @@ function MZIdentityRepository.searchCharacters(search, limit, offset)
   return rows, total
 end
 
-function MZIdentityRepository.createCharacterDraft(data)
-  local characterId = MySQL.insert.await([[
-    INSERT INTO mz_players (
-      account_id, citizenid, firstname, lastname, birthdate,
-      gender, nationality, phone, metadata, character_status
-    ) VALUES (?, ?, '', '', '', '', '', '', ?, 'creating')
-  ]], {
-    data.accountId, data.citizenid,
-    MZUtils.jsonEncode(data.metadata or MZPlayerStateNormalizer.buildDefaults())
-  })
-  return characterId and MZIdentityRepository.getCharacter(characterId) or nil
+function MZIdentityRepository.claimCharacterDraft(data)
+  local result, failure
+  local function affected(value)
+    if type(value) == 'number' then return value end
+    return type(value) == 'table' and tonumber(value.affectedRows or value.changedRows) or 0
+  end
+  local ok, committed = pcall(MySQL.startTransaction, function(query)
+    local account = query('SELECT character_slots FROM mz_accounts WHERE account_id = ? FOR UPDATE', { data.accountId })
+    if not account or not account[1] then failure = 'account_unavailable'; return false end
+    local sessions = query([[
+      SELECT id, character_id, lifecycle FROM mz_player_sessions
+      WHERE account_id = ? AND is_active = 1 FOR UPDATE
+    ]], { data.accountId })
+    if type(sessions) ~= 'table' then failure = 'database_error'; return false end
+    local current
+    for _, session in ipairs(sessions) do
+      if tonumber(session.id) == data.sessionId then current = session end
+    end
+    if not current then failure = 'session_changed'; return false end
+    if current.lifecycle ~= 'CHARACTER_SELECTION' and current.lifecycle ~= 'CHARACTER_CREATING' then
+      failure = 'session_changed'; return false
+    end
+
+    local row, replay
+    if data.requestKey then
+      local requests = query([[
+        SELECT character_id FROM mz_character_requests
+        WHERE account_id = ? AND request_key = ? AND operation = 'create' LIMIT 1
+      ]], { data.accountId, data.requestKey })
+      if type(requests) ~= 'table' then failure = 'database_error'; return false end
+      if requests[1] then
+        local rows = query('SELECT * FROM mz_players WHERE account_id = ? AND id = ? LIMIT 1 FOR UPDATE',
+          { data.accountId, requests[1].character_id })
+        row = type(rows) == 'table' and rows[1]
+        if not row or row.character_status ~= 'creating' then failure = 'request_already_consumed'; return false end
+        replay = true
+      end
+    end
+    if data.requestKey and not replay and current.lifecycle == 'CHARACTER_CREATING' then
+      failure = 'character_creation_in_progress'; return false
+    end
+    if not row then
+      local rows = query([[
+        SELECT * FROM mz_players WHERE account_id = ? AND character_status = 'creating' ORDER BY id ASC FOR UPDATE
+      ]], { data.accountId })
+      if type(rows) ~= 'table' then failure = 'database_error'; return false end
+      for _, candidate in ipairs(rows) do
+        local occupied = false
+        for _, session in ipairs(sessions) do
+          if tonumber(session.id) ~= data.sessionId and tonumber(session.character_id) == tonumber(candidate.id) then
+            occupied = true; break
+          end
+        end
+        if not occupied and (not current.character_id or tonumber(current.character_id) == tonumber(candidate.id)) then
+          row = candidate; break
+        end
+      end
+      if not row and #rows > 0 then
+        if data.requestKey then failure = 'character_creation_in_progress'; return false end
+        return true
+      end
+    end
+    if row then
+      for _, session in ipairs(sessions) do
+        if tonumber(session.id) ~= data.sessionId and tonumber(session.character_id) == tonumber(row.id) then
+          failure = 'character_creation_in_progress'; return false
+        end
+      end
+      if current.character_id and tonumber(current.character_id) ~= tonumber(row.id) then
+        failure = 'character_creation_in_progress'; return false
+      end
+    elseif data.requestKey then
+      local count = query([[
+        SELECT COUNT(*) AS used FROM mz_players WHERE account_id = ? AND character_status IN ('active','creating')
+      ]], { data.accountId })
+      if not count or not count[1] or not tonumber(count[1].used) then failure = 'database_error'; return false end
+      if tonumber(count[1].used) >= math.min(tonumber(account[1].character_slots) or 0, data.maximumSlots) then
+        failure = 'character_slots_exhausted'; return false
+      end
+      local inserted = query([[
+        INSERT INTO mz_players (account_id, citizenid, firstname, lastname, birthdate, gender, nationality, phone, metadata, character_status)
+        VALUES (?, ?, '', '', '', '', '', '', ?, 'creating')
+      ]], { data.accountId, data.citizenid, data.metadata })
+      if affected(inserted) ~= 1 then failure = 'character_create_failed'; return false end
+      local rows = query('SELECT * FROM mz_players WHERE account_id = ? AND citizenid = ? LIMIT 1',
+        { data.accountId, data.citizenid })
+      row = type(rows) == 'table' and rows[1]
+      if not row then failure = 'character_create_failed'; return false end
+    else
+      return true
+    end
+    if data.requestKey and not replay then
+      local inserted = query([[
+        INSERT INTO mz_character_requests (account_id, request_key, operation, character_id, status)
+        VALUES (?, ?, 'create', ?, 'completed')
+      ]], { data.accountId, data.requestKey, row.id })
+      if affected(inserted) ~= 1 then failure = 'database_error'; return false end
+    end
+    if current.lifecycle ~= 'CHARACTER_CREATING' or tonumber(current.character_id) ~= tonumber(row.id) then
+      local bound = query([[
+        UPDATE mz_player_sessions SET character_id = ?, citizenid = ?, lifecycle = 'CHARACTER_CREATING',
+          revision = revision + 1, last_seen_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND account_id = ? AND is_active = 1 AND active_character_id IS NULL
+      ]], { row.id, row.citizenid, data.sessionId, data.accountId })
+      if affected(bound) ~= 1 then failure = 'session_changed'; return false end
+    end
+    result = { row = row, replay = replay }
+    return true
+  end)
+  if not ok or committed ~= true then return nil, failure or 'database_error' end
+  return result
 end
 
 function MZIdentityRepository.finalizeCharacter(accountId, characterId, charinfo, metadata)
@@ -237,7 +355,7 @@ function MZIdentityRepository.archiveDraft(accountId, characterId)
   return MySQL.update.await([[
     UPDATE mz_players
     SET character_status = 'archived', archived_at = CURRENT_TIMESTAMP
-    WHERE id = ? AND account_id = ? AND character_status IN ('creating','active')
+    WHERE id = ? AND account_id = ? AND character_status = 'creating'
   ]], { characterId, accountId }) or 0
 end
 

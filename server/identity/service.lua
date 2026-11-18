@@ -4,7 +4,14 @@ local SessionLocks = {}
 local AccountMutationLocks = {}
 local ActivationLocks = {}
 local RequestWindows = {}
+local ConnectionGenerations = {}
 local Recovered = false
+
+if type(AddEventHandler) == 'function' then
+  AddEventHandler('playerDropped', function()
+    ConnectionGenerations[tonumber(source)] = nil
+  end)
+end
 
 local function trim(value)
   return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
@@ -140,22 +147,27 @@ local function characterSnapshot(row)
 end
 
 local function identifiersForSource(source)
-  local identifiers, primary = {}, nil
+  local primary
   for _, raw in ipairs(GetPlayerIdentifiers(source) or {}) do
     local provider, identifier = tostring(raw):match('^([^:]+):(.+)$')
     provider, identifier = trim(provider):lower(), trim(identifier)
-    if provider ~= '' and identifier ~= '' and #provider <= 32 and #raw <= 191 then
+    if provider == 'license' and identifier ~= '' and #raw <= 191 then
       local canonical = provider .. ':' .. identifier
-      identifiers[#identifiers + 1] = { provider = provider, identifier = canonical }
-      if provider == 'license' and not primary then primary = canonical end
+      if primary and primary ~= canonical then return nil, 'identifier_account_conflict' end
+      primary = canonical
     end
   end
-  return identifiers, primary
+  return primary
 end
 
 local function refreshSession(source, sessionId)
+  local previous = MZCache.sessionsBySource[source]
+  if not previous or tonumber(previous.id) ~= tonumber(sessionId) then return nil end
   local row = MZIdentityRepository.getSessionById(sessionId)
   local session = sessionFromRow(source, row)
+  if MZCache.sessionsBySource[source] ~= previous then return nil end
+  if previous._connectionGeneration ~= ConnectionGenerations[source] then return nil end
+  if session then session._connectionGeneration = previous._connectionGeneration end
   if session then MZCache.sessionsBySource[source] = session end
   return session
 end
@@ -190,9 +202,10 @@ end
 
 local function withActivationLock(source, operation)
   if ActivationLocks[source] then return nil, 'activation_in_progress' end
-  ActivationLocks[source] = true
+  local token = {}
+  ActivationLocks[source] = token
   local results = table.pack(xpcall(operation, debug.traceback))
-  ActivationLocks[source] = nil
+  if ActivationLocks[source] == token then ActivationLocks[source] = nil end
   if results[1] ~= true then
     print(('[mz_core][identity] activation failed source=%s error=%s')
       :format(tostring(source), tostring(results[2])))
@@ -214,28 +227,38 @@ end
 function MZIdentityService.ensureSession(source)
   source = validSource(source)
   if not source then return nil, 'invalid_source' end
+  local generation = ConnectionGenerations[source] or {}
+  ConnectionGenerations[source] = generation
+  local function current() return ConnectionGenerations[source] == generation end
   local cached = MZCache.sessionsBySource[source]
   if cached and cached.isActive then
-    MZIdentityRepository.touchSession(cached.id, source)
-    return cached
-  end
-  if SessionLocks[source] then return nil, 'session_resolution_in_progress' end
-  SessionLocks[source] = true
-  local ok, result, err = xpcall(function()
-    local identifiers, license = identifiersForSource(source)
-    if not license then return nil, 'missing_license' end
-
-    local account, resolvedAccountId
-    for _, item in ipairs(identifiers) do
-      local candidate = MZIdentityRepository.getAccountByIdentifier(item.provider, item.identifier)
-      if candidate then
-        local candidateId = accountIdValue(candidate.account_id)
-        if resolvedAccountId and resolvedAccountId ~= candidateId then
-          return nil, 'identifier_account_conflict'
-        end
-        account, resolvedAccountId = candidate, candidateId
-      end
+    if cached._connectionGeneration == generation then
+      MZIdentityRepository.touchSession(cached.id, source)
+      if not current() or MZCache.sessionsBySource[source] ~= cached then return nil, 'session_changed' end
+      return cached
     end
+    local detached, detachErr = MZPlayerService.detachForSourceReuse(source, cached.id)
+    if not detached then return nil, detachErr or 'retention_failed' end
+    if not current() or MZCache.sessionsBySource[source] ~= cached then return nil, 'session_changed' end
+    if cached.activeCharacterId and MZCache.activeSourcesByCharacterId[cached.activeCharacterId] == source then
+      MZCache.activeSourcesByCharacterId[cached.activeCharacterId] = nil
+    end
+    MZCache.sessionsBySource[source] = nil
+  end
+  if SessionLocks[source] == generation then return nil, 'session_resolution_in_progress' end
+  SessionLocks[source] = generation
+  local ok, result, err = xpcall(function()
+    local license, identifierErr = identifiersForSource(source)
+    if not license then return nil, identifierErr or 'missing_license' end
+
+    local account = MZIdentityRepository.getAccountByIdentifier('license', license)
+    if not current() then return nil, 'session_changed' end
+    local resolvedAccountId = account and accountIdValue(account.account_id)
+    if account and not resolvedAccountId then return nil, 'identifier_account_conflict' end
+    if account and MZIdentityRepository.hasOtherLicense(resolvedAccountId, license) then
+      return nil, 'identifier_account_conflict'
+    end
+    if not current() then return nil, 'session_changed' end
 
     if not account then
       local slots = math.max(1, math.min(
@@ -248,32 +271,44 @@ function MZIdentityService.ensureSession(source)
       if not account then return nil, 'account_create_failed' end
     end
 
+    if not current() then return nil, 'session_changed' end
+
     if tostring(account.status or '') ~= 'active' then return nil, 'account_inactive' end
-    for _, item in ipairs(identifiers) do
-      MZIdentityRepository.attachIdentifier(resolvedAccountId, item.provider, item.identifier)
-      local linked = MZIdentityRepository.getAccountByIdentifier(item.provider, item.identifier)
-      if not linked or accountIdValue(linked.account_id) ~= resolvedAccountId then
-        return nil, 'identifier_account_conflict'
-      end
+    MZIdentityRepository.attachIdentifier(resolvedAccountId, 'license', license)
+    local linked = MZIdentityRepository.getAccountByIdentifier('license', license)
+    if not current() then return nil, 'session_changed' end
+    if not linked or accountIdValue(linked.account_id) ~= resolvedAccountId then
+      return nil, 'identifier_account_conflict'
     end
 
     -- Consumers with source-keyed runtime state must clear it before this
     -- source is bound to a new session.
     TriggerEvent('mz_core:server:identitySessionClosed', source, nil, 'source_reused')
-    MZIdentityRepository.closeSessionsBySource(source, 'source_reused')
+    if not current() then return nil, 'session_changed' end
+    local watermark = MZIdentityRepository.getSessionIdWatermark()
+    if not current() then return nil, 'session_changed' end
+    MZIdentityRepository.closeSessionsBySource(source, 'source_reused', watermark)
+    if not current() then return nil, 'session_changed' end
+    MZPlayerStateService.releaseUninitializedForSource(source, watermark)
     local row = MZIdentityRepository.createSession({
       accountId = resolvedAccountId,
       source = source
     })
     local session = sessionFromRow(source, row)
     if not session then return nil, 'session_create_failed' end
+    if not current() then
+      pcall(MZIdentityRepository.closeSession, session.id, 'connection_changed')
+      return nil, 'session_changed'
+    end
+    session._connectionGeneration = generation
     MZCache.sessionsBySource[source] = session
     MZIdentityService.debugLifecycle('accountResolved', source, session)
     MZIdentityService.debugLifecycle('sessionCreated', source, session)
     audit('account_resolved', source, { type = 'account', id = tostring(resolvedAccountId) }, 'success')
+    if not current() or MZCache.sessionsBySource[source] ~= session then return nil, 'session_changed' end
     return session
   end, debug.traceback)
-  SessionLocks[source] = nil
+  if SessionLocks[source] == generation then SessionLocks[source] = nil end
   if not ok then
     print(('[mz_core][identity] session resolution failed source=%s error=%s'):format(source, tostring(result)))
     return nil, 'database_error'
@@ -282,7 +317,18 @@ function MZIdentityService.ensureSession(source)
 end
 
 function MZIdentityService.getSession(source)
-  return MZCache.sessionsBySource[tonumber(source)]
+  source = tonumber(source)
+  local session = source and MZCache.sessionsBySource[source] or nil
+  if session and session._connectionGeneration ~= ConnectionGenerations[source] then return nil end
+  return session
+end
+
+local function sessionCurrent(source, session)
+  local current = MZCache.sessionsBySource[source]
+  return current and session and current.isActive == true
+    and tonumber(current.id) == tonumber(session.id)
+    and current._connectionGeneration == session._connectionGeneration
+    and current._connectionGeneration == ConnectionGenerations[source]
 end
 
 function MZIdentityService.getSessionSnapshot(source)
@@ -320,15 +366,28 @@ function MZIdentityService.getRosterForSource(source)
   if not source or not checkRateLimit(source) then return nil, 'rate_limited' end
   local session, err = MZIdentityService.ensureSession(source)
   if not session then return nil, err end
+  if not session.activeCharacterId and session.lifecycle == 'CHARACTER_SELECTION' then
+    local recovered, recoveryErr = withAccountMutationLock(session.accountId, function()
+      return MZIdentityRepository.claimCharacterDraft({ accountId = session.accountId, sessionId = session.id })
+    end)
+    if recoveryErr then return nil, recoveryErr end
+    if recovered then
+      session = refreshSession(source, session.id)
+      if not session then return nil, 'session_changed' end
+    end
+  end
   local account = MZIdentityRepository.getAccount(session.accountId)
   local characters = MZIdentityService.getCharactersForAccount(session.accountId)
+  local usedSlots = #MZIdentityRepository.getCharactersForAccount(session.accountId, true)
+  if not sessionCurrent(source, session) then return nil, 'session_changed' end
   audit('character_list_requested', source, { type = 'account', id = tostring(session.accountId) }, 'success')
+  if not sessionCurrent(source, session) then return nil, 'session_changed' end
   return {
     accountId = session.accountId,
     sessionId = session.id,
     lifecycle = session.lifecycle,
     slots = tonumber(account and account.character_slots) or 0,
-    usedSlots = #MZIdentityRepository.getCharactersForAccount(session.accountId, true),
+    usedSlots = usedSlots,
     characters = characters
   }
 end
@@ -348,40 +407,18 @@ function MZIdentityService.createCharacterDraft(source, requestKey)
       return nil, 'session_changed'
     end
 
-    local existing = MZIdentityRepository.getCharacterRequest(session.accountId, requestKey, 'create')
-    if existing and existing.character_id then
-      local row = MZIdentityRepository.getCharacterForAccount(session.accountId, existing.character_id)
-      if row then return characterSnapshot(row), 'idempotent_replay' end
-      return nil, 'request_already_consumed'
-    end
-    if current.lifecycle == 'CHARACTER_CREATING' and current.characterId then
-      return nil, 'character_creation_in_progress'
-    end
-
-    local account = MZIdentityRepository.getAccount(session.accountId)
-    local slots = math.min(
-      tonumber(account and account.character_slots) or 0,
-      tonumber((Config.Multichar or {}).maximumSlots) or 10
-    )
-    local used = #MZIdentityRepository.getCharactersForAccount(session.accountId, true)
-    if used >= slots then return nil, 'character_slots_exhausted' end
-
     local citizenid
     repeat citizenid = MZUtils.generateCitizenId() until not MZPlayerRepository.getByCitizenId(citizenid)
-    local row = MZIdentityRepository.createCharacterDraft({
-      accountId = session.accountId,
-      citizenid = citizenid,
-      metadata = MZPlayerStateNormalizer.buildDefaults()
+    local result, claimErr = MZIdentityRepository.claimCharacterDraft({
+      accountId = session.accountId, sessionId = session.id, requestKey = requestKey,
+      citizenid = citizenid, metadata = MZUtils.jsonEncode(MZPlayerStateNormalizer.buildDefaults()),
+      maximumSlots = tonumber((Config.Multichar or {}).maximumSlots) or 10
     })
-    if not row then return nil, 'character_create_failed' end
-    MZIdentityRepository.recordCharacterRequest(session.accountId, requestKey, 'create', row.id)
-    if MZIdentityRepository.setPendingCharacter(session.id, session.accountId, row.id, row.citizenid) ~= 1 then
-      MZIdentityRepository.archiveDraft(session.accountId, row.id)
-      return nil, 'session_changed'
-    end
-    refreshSession(source, session.id)
-    audit('character_creation_started', source, { type = 'character', id = tostring(row.id) }, 'success')
-    return characterSnapshot(row)
+    if not result then return nil, claimErr or 'character_create_failed' end
+    if not refreshSession(source, session.id) then return nil, 'session_changed' end
+    audit('character_creation_started', source, { type = 'character', id = tostring(result.row.id) }, 'success')
+    if not sessionCurrent(source, session) then return nil, 'session_changed' end
+    return characterSnapshot(result.row), result.replay and 'idempotent_replay' or nil
   end)
 end
 
@@ -389,6 +426,7 @@ function MZIdentityService.getPendingCharacterSnapshot(source)
   local session = MZIdentityService.getSession(source)
   if not session or session.lifecycle ~= 'CHARACTER_CREATING' or session.activeCharacterId then return nil end
   local row = MZIdentityRepository.getCharacterForAccount(session.accountId, session.characterId)
+  if not sessionCurrent(source, session) then return nil end
   return characterSnapshot(row)
 end
 
@@ -421,13 +459,18 @@ function MZIdentityService.activateCharacter(source, characterId, requestKey)
     return nil, 'character_active_elsewhere'
   end
   if tonumber(affected) ~= 1 then return nil, 'session_changed' end
-  session = refreshSession(source, session.id)
+  local boundSessionId = session.id
+  session = refreshSession(source, boundSessionId)
+  if not session then
+    pcall(MZIdentityRepository.unbindCharacter, boundSessionId, 'CHARACTER_SELECTION')
+    return nil, 'session_changed'
+  end
   MZCache.activeSourcesByCharacterId[characterId] = source
   audit('character_activation_started', source, { type = 'character', id = tostring(characterId) }, 'success')
 
   local player, loadErr = MZPlayerService.loadCharacter(source, row, session)
   if not player then
-    MZCache.activeSourcesByCharacterId[characterId] = nil
+    if MZCache.sessionsBySource[source] == session then MZCache.activeSourcesByCharacterId[characterId] = nil end
     MZIdentityRepository.unbindCharacter(session.id, 'CHARACTER_SELECTION')
     refreshSession(source, session.id)
     audit('character_activation_failed', source, { type = 'character', id = tostring(characterId) }, loadErr or 'load_failed')
@@ -436,16 +479,20 @@ function MZIdentityService.activateCharacter(source, characterId, requestKey)
 
   local markOk, marked = pcall(MZIdentityRepository.markCharacterActive, session.id)
   if not markOk or tonumber(marked) ~= 1 then
-    MZCache.activeSourcesByCharacterId[characterId] = nil
-    pcall(MZPlayerService.unloadPlayer, source, 'activation_commit_failed')
+    if MZCache.sessionsBySource[source] == session then MZCache.activeSourcesByCharacterId[characterId] = nil end
+    local cleanupOk, cleaned = pcall(MZPlayerService.unloadPlayer, source, 'activation_commit_failed', nil, nil, nil, player)
+    if not cleanupOk or cleaned == false then print(('[mz_core][identity] activation cleanup failed session=%s'):format(tostring(session.id))) end
     pcall(MZIdentityRepository.unbindCharacter, session.id, 'CHARACTER_SELECTION')
-    MZCache.playersByCitizenId[row.citizenid] = nil
-    MZCache.playersByCharacterId[characterId] = nil
-    MZCache.playersBySource[source] = nil
     audit('character_activation_failed', source, { type = 'character', id = tostring(characterId) }, 'activation_commit_failed')
     return nil, 'activation_commit_failed'
   end
-  session = refreshSession(source, session.id)
+  local markedSessionId = session.id
+  session = refreshSession(source, markedSessionId)
+  if not session then
+    pcall(MZPlayerService.unloadPlayer, source, 'session_changed', nil, nil, nil, player)
+    pcall(MZIdentityRepository.unbindCharacter, markedSessionId, 'CHARACTER_SELECTION')
+    return nil, 'session_changed'
+  end
   player.session = sessionSnapshot(session)
   MZIdentityService.debugLifecycle('activateCharacterSuccess', source, session, characterId)
   local requestRecorded, requestRecordErr = pcall(
@@ -456,16 +503,19 @@ function MZIdentityService.activateCharacter(source, characterId, requestKey)
     print(('[mz_core][identity] activation correlation persistence failed session=%s error=%s')
       :format(tostring(session.id), tostring(requestRecordErr)))
   end
+  local current = MZCache.sessionsBySource[source]
+  if not current or tonumber(current.id) ~= tonumber(session.id)
+    or current._connectionGeneration ~= ConnectionGenerations[source]
+    or MZCache.playersBySource[source] ~= player then
+    pcall(MZPlayerService.unloadPlayer, source, 'session_changed', nil, nil, nil, player)
+    return nil, 'session_changed'
+  end
+  player._activationPending = nil
   local published, publishErr = MZPlayerService.publishPlayerLoaded(source, player)
   if not published then
-    MZCache.activeSourcesByCharacterId[characterId] = nil
-    if MZPlayerStateSyncService and MZPlayerStateSyncService.clearStateBags then
-      pcall(MZPlayerStateSyncService.clearStateBags, source)
-    end
-    MZPlayerStateService.finalizeUnload(source)
-    MZCache.playersByCitizenId[row.citizenid] = nil
-    MZCache.playersByCharacterId[characterId] = nil
-    MZCache.playersBySource[source] = nil
+    if MZCache.sessionsBySource[source] == session then MZCache.activeSourcesByCharacterId[characterId] = nil end
+    local cleanupOk, cleaned = pcall(MZPlayerService.unloadPlayer, source, 'activation_publish_failed', nil, nil, nil, player)
+    if not cleanupOk or cleaned == false then print(('[mz_core][identity] activation cleanup failed session=%s'):format(tostring(session.id))) end
     pcall(MZIdentityRepository.unbindCharacter, session.id, 'CHARACTER_SELECTION')
     refreshSession(source, session.id)
     audit('character_activation_failed', source, { type = 'character', id = tostring(characterId) },
@@ -473,6 +523,7 @@ function MZIdentityService.activateCharacter(source, characterId, requestKey)
     return nil, publishErr or 'player_loaded_publish_failed'
   end
   audit('character_activation_succeeded', source, { type = 'character', id = tostring(characterId) }, 'success')
+  if not sessionCurrent(source, session) or MZCache.playersBySource[source] ~= player then return nil, 'session_changed' end
   return MZPlayerService.getPlayerSnapshot(source)
   end)
 end
@@ -480,11 +531,13 @@ end
 function MZIdentityService.finalizePendingCharacter(source, charinfo, requestKey)
   source, requestKey = validSource(source), validRequestKey(requestKey)
   if not source or not requestKey or type(charinfo) ~= 'table' then return nil, 'invalid_request' end
+  if not MZPlayerService.validateCharinfo(charinfo, true) then return nil, 'invalid_charinfo' end
   local session = MZIdentityService.getSession(source)
   if not session or session.lifecycle ~= 'CHARACTER_CREATING' or session.activeCharacterId then
     return nil, 'character_creation_not_active'
   end
   local row = MZIdentityRepository.getCharacterForAccount(session.accountId, session.characterId)
+  if not sessionCurrent(source, session) then return nil, 'session_changed' end
   if not row or (tostring(row.character_status) ~= 'creating' and tostring(row.character_status) ~= 'active') then
     return nil, 'draft_not_found'
   end
@@ -494,16 +547,15 @@ function MZIdentityService.finalizePendingCharacter(source, charinfo, requestKey
       return nil, 'character_finalize_failed'
     end
   end
+  if not sessionCurrent(source, session) then return nil, 'session_changed' end
   local player, activationErr = MZIdentityService.activateCharacter(source, row.id, requestKey)
   if player then return player, activationErr end
 
   -- Finalization is durable before runtime activation. Re-establish the pending
   -- link after any activation failure so creator retry/cancel remains possible.
   local recoverySession = MZIdentityService.getSession(source)
-  if not recoverySession or not recoverySession.isActive then
-    recoverySession = MZIdentityService.ensureSession(source)
-  end
   if recoverySession and recoverySession.accountId == session.accountId
+    and sessionCurrent(source, session)
     and not recoverySession.activeCharacterId then
     MZIdentityRepository.setPendingCharacter(
       recoverySession.id, recoverySession.accountId, row.id, row.citizenid
@@ -519,10 +571,14 @@ function MZIdentityService.cancelPendingCharacter(source)
   if not session or session.lifecycle ~= 'CHARACTER_CREATING' or session.activeCharacterId then
     return false, 'character_creation_not_active'
   end
-  MZIdentityRepository.archiveDraft(session.accountId, session.characterId)
+  if MZIdentityRepository.archiveDraft(session.accountId, session.characterId) ~= 1 then
+    return false, 'character_cancel_failed'
+  end
+  if not sessionCurrent(source, session) then return false, 'session_changed' end
   MZIdentityRepository.unbindCharacter(session.id, 'CHARACTER_SELECTION')
-  refreshSession(source, session.id)
+  if not refreshSession(source, session.id) then return false, 'session_changed' end
   audit('character_creation_cancelled', source, { type = 'character', id = tostring(session.characterId) }, 'success')
+  if not sessionCurrent(source, session) then return false, 'session_changed' end
   TriggerClientEvent('mz_core:client:characterSelectionRequired', source)
   return true
 end
@@ -533,8 +589,10 @@ function MZIdentityService.closeSession(source, reason)
   local session = MZCache.sessionsBySource[source]
   if session then
     MZIdentityRepository.closeSession(session.id, reason or 'disconnected')
+    if MZCache.sessionsBySource[source] ~= session then return false, 'session_changed' end
     if session.activeCharacterId then MZCache.activeSourcesByCharacterId[session.activeCharacterId] = nil end
     audit('session_closed', source, { type = 'session', id = tostring(session.id) }, 'success')
+    if MZCache.sessionsBySource[source] ~= session then return false, 'session_changed' end
     TriggerEvent(
       'mz_core:server:identitySessionClosed',
       source,
@@ -542,6 +600,7 @@ function MZIdentityService.closeSession(source, reason)
       reason or 'disconnected'
     )
   end
+  if MZCache.sessionsBySource[source] ~= session then return false, 'session_changed' end
   MZCache.sessionsBySource[source] = nil
   ActivationLocks[source] = nil
   RequestWindows[source] = nil

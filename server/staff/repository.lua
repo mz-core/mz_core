@@ -92,19 +92,27 @@ function MZStaffRepository.updateRole(roleId, data)
   return MySQL.update.await([[
     UPDATE mz_staff_roles
     SET name = ?, level = ?, active = ?, revision = revision + 1
-    WHERE id = ?
-  ]], { data.name, data.level, data.active and 1 or 0, roleId })
+    WHERE id = ? AND revision = ?
+  ]], { data.name, data.level, data.active and 1 or 0, roleId, data.revision })
 end
 
-function MZStaffRepository.setRolePermissions(roleId, selected)
-  for permission in pairs(MZStaffPermissionSet or {}) do
-    MySQL.insert.await([[
-      INSERT INTO mz_staff_role_permissions (role_id, permission, allow)
-      VALUES (?, ?, ?)
-      ON DUPLICATE KEY UPDATE allow = VALUES(allow)
-    ]], { roleId, permission, selected[permission] == true and 1 or 0 })
-  end
-  MySQL.update.await('UPDATE mz_staff_roles SET revision = revision + 1 WHERE id = ?', { roleId })
+function MZStaffRepository.setRolePermissions(roleId, selected, expectedRevision)
+  local conflict = false
+  local ok, committed = pcall(MySQL.startTransaction, function(query)
+    local changed = query('UPDATE mz_staff_roles SET revision = revision + 1 WHERE id = ? AND revision = ?', { roleId, expectedRevision })
+    local affected = type(changed) == 'table' and tonumber(changed.affectedRows) or tonumber(changed)
+    if affected ~= 1 then conflict = true; return false end
+    for permission in pairs(MZStaffPermissionSet or {}) do
+      query([[
+        INSERT INTO mz_staff_role_permissions (role_id, permission, allow)
+        VALUES (?, ?, ?)
+        ON DUPLICATE KEY UPDATE allow = VALUES(allow)
+      ]], { roleId, permission, selected[permission] == true and 1 or 0 })
+    end
+    return true
+  end)
+  if not ok or committed ~= true then return false, conflict and 'role_conflict' or 'database_error' end
+  return true
 end
 
 function MZStaffRepository.assign(data)

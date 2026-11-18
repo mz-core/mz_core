@@ -71,6 +71,7 @@ local statements = {
     nationality VARCHAR(64) NOT NULL DEFAULT '',
     phone VARCHAR(32) NOT NULL DEFAULT '',
     metadata LONGTEXT NULL,
+    metadata_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
     character_status VARCHAR(24) NOT NULL DEFAULT 'active',
     archived_at TIMESTAMP NULL DEFAULT NULL,
     pos_x DOUBLE NOT NULL DEFAULT 0,
@@ -178,7 +179,7 @@ local statements = {
 local schemas = {
   mz_accounts = { columns = { 'account_id', 'status', 'character_slots' }, indexes = { 'PRIMARY', 'idx_mz_accounts_status' } },
   mz_account_identifiers = { columns = { 'id', 'account_id', 'provider', 'identifier' }, indexes = { 'PRIMARY', 'uq_mz_account_identifier', 'idx_mz_account_identifiers_account' } },
-  mz_players = { columns = { 'id', 'account_id', 'citizenid', 'metadata', 'character_status', 'pos_x', 'pos_y', 'pos_z', 'heading' }, indexes = { 'PRIMARY', 'idx_mz_players_account_status', 'uq_mz_players_citizenid' }, notNull = { 'account_id' }, forbidden = { 'license' } },
+  mz_players = { columns = { 'id', 'account_id', 'citizenid', 'metadata', 'metadata_version', 'character_status', 'pos_x', 'pos_y', 'pos_z', 'heading' }, indexes = { 'PRIMARY', 'idx_mz_players_account_status', 'uq_mz_players_citizenid' }, notNull = { 'account_id', 'metadata_version' }, forbidden = { 'license' } },
   mz_player_sessions = { columns = { 'id', 'account_id', 'character_id', 'active_character_id', 'citizenid', 'source', 'lifecycle', 'revision', 'is_active' }, indexes = { 'PRIMARY', 'idx_mz_player_sessions_account', 'uq_mz_player_sessions_active_character' }, notNull = { 'account_id' }, forbidden = { 'license' } },
   mz_character_requests = { columns = { 'id', 'account_id', 'request_key', 'operation', 'status' }, indexes = { 'PRIMARY', 'uq_mz_character_request' } },
   mz_staff_roles = { columns = { 'id', 'code', 'level', 'active', 'revision' }, indexes = { 'PRIMARY', 'uq_mz_staff_roles_code' } },
@@ -212,21 +213,36 @@ local function validateSchema(tableName, expected)
   if tostring(tableRow.engine or ''):lower() ~= 'innodb' then failReset(('invalid_engine:%s'):format(tableName)) end
   if not tostring(tableRow.table_collation or ''):lower():find('^utf8mb4_') then failReset(('invalid_charset:%s'):format(tableName)) end
 
-  local columns = {}
+  local columns, columnDetails = {}, {}
   for _, row in ipairs(MySQL.query.await([[
-    SELECT column_name, is_nullable FROM information_schema.columns
+    SELECT column_name, is_nullable, data_type, column_type, column_default FROM information_schema.columns
     WHERE table_schema = DATABASE() AND table_name = ?
   ]], { tableName }) or {}) do
     columns[tostring(row.column_name or ''):lower()] = tostring(row.is_nullable or ''):upper()
+    columnDetails[tostring(row.column_name or ''):lower()] = row
   end
   for _, column in ipairs(expected.columns or {}) do
+    if tableName == 'mz_players' and column == 'metadata_version' and not columns[column] then
+      error('schema_migration_required:mz_players.metadata_version', 0)
+    end
     if not columns[column:lower()] then failReset(('missing_column:%s.%s'):format(tableName, column)) end
   end
   for _, column in ipairs(expected.notNull or {}) do
+    if tableName == 'mz_players' and column == 'metadata_version' and columns[column] ~= 'NO' then
+      error('schema_incompatible:mz_players.metadata_version', 0)
+    end
     if columns[column:lower()] ~= 'NO' then failReset(('nullable_column:%s.%s'):format(tableName, column)) end
   end
   for _, column in ipairs(expected.forbidden or {}) do
     if columns[column:lower()] then failReset(('obsolete_column:%s.%s'):format(tableName, column)) end
+  end
+  if tableName == 'mz_players' then
+    local version = columnDetails.metadata_version
+    if not version or tostring(version.data_type or ''):lower() ~= 'bigint'
+      or not tostring(version.column_type or ''):lower():find('unsigned', 1, true)
+      or tostring(version.column_default or '') ~= '0' then
+      error('schema_incompatible:mz_players.metadata_version', 0)
+    end
   end
 
   local indexes = {}

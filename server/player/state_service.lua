@@ -1,6 +1,8 @@
 MZPlayerStateService = {}
 
 local RuntimeStates = {}
+local StateReservations = {}
+local MAX_STATE_RESERVATIONS = 128
 local shuttingDown = false
 local auditSequence = 0
 local tokenSequence = 0
@@ -213,13 +215,22 @@ local function featureEnabled()
   return config().enabled ~= false and shuttingDown ~= true
 end
 
-local function getPlayerAndRuntime(source)
+local function getPlayerAndRuntime(source, allowPending)
   source = tonumber(source)
   if not source or source <= 0 then return nil, nil, 'player_not_found' end
   local player = MZPlayerService and MZPlayerService.getPlayer and MZPlayerService.getPlayer(source) or nil
   if not player then return nil, nil, 'player_not_found' end
+  if player._activationPending and not allowPending then return nil, nil, 'player_not_loaded' end
   if not player.state or player.state.loaded ~= true then return player, nil, 'player_not_loaded' end
   local playerSessionId = player.session and tonumber(player.session.id or player.session.sessionId) or nil
+  if not allowPending and MZIdentityService and type(MZIdentityService.getSession) == 'function' then
+    local session = MZIdentityService.getSession(source)
+    if not session or session.isActive ~= true or tonumber(session.id) ~= playerSessionId
+      or tonumber(session.accountId) ~= tonumber(player.accountId)
+      or tonumber(session.activeCharacterId) ~= tonumber(player.characterId) then
+      return nil, nil, 'player_not_loaded'
+    end
+  end
   local runtime = RuntimeStates[source]
   if not runtime or runtime.citizenid ~= player.citizenid or runtime.sessionId ~= playerSessionId then
     return player, nil, 'player_not_loaded'
@@ -332,8 +343,7 @@ local function acquireLock(source, allowUnloading)
     end
     if type(Wait) ~= 'function' then return nil, 'lock_timeout' end
     Wait(0)
-    runtime = RuntimeStates[source]
-    if not runtime then return nil, 'player_not_loaded' end
+    if RuntimeStates[source] ~= runtime then return nil, 'player_not_loaded' end
   end
 
   if runtime.unloading == true and allowUnloading ~= true then return nil, 'unloading' end
@@ -355,8 +365,11 @@ local function withLock(source, operation, allowUnloading, handler)
   local handle, lockErr = acquireLock(source, allowUnloading)
   if not handle then return false, errorResult(lockErr) end
   handle.runtime.lockOperation = operation
+  local recoveryEpoch = handle.runtime.recoveryEpoch or 0
   local packed = table.pack(xpcall(handler, debug.traceback, handle.runtime))
   releaseLock(handle)
+  if RuntimeStates[source] ~= handle.runtime then return false, errorResult('unloading') end
+  if (handle.runtime.recoveryEpoch or 0) ~= recoveryEpoch then return false, errorResult('unloading') end
   if packed[1] ~= true then
     safeLog('operation_failed', source, {
       operation = operation,
@@ -440,25 +453,51 @@ local function flushLocked(source, player, runtime, reason)
     return true, successResult(runtime, buildSnapshot(player, runtime), false, 'not_dirty')
   end
 
-  local ok, persisted = pcall(MZPlayerRepository.updateMetadata, player.citizenid, player.metadata)
+  if runtime.persistenceBlocked then
+    return false, errorResult('persistence_failed', { reason = runtime.persistenceBlocked, dirtyFields = fields })
+  end
+  runtime.pendingWrite = {
+    metadata = clone(player.metadata), expectedVersion = runtime.metadataVersion,
+    revision = runtime.revision, sessionId = runtime.sessionId, operationId = opaqueToken('metadata', source), inFlight = true
+  }
+  local attempt, recoveryEpoch = runtime.pendingWrite, runtime.recoveryEpoch or 0
+  local ok, persisted, result = pcall(MZPlayerRepository.updateMetadata,
+    player.accountId, player.characterId, player.citizenid, runtime.metadataVersion, attempt.metadata,
+    function(encoded) attempt.encoded = encoded end)
+  attempt.inFlight = false
+  if (runtime.recoveryEpoch or 0) ~= recoveryEpoch then return false, errorResult('unloading') end
   if not ok or persisted ~= true then
-    safeLog('persistence_failed', source, {
-      operation = 'flush', reason = reason, result = 'failed', error = 'persistence_failed',
-      revision = runtime.revision
-    })
-    if MZPlayerStateObservability then
-      MZPlayerStateObservability.record('player_state_persistence_failed', {
-        source = source, citizenid = player.citizenid, revision = runtime.revision,
-        reason = reason, result = 'failed', error = 'persistence_failed'
-      }, 'mz_core')
+    runtime.persistenceBlocked = ok and (result or 'unknown') or 'unknown'
+    if RuntimeStates[source] == runtime then
+      safeLog('persistence_failed', source, {
+        operation = 'flush', reason = reason, result = runtime.persistenceBlocked == 'unknown' and 'unknown' or 'failed',
+        error = runtime.persistenceBlocked,
+        revision = runtime.revision
+      })
+      if RuntimeStates[source] == runtime and MZPlayerStateObservability then
+        MZPlayerStateObservability.record('player_state_persistence_failed', {
+          source = source, citizenid = player.citizenid, revision = runtime.revision,
+          reason = reason, result = 'failed', error = 'persistence_failed'
+        }, 'mz_core')
+      end
+    else
+      print(('[mz_core][player_state][retained_write_failed] accountId=%s characterId=%s sessionId=%s error=%s')
+        :format(tostring(player.accountId), tostring(player.characterId), tostring(runtime.sessionId), tostring(runtime.persistenceBlocked)))
     end
     return false, errorResult('persistence_failed', {
       revision = runtime.revision,
+      reason = runtime.persistenceBlocked,
       state = buildSnapshot(player, runtime),
       dirtyFields = fields
     })
   end
 
+  runtime.metadataVersion = result
+  if runtime.retained then
+    runtime.pendingWrite.outcome = 'confirmed'
+  else
+    runtime.pendingWrite = nil
+  end
   runtime.dirty = {}
   runtime.dirtySince = nil
   runtime.lastFlushAt = nowMs()
@@ -475,6 +514,7 @@ local function criticalFlushLocked(source, player, runtime, reason)
   end
   local ok, result = flushLocked(source, player, runtime, reason)
   if ok then return true end
+  if RuntimeStates[source] ~= runtime then return false, errorResult('unloading') end
   if MZPlayerStateObservability then
     MZPlayerStateObservability.record('player_state_persistence_pending', {
       source = source, citizenid = player.citizenid, revision = runtime.revision,
@@ -496,6 +536,7 @@ function MZPlayerStateService.initializePlayer(source, corrections)
   RuntimeStates[source] = {
     citizenid = player.citizenid,
     sessionId = player.session and tonumber(player.session.id or player.session.sessionId) or nil,
+    metadataVersion = player.metadataVersion,
     syncSessionToken = opaqueToken('session', source),
     observationToken = opaqueToken('observation', source),
     revision = 0,
@@ -518,6 +559,10 @@ function MZPlayerStateService.initializePlayer(source, corrections)
     }
   }
   local runtime = RuntimeStates[source]
+  local reservation = StateReservations[tonumber(player.characterId)]
+  if reservation and reservation.sessionId == runtime.sessionId and reservation.accountId == player.accountId then
+    reservation.player, reservation.runtime = player, runtime
+  end
   if MZPlayerStateObservability then
     MZPlayerStateObservability.playerLoaded(source, player.metadata and player.metadata.deathState or 'alive')
   end
@@ -535,11 +580,13 @@ function MZPlayerStateService.initializePlayer(source, corrections)
         operation = 'load_normalization', result = 'defaults_applied', correctionCount = #corrections,
         error = 'invalid_metadata', revision = 0
       })
+      if RuntimeStates[source] ~= runtime then return false, errorResult('unloading') end
     end
     safeLog('metadata_normalized', source, {
       operation = 'load_normalization', result = 'corrected', correctionCount = #corrections,
       revision = 0
     })
+    if RuntimeStates[source] ~= runtime then return false, errorResult('unloading') end
     if MZPlayerStateObservability then
       MZPlayerStateObservability.record('player_state_normalized', {
         source = source, citizenid = player.citizenid, revision = 0,
@@ -547,6 +594,7 @@ function MZPlayerStateService.initializePlayer(source, corrections)
       }, 'mz_core')
     end
     return withLock(source, 'load_normalization_flush', false, function(lockedRuntime)
+      if lockedRuntime ~= runtime or MZPlayerService.getPlayer(source) ~= player then return false, errorResult('unloading') end
       local ok, result = flushLocked(source, player, lockedRuntime, 'load_normalization')
       if not ok then
         return false, errorResult('persistence_pending', {
@@ -561,9 +609,9 @@ function MZPlayerStateService.initializePlayer(source, corrections)
   return true, successResult(runtime, buildSnapshot(player, runtime), false, 'initialized')
 end
 
-function MZPlayerStateService.getState(source)
+function MZPlayerStateService.getState(source, allowPending)
   if config().enabled == false then return false, errorResult('feature_disabled') end
-  local player, runtime, err = getPlayerAndRuntime(source)
+  local player, runtime, err = getPlayerAndRuntime(source, allowPending == true)
   if not player then return false, errorResult(err) end
   if not runtime then return false, errorResult(err) end
   return true, successResult(runtime, buildSnapshot(player, runtime), false)
@@ -907,6 +955,7 @@ function MZPlayerStateService.applyHealthDamage(source, amount, context)
     lockedRuntime.lastCriticalTransitionId = nextAuditId()
     lockedRuntime.lastCriticalTransitionAt = timestamp
     syncPresentation(source, 'fatal_health_damage', { forcePhysicalApply = true })
+    if RuntimeStates[source] ~= lockedRuntime then return false, errorResult('unloading') end
     safeLog('death_transition', source, {
       auditId = lockedRuntime.lastCriticalTransitionId,
       operation = operation,
@@ -918,6 +967,7 @@ function MZPlayerStateService.applyHealthDamage(source, amount, context)
       result = 'changed',
       revision = lockedRuntime.revision
     })
+    if RuntimeStates[source] ~= lockedRuntime then return false, errorResult('unloading') end
     local vitalChange = {
       kind = 'damage', cause = cause, healthDelta = previousHealth,
       armorDelta = 0, fatal = true, deathState = nextState
@@ -1031,6 +1081,7 @@ local function transitionDeath(source, nextState, operation, context)
         reason = context.reason, invokingResource = context.invokingResource, actorSource = context.actorSource,
         result = 'rejected', error = 'invalid_transition', revision = lockedRuntime.revision
       })
+      if RuntimeStates[source] ~= lockedRuntime then return false, errorResult('unloading') end
       if MZPlayerStateObservability then
         MZPlayerStateObservability.record('player_state_transition_rejected', {
           source = source, citizenid = currentPlayer.citizenid, revision = lockedRuntime.revision,
@@ -1050,12 +1101,14 @@ local function transitionDeath(source, nextState, operation, context)
     lockedRuntime.lastCriticalTransitionId = nextAuditId()
     lockedRuntime.lastCriticalTransitionAt = timestamp
     syncPresentation(source, operation, { forcePhysicalApply = true })
+    if RuntimeStates[source] ~= lockedRuntime then return false, errorResult('unloading') end
     safeLog('death_transition', source, {
       auditId = lockedRuntime.lastCriticalTransitionId,
       operation = operation, previousDeathState = previousState, nextDeathState = nextState,
       reason = context.reason, invokingResource = context.invokingResource, actorSource = context.actorSource,
       result = 'changed', revision = lockedRuntime.revision
     })
+    if RuntimeStates[source] ~= lockedRuntime then return false, errorResult('unloading') end
     if MZPlayerStateObservability then
       MZPlayerStateObservability.playerTransition(source, previousState, nextState)
       MZPlayerStateObservability.record('player_state_transition', {
@@ -1357,14 +1410,26 @@ function MZPlayerStateService.shouldLogClientSyncRejection(source, cooldownMs)
   return true
 end
 
-function MZPlayerStateService.beginUnload(source, reason)
-  local player, runtime, playerErr = getPlayerAndRuntime(source)
+function MZPlayerStateService.markDisconnecting(player)
+  if type(player) ~= 'table' then return false end
+  local entry = StateReservations[tonumber(player.characterId)]
+  if not entry or entry.player ~= player or not entry.runtime then return false end
+  entry.pending = true
+  entry.runtime.unloading = true
+  return true
+end
+
+function MZPlayerStateService.beginUnload(source, reason, expectedPlayer)
+  local player, runtime, playerErr = getPlayerAndRuntime(source, true)
   if not player or not runtime then return false, errorResult(playerErr) end
+  if expectedPlayer and expectedPlayer ~= player then return false, errorResult('player_not_loaded') end
   runtime.unloading = true
+  local entry = StateReservations[tonumber(player.characterId)]
+  if entry and entry.runtime == runtime and entry.player == player then entry.pending = true end
   local ok, result = withLock(source, 'unload_flush', true, function(lockedRuntime)
     return flushLocked(source, player, lockedRuntime, reason or 'unload')
   end)
-  if not ok then
+  if not ok and RuntimeStates[source] == runtime then
     safeLog('final_flush_failed', source, {
       operation = 'unload_flush', reason = reason, result = 'failed',
       error = result and result.code or 'persistence_failed', revision = runtime.revision
@@ -1373,9 +1438,118 @@ function MZPlayerStateService.beginUnload(source, reason)
   return ok, result
 end
 
-function MZPlayerStateService.finalizeUnload(source)
+function MZPlayerStateService.reservePlayer(accountId, characterId, citizenid, sessionId, source)
+  accountId, characterId, sessionId = tonumber(accountId), tonumber(characterId), tonumber(sessionId)
+  if not accountId or not characterId or not sessionId or type(citizenid) ~= 'string' or citizenid == '' then
+    return false, 'invalid_session_binding'
+  end
+  if StateReservations[characterId] then return false, 'player_state_pending' end
+  local count = 0
+  for _ in pairs(StateReservations) do count = count + 1 end
+  if count >= MAX_STATE_RESERVATIONS then return false, 'player_state_capacity' end
+  StateReservations[characterId] = { accountId = accountId, characterId = characterId, citizenid = citizenid, sessionId = sessionId, source = tonumber(source) }
+  return true
+end
+
+function MZPlayerStateService.releaseUninitializedForSource(source, watermark)
+  for characterId, entry in pairs(StateReservations) do
+    if entry.source == tonumber(source) and entry.sessionId <= watermark and not entry.runtime and not entry.pending then
+      StateReservations[characterId] = nil
+    end
+  end
+end
+
+function MZPlayerStateService.releasePlayer(characterId, sessionId)
+  characterId, sessionId = tonumber(characterId), tonumber(sessionId)
+  local entry = StateReservations[characterId]
+  if not entry or entry.sessionId ~= sessionId or entry.pending then return false end
+  if entry.runtime and (next(entry.runtime.dirty) ~= nil or entry.runtime.lock or entry.runtime.pendingWrite) then return false end
+  StateReservations[characterId] = nil
+  return true
+end
+
+function MZPlayerStateService.getPendingPlayerState(accountId, characterId)
+  local entry = StateReservations[tonumber(characterId)]
+  if not entry or not entry.pending or entry.accountId ~= tonumber(accountId) then return nil end
+  return {
+    accountId = entry.accountId, characterId = entry.characterId, citizenid = entry.citizenid,
+    sessionId = entry.sessionId, metadata = clone(entry.player.metadata),
+    metadataVersion = entry.runtime.metadataVersion, pendingWrite = clone(entry.runtime.pendingWrite),
+    dirty = clone(entry.runtime.dirty), persistenceBlocked = entry.runtime.persistenceBlocked,
+    recoveryAttempts = entry.recoveryAttempts, recoveryError = entry.recoveryError,
+    recoveryTerminal = entry.recoveryTerminal
+  }
+end
+
+local function recoverPending(entry)
+  if not entry or not entry.pending or entry.recoveryBusy or entry.recoveryTerminal or shuttingDown then return false end
+  if entry.recoveryNextAt and nowMs() < entry.recoveryNextAt then return false end
+  local runtime, player = entry.runtime, entry.player
+  if not runtime or not player or not (runtime.retained or MZPlayerService.getPlayer(player.source) ~= player) then return false end
+  if runtime.lock and not (runtime.pendingWrite and runtime.pendingWrite.inFlight
+    and type(runtime.pendingWrite.encoded) == 'string') then
+    entry.recoveryAttempts = (entry.recoveryAttempts or 0) + 1
+    entry.recoveryError = 'runtime_busy'
+    if entry.recoveryAttempts >= 5 then entry.recoveryTerminal = 'runtime_busy' end
+    entry.recoveryNextAt = nowMs() + math.min(60000, 1000 * (2 ^ entry.recoveryAttempts))
+    print(('[mz_core][player_state][recovery_failed] accountId=%s characterId=%s error=runtime_busy attempts=%s terminal=%s')
+      :format(tostring(entry.accountId), tostring(entry.characterId), tostring(entry.recoveryAttempts),
+        tostring(entry.recoveryTerminal ~= nil)))
+    return false
+  end
+  if not entry.recoveryEncoded then
+    local ok, encoded = pcall(function() return json.encode(clone(player.metadata)) end)
+    if not ok or type(encoded) ~= 'string' then
+      entry.recoveryTerminal = 'encode_failed'
+      print(('[mz_core][player_state][recovery_failed] accountId=%s characterId=%s error=encode_failed terminal=true')
+        :format(tostring(entry.accountId), tostring(entry.characterId)))
+      return false
+    end
+    entry.recoveryEncoded = encoded
+    runtime.recoveryEpoch = (runtime.recoveryEpoch or 0) + 1
+  end
+  entry.recoveryBusy = true
+  entry.recoveryAttempted = true
+  entry.recoveryAttempts = (entry.recoveryAttempts or 0) + 1
+  local called, recovered, why = pcall(MZPlayerRepository.recoverPendingMetadata, entry, entry.recoveryEncoded)
+  entry.recoveryBusy = false
+  if StateReservations[entry.characterId] ~= entry then return false end
+  if called and recovered == true then
+    StateReservations[entry.characterId] = nil
+    print(('[mz_core][player_state][recovery_complete] accountId=%s characterId=%s sessionId=%s operationId=%s'):format(
+      tostring(entry.accountId), tostring(entry.characterId), tostring(entry.sessionId),
+      tostring(runtime.pendingWrite and runtime.pendingWrite.operationId or 'none')))
+    return true
+  end
+  why = called and (why or 'unknown') or 'unknown'
+  entry.recoveryError = why
+  if why ~= 'unknown' or entry.recoveryAttempts >= 5 then entry.recoveryTerminal = why end
+  entry.recoveryNextAt = nowMs() + math.min(60000, 1000 * (2 ^ entry.recoveryAttempts))
+  print(('[mz_core][player_state][recovery_failed] accountId=%s characterId=%s sessionId=%s operationId=%s error=%s attempts=%s terminal=%s'):format(
+      tostring(entry.accountId), tostring(entry.characterId), tostring(entry.sessionId),
+      tostring(runtime.pendingWrite and runtime.pendingWrite.operationId or 'none'), tostring(why), tostring(entry.recoveryAttempts),
+      tostring(entry.recoveryTerminal ~= nil)))
+  return false
+end
+
+function MZPlayerStateService.finalizeUnload(source, expectedSessionId)
+  local runtime = RuntimeStates[tonumber(source)]
+  if expectedSessionId ~= nil and (not runtime or runtime.sessionId ~= tonumber(expectedSessionId)) then return false end
+  if runtime then
+    local player = MZPlayerService.getPlayer(source)
+    local entry = player and StateReservations[tonumber(player.characterId)]
+    if next(runtime.dirty) ~= nil or runtime.lock or runtime.pendingWrite or runtime.persistenceBlocked then
+      if not entry or entry.runtime ~= runtime or entry.player ~= player then return false end
+      entry.pending, runtime.retained = true, true
+      print(('[mz_core][player_state][state_retained] accountId=%s characterId=%s sessionId=%s'):format(
+        tostring(entry.accountId), tostring(entry.characterId), tostring(entry.sessionId)))
+    elseif entry and entry.runtime == runtime then
+      StateReservations[entry.characterId] = nil
+    end
+  end
   if MZPlayerStateObservability then MZPlayerStateObservability.playerUnloaded(source) end
   RuntimeStates[tonumber(source)] = nil
+  return true
 end
 
 function MZPlayerStateService.beginShutdown()
@@ -1397,6 +1571,8 @@ end
 if rawget(_G, 'MZ_PLAYER_STATE_TESTING') == true then
   MZPlayerStateService._test = {
     getRuntime = function(source) return RuntimeStates[tonumber(source)] end,
+    getReservation = function(characterId) return StateReservations[tonumber(characterId)] end,
+    recoverPending = function(characterId) return recoverPending(StateReservations[tonumber(characterId)]) end,
     setLock = function(source, value) RuntimeStates[tonumber(source)].lock = value end,
     markDirty = markDirty,
     resetShutdown = function() shuttingDown = false end
@@ -1409,6 +1585,12 @@ if type(CreateThread) == 'function' then
       local interval = tonumber(config().persistence and config().persistence.flushIntervalMs) or 30000
       Wait(interval)
       if not shuttingDown and config().enabled ~= false then
+        for _, entry in pairs(StateReservations) do
+          if entry.pending and not entry.recoveryBusy and not entry.recoveryTerminal
+            and (not entry.recoveryNextAt or nowMs() >= entry.recoveryNextAt) then
+            CreateThread(function() recoverPending(entry) end)
+          end
+        end
         local sources = {}
         for source, runtime in pairs(RuntimeStates) do
           if runtime.unloading ~= true and next(runtime.dirty) ~= nil then sources[#sources + 1] = source end

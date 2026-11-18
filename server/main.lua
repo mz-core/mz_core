@@ -1,11 +1,17 @@
 lib.callback.register('mz_core:server:getPlayerData', function(source)
   if not MZPlayerService.isPlayerLoaded(source) then return nil end
+  local player = MZPlayerService.getPlayer(source)
   MZPlayerService.touchPlayer(source)
+  if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return nil end
   return MZPlayerService.getPlayerSnapshot(source)
 end)
 
 lib.callback.register('mz_core:server:getPlayerSession', function(source)
+  local session = MZIdentityService.getSession(source)
+  if not session then return nil end
   MZPlayerService.touchPlayer(source)
+  local current = MZIdentityService.getSession(source)
+  if not current or tonumber(current.id) ~= tonumber(session.id) then return nil end
   return MZIdentityService.getSessionSnapshot(source)
 end)
 
@@ -15,6 +21,7 @@ lib.callback.register('mz_core:server:getSpawnData', function(source)
   local model = 'mp_m_freemode_01'
 
   local lastPosition = MZPlayerService.getLastPosition(source)
+  if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return nil end
   local spawnData
   if lastPosition then
     spawnData = {
@@ -40,15 +47,18 @@ lib.callback.register('mz_core:server:getSpawnData', function(source)
         model = GetHashKey(model), bucket = GetPlayerRoutingBucket(source),
         x = spawnData.x, y = spawnData.y, z = spawnData.z, reason = 'core_spawn'
       })
+      if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return end
       if type(lifecycleId) == 'string' then spawnData.securityLifecycleId = lifecycleId end
       exports['mz_banguard']:RegisterSecurityLease(source, 'player.model.change', 10000, {
         model = GetHashKey(model), quantity = 1, reason = 'core_spawn'
       })
+      if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return end
       exports['mz_banguard']:RegisterSecurityLease(source, 'movement.teleport', 10000, {
         x = spawnData.x, y = spawnData.y, z = spawnData.z, quantity = 4, reason = 'core_spawn'
       })
     end)
   end
+  if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return nil end
   return spawnData
 end)
 
@@ -79,7 +89,7 @@ exports('SpawnPlayerForMedical', function(source, request)
     return false, 'invalid_state'
   end
   local player = MZPlayerService.getPlayer(source)
-  if not player then return false, 'player_not_loaded' end
+  if not player or not MZPlayerService.isPlayerLoaded(source) then return false, 'player_not_loaded' end
   local model = 'mp_m_freemode_01'
 
   if GetResourceState('mz_banguard') == 'started' then
@@ -87,11 +97,14 @@ exports('SpawnPlayerForMedical', function(source, request)
       exports['mz_banguard']:RegisterSecurityLease(source, 'player.model.change', 10000, {
         model = GetHashKey(model), quantity = 1, reason = 'hospital_respawn'
       })
+      if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return end
       exports['mz_banguard']:RegisterSecurityLease(source, 'movement.teleport', 10000, {
         x = x, y = y, z = z, quantity = 4, reason = 'hospital_respawn'
       })
     end)
   end
+
+  if MZPlayerService.getPlayer(source) ~= player or not MZPlayerService.isPlayerLoaded(source) then return false, 'session_changed' end
 
   TriggerClientEvent('mz_core:client:spawnPlayer', source, {
     x = x, y = y, z = z, heading = heading, model = model,

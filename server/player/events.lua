@@ -171,12 +171,16 @@ local function scheduleLoadPlayer(src, reason)
     return
   end
 
-  LoadingPlayers[src] = true
+  local attempt = {}
+  LoadingPlayers[src] = attempt
+  local function current() return LoadingPlayers[src] == attempt end
+  local function finish() if current() then LoadingPlayers[src] = nil end end
 
   CreateThread(function()
     local ready, readyErr = waitForCoreReady(PLAYER_LOAD_READY_TIMEOUT_MS)
+    if not current() then return end
     if not ready then
-      LoadingPlayers[src] = nil
+      finish()
       print(('[mz_core] failed to load player source %s name=%s stage=waitForCoreReady error=%s reason=%s'):format(
         tostring(src),
         tostring(GetPlayerName(src) or 'unknown'),
@@ -187,16 +191,17 @@ local function scheduleLoadPlayer(src, reason)
     end
 
     if not GetPlayerName(src) then
-      LoadingPlayers[src] = nil
+      finish()
       return
     end
 
     local ok, session, sessionErr = xpcall(function()
       return MZIdentityService.ensureSession(src)
     end, debug.traceback)
+    if not current() then return end
 
     if not ok then
-      LoadingPlayers[src] = nil
+      finish()
       print(('[mz_core] failed to resolve account source %s name=%s error=%s reason=%s'):format(
         tostring(src),
         tostring(GetPlayerName(src) or 'unknown'),
@@ -207,7 +212,7 @@ local function scheduleLoadPlayer(src, reason)
     end
 
     if not session then
-      LoadingPlayers[src] = nil
+      finish()
       print(('[mz_core] failed to create session source %s name=%s error=%s reason=%s'):format(
         tostring(src),
         tostring(GetPlayerName(src) or 'unknown'),
@@ -217,6 +222,8 @@ local function scheduleLoadPlayer(src, reason)
       return
     end
 
+    local currentSession = MZIdentityService.getSession(src)
+    if not currentSession or tonumber(currentSession.id) ~= tonumber(session.id) then finish(); return end
     MZIdentityService.debugLifecycle('characterSelectionRequired', src, session)
     TriggerClientEvent('mz_core:client:characterSelectionRequired', src, {
       accountId = session.accountId,
@@ -224,7 +231,7 @@ local function scheduleLoadPlayer(src, reason)
       lifecycle = session.lifecycle
     })
 
-    LoadingPlayers[src] = nil
+    finish()
   end)
 end
 
@@ -256,17 +263,26 @@ AddEventHandler('playerDropped', function(reason)
     return
   end
 
-  persistObservedPosition(sourceId, nil, 'player_dropped', false)
   LoadingPlayers[sourceId] = nil
+  local droppedPlayer = MZCache.playersBySource[sourceId]
+  local droppedSession = MZCache.sessionsBySource[sourceId]
+  local stateFlushOk, stateFlushResult
+  if droppedPlayer then
+    if MZPlayerStateService.markDisconnecting then MZPlayerStateService.markDisconnecting(droppedPlayer) end
+    stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(sourceId, reason or 'player_dropped', droppedPlayer)
+  end
+  if MZCache.playersBySource[sourceId] ~= droppedPlayer or MZCache.sessionsBySource[sourceId] ~= droppedSession then return end
+  persistObservedPosition(sourceId, nil, 'player_dropped', false)
+  if MZCache.playersBySource[sourceId] ~= droppedPlayer or MZCache.sessionsBySource[sourceId] ~= droppedSession then return end
   PositionSaveAttempts[sourceId] = nil
   for key in pairs(PositionRejectionAudit) do
     if key:find(('^%s:'):format(sourceId)) then PositionRejectionAudit[key] = nil end
   end
 
-  local stateFlushOk, stateFlushResult = MZPlayerStateService.beginUnload(sourceId, reason or 'player_dropped')
-
-  MZPlayerService.unloadPlayer(sourceId, reason, true, stateFlushOk, stateFlushResult)
-  MZIdentityService.closeSession(sourceId, reason or 'player_dropped')
+  if droppedPlayer then MZPlayerService.unloadPlayer(sourceId, reason, true, stateFlushOk, stateFlushResult, droppedPlayer) end
+  if MZCache.sessionsBySource[sourceId] == droppedSession then
+    MZIdentityService.closeSession(sourceId, reason or 'player_dropped')
+  end
 end)
 
 AddEventHandler('onResourceStop', function(resourceName)

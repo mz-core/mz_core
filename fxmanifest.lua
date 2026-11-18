@@ -7,7 +7,7 @@ files { 'locales/*.json' }
 name 'mz_core'
 author 'Mazus'
 description 'Modular FiveM core framework base'
-version '1.0.0'
+version '1.0.1'
 
 shared_scripts {
   '@ox_lib/init.lua',

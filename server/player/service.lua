@@ -3,6 +3,7 @@ MZPlayerService = {}
 local CORE_READY_WAIT_STEP_MS = 50
 local CORE_READY_WAIT_TIMEOUT_MS = 15000
 local LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS = 15000
+local MAX_METADATA_BYTES = 65536
 local LoadInFlightBySource = {}
 
 local function finiteNumber(value)
@@ -35,6 +36,7 @@ local function buildPlayerData(source, row)
     source = source,
     accountId = tonumber(row.account_id),
     characterId = tonumber(row.id),
+    metadataVersion = row.metadata_version_exact,
     citizenid = row.citizenid,
     charinfo = {
       firstname = row.firstname,
@@ -117,11 +119,11 @@ local function waitForCoreReady(timeoutMs)
   end
 end
 
-local function waitForLoadInFlight(source, timeoutMs)
+local function waitForLoadInFlight(source, timeoutMs, attempt)
   local waited = 0
   local maxWait = tonumber(timeoutMs) or LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS
 
-  while LoadInFlightBySource[source] == true do
+  while LoadInFlightBySource[source] == attempt do
     if waited >= maxWait then
       return false, 'load_player_timeout'
     end
@@ -132,7 +134,7 @@ local function waitForLoadInFlight(source, timeoutMs)
 
   local cached = MZCache.playersBySource[source]
   if cached then
-    MZPlayerService.touchPlayer(source)
+    if not cached.state or cached.state.loaded ~= true then return false, 'player_cleanup_pending' end
     return true, cached
   end
 
@@ -142,8 +144,15 @@ end
 function MZPlayerService.loadCharacter(source, row, session)
   local cached = MZCache.playersBySource[source]
   if cached then
-    if tonumber(cached.characterId) == tonumber(row and row.id) then
+    if cached._activationPending then return nil, 'activation_in_progress' end
+    if not cached.state or cached.state.loaded ~= true then return nil, 'player_cleanup_pending' end
+    if tonumber(cached.characterId) == tonumber(row and row.id)
+      and cached.session and session and tonumber(cached.session.id) == tonumber(session.id) then
       MZPlayerService.touchPlayer(source)
+      local current = MZIdentityService.getSession(source)
+      if MZCache.playersBySource[source] ~= cached or not current or tonumber(current.id) ~= tonumber(session.id) then
+        return nil, 'session_changed'
+      end
       return cached
     end
     return nil, 'different_character_already_loaded'
@@ -154,17 +163,34 @@ function MZPlayerService.loadCharacter(source, row, session)
     return nil, readyErr
   end
 
-  if LoadInFlightBySource[source] == true then
-    local waitOk, resultOrErr = waitForLoadInFlight(source, LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS)
+  local inFlight = LoadInFlightBySource[source]
+  if inFlight and session and inFlight.sessionId == tonumber(session.id) then
+    local waitOk, resultOrErr = waitForLoadInFlight(source, LOAD_IN_FLIGHT_WAIT_TIMEOUT_MS, inFlight)
     if waitOk then
+      if tonumber(resultOrErr.characterId) ~= tonumber(row and row.id)
+        or not resultOrErr.session or not session or tonumber(resultOrErr.session.id) ~= tonumber(session.id) then
+        return nil, 'session_changed'
+      end
       return resultOrErr
     end
 
     return nil, resultOrErr
   end
 
-  LoadInFlightBySource[source] = true
+  if inFlight then
+    local current = MZIdentityService.getSession(source)
+    if not current or not session or tonumber(current.id) ~= tonumber(session.id) then return nil, 'session_changed' end
+  end
+  local loadAttempt = { sessionId = session and tonumber(session.id) }
+  LoadInFlightBySource[source] = loadAttempt
 
+  local attemptPlayer, reserved
+  local function sessionMatches()
+    local current = MZIdentityService.getSession(source)
+    return current and current.isActive == true and session and tonumber(current.id) == tonumber(session.id)
+      and tonumber(current.accountId) == tonumber(session.accountId)
+      and tonumber(current.activeCharacterId) == tonumber(row and row.id)
+  end
   local ok, playerData, err = xpcall(function()
     if type(row) ~= 'table' or not row.id or not row.account_id or not row.citizenid then
       return nil, 'invalid_character'
@@ -173,8 +199,25 @@ function MZPlayerService.loadCharacter(source, row, session)
       or tonumber(session.activeCharacterId) ~= tonumber(row.id) then
       return nil, 'invalid_session_binding'
     end
+    if not sessionMatches() then return nil, 'session_changed' end
+
+    local admitted, admissionErr = MZPlayerStateService.reservePlayer(session.accountId, row.id, row.citizenid, session.id, source)
+    if not admitted then return nil, admissionErr end
+    reserved = true
+
+    local fencedRow, barrierErr = MZPlayerRepository.establishMetadataBarrier(session.accountId, row.id, session.id)
+    if not fencedRow then return nil, barrierErr or 'barrier_unconfirmed' end
+    if not sessionMatches() then return nil, 'session_changed' end
+    row = fencedRow
+    if type(row.metadata) == 'string' and #row.metadata > MAX_METADATA_BYTES then return nil, 'player_state_too_large' end
+    if type(row.metadata) == 'table' then
+      local encodedOk, encoded = pcall(MZUtils.jsonEncode, row.metadata)
+      if not encodedOk or type(encoded) ~= 'string' or #encoded > MAX_METADATA_BYTES then return nil, 'player_state_too_large' end
+    end
 
     local playerData, metadataNormalization = buildPlayerData(source, row)
+    attemptPlayer = playerData
+    playerData._activationPending = session.lifecycle == 'CHARACTER_ACTIVATING'
     refreshSessionState(playerData, session)
 
     MZCache.playersBySource[source] = playerData
@@ -191,13 +234,10 @@ function MZPlayerService.loadCharacter(source, row, session)
         tostring(stateInitResult and stateInitResult.code or 'unknown')
       ))
     end
+    if not sessionMatches() or MZCache.playersBySource[source] ~= playerData then return nil, 'session_changed' end
 
-    local stateReady, stateReadyResult = MZPlayerStateService.getState(source)
+    local stateReady, stateReadyResult = MZPlayerStateService.getState(source, true)
     if not stateReady then
-      MZCache.playersByCitizenId[playerData.citizenid] = nil
-      MZCache.playersByCharacterId[playerData.characterId] = nil
-      MZCache.playersBySource[source] = nil
-      MZPlayerStateService.finalizeUnload(source)
       return nil, stateReadyResult and stateReadyResult.code or 'player_state_initialization_failed'
     end
 
@@ -220,10 +260,43 @@ function MZPlayerService.loadCharacter(source, row, session)
       }
     })
 
+    if not sessionMatches() or MZCache.playersBySource[source] ~= playerData then return nil, 'session_changed' end
     return playerData
   end, debug.traceback)
 
-  LoadInFlightBySource[source] = nil
+  if LoadInFlightBySource[source] == loadAttempt then LoadInFlightBySource[source] = nil end
+
+  if (not ok or not playerData) and attemptPlayer then
+    if MZCache.playersBySource[source] == attemptPlayer then
+      if MZPlayerStateService.markDisconnecting then MZPlayerStateService.markDisconnecting(attemptPlayer) end
+      local flushCall, flushOk = pcall(MZPlayerStateService.beginUnload, source, 'activation_failed')
+      if flushCall then
+        local finalized, cleared = pcall(MZPlayerStateService.finalizeUnload, source, attemptPlayer.session and attemptPlayer.session.id)
+        if finalized and cleared ~= false then
+          if MZCache.playersBySource[source] == attemptPlayer then MZCache.playersBySource[source] = nil end
+        else
+          attemptPlayer.state.loaded = false
+          print(('[mz_core][player_state][activation_cleanup_failed] source=%s'):format(tostring(source)))
+        end
+      else
+        attemptPlayer.state.loaded = false
+        print(('[mz_core][player_state][activation_cleanup_pending] source=%s citizenid=%s'):format(
+          tostring(source), tostring(attemptPlayer.citizenid)))
+      end
+    end
+    if MZCache.playersBySource[source] ~= attemptPlayer then
+      if MZCache.playersByCitizenId[attemptPlayer.citizenid] == attemptPlayer then
+        MZCache.playersByCitizenId[attemptPlayer.citizenid] = nil
+      end
+      if MZCache.playersByCharacterId[attemptPlayer.characterId] == attemptPlayer then
+        MZCache.playersByCharacterId[attemptPlayer.characterId] = nil
+      end
+    end
+  end
+
+  if (not ok or not playerData) and reserved then
+    MZPlayerStateService.releasePlayer(row.id, session.id)
+  end
 
   if not ok then
     print(('[mz_core] loadCharacter failed for source %s: %s'):format(tostring(source), tostring(playerData)))
@@ -253,7 +326,8 @@ function MZPlayerService.getPlayer(source)
 end
 
 function MZPlayerService.getPlayerByCitizenId(citizenid)
-  return MZCache.playersByCitizenId[citizenid]
+  local player = MZCache.playersByCitizenId[citizenid]
+  return player and not player._activationPending and player or nil
 end
 
 local function cloneSnapshotValue(value, depth)
@@ -271,6 +345,7 @@ end
 
 local function playerSnapshot(player)
   if type(player) ~= 'table' then return nil end
+  if player._activationPending then return nil end
   return {
     source = tonumber(player.source),
     accountId = tonumber(player.accountId),
@@ -296,15 +371,18 @@ local function playerSnapshot(player)
 end
 
 function MZPlayerService.getPlayerSnapshot(source)
+  if not MZPlayerService.isPlayerLoaded(source) then return nil end
   return playerSnapshot(MZPlayerService.getPlayer(source))
 end
 
 function MZPlayerService.getPlayerByCitizenIdSnapshot(citizenid)
-  return playerSnapshot(MZPlayerService.getPlayerByCitizenId(citizenid))
+  local player = MZPlayerService.getPlayerByCitizenId(citizenid)
+  if not player or not MZPlayerService.isPlayerLoaded(player.source) then return nil end
+  return playerSnapshot(player)
 end
 
 function MZPlayerService.getSourceByCitizenId(citizenid)
-  local player = MZCache.playersByCitizenId[citizenid]
+  local player = MZPlayerService.getPlayerByCitizenId(citizenid)
   return player and player.source or nil
 end
 
@@ -316,13 +394,19 @@ function MZPlayerService.isPlayerLoaded(source)
   local player = MZPlayerService.getPlayer(source)
   local session = MZIdentityService.getSession(source)
   return player ~= nil and player.state ~= nil and player.state.loaded == true
+    and not player._activationPending
     and session ~= nil and session.isActive == true
+    and player.session ~= nil and tonumber(player.session.id) == tonumber(session.id)
+    and tonumber(player.accountId) == tonumber(session.accountId)
     and tonumber(session.activeCharacterId) == tonumber(player.characterId)
 end
 
 function MZPlayerService.publishPlayerLoaded(source, player)
   local session = MZIdentityService.getSession(source)
   if not player or not session or session.isActive ~= true
+    or MZCache.playersBySource[source] ~= player
+    or not player.session or tonumber(player.session.id) ~= tonumber(session.id)
+    or tonumber(player.accountId) ~= tonumber(session.accountId)
     or not session.activeCharacterId
     or tonumber(session.activeCharacterId) ~= tonumber(player.characterId) then
     return false, 'active_character_required'
@@ -353,25 +437,63 @@ function MZPlayerService.publishPlayerLoaded(source, player)
   return true
 end
 
+function MZPlayerService.validateCharinfo(charinfo, requireIdentity)
+  if type(charinfo) ~= 'table' then return false end
+  local limits = { firstname = 64, lastname = 64, birthdate = 32, gender = 16, nationality = 64, phone = 32 }
+  for field, value in pairs(charinfo) do
+    if not limits[field] or type(value) ~= 'string' or #value > limits[field] or value:find('%z') then return false end
+  end
+  if requireIdentity then
+    for _, field in ipairs({ 'firstname', 'lastname', 'birthdate', 'gender', 'nationality' }) do
+      if type(charinfo[field]) ~= 'string' or not charinfo[field]:match('%S') then return false end
+    end
+  end
+  return true
+end
+
 function MZPlayerService.setCharinfo(source, charinfo)
   local player = MZPlayerService.getPlayer(source)
   if not player then return false, 'player_not_loaded' end
-
-  player.charinfo = player.charinfo or {}
-  for _, field in ipairs({ 'firstname', 'lastname', 'birthdate', 'gender', 'nationality', 'phone' }) do
-    if charinfo[field] ~= nil then
-      player.charinfo[field] = charinfo[field]
-    end
+  if not MZPlayerService.validateCharinfo(charinfo, false) then return false, 'invalid_charinfo' end
+  local updated = {}
+  for field, value in pairs(player.charinfo or {}) do updated[field] = value end
+  for field, value in pairs(charinfo) do
+    updated[field] = value
   end
-
-  MZPlayerRepository.updateCharinfo(player.citizenid, player.charinfo)
+  local ok = pcall(MZPlayerRepository.updateCharinfo, player.citizenid, updated)
+  if not ok then return false, 'database_error' end
+  if MZCache.playersBySource[source] ~= player then return false, 'session_changed' end
+  player.charinfo = updated
   MZPlayerService.touchPlayer(source)
   return true, player.charinfo
 end
 
-function MZPlayerService.unloadPlayer(source, reason, statePrepared, preparedFlushOk, preparedFlushResult)
+function MZPlayerService.detachForSourceReuse(source, expectedSessionId)
+  local player = MZCache.playersBySource[source]
+  if not player then return true end
+  if not player.session or tonumber(player.session.id) ~= tonumber(expectedSessionId) then
+    return false, 'session_changed'
+  end
+  player.state = player.state or {}
+  if MZPlayerStateService.markDisconnecting then MZPlayerStateService.markDisconnecting(player) end
+  local ok, detached = pcall(MZPlayerStateService.finalizeUnload, source, expectedSessionId)
+  if not ok or detached ~= true then
+    player.state.loaded = false
+    print(('[mz_core][player_state][source_reuse_retention_failed] source=%s sessionId=%s'):format(tostring(source), tostring(expectedSessionId)))
+    return false, 'retention_failed'
+  end
+  player.state.loaded = false
+  if MZCache.playersBySource[source] == player then MZCache.playersBySource[source] = nil end
+  if MZCache.playersByCitizenId[player.citizenid] == player then MZCache.playersByCitizenId[player.citizenid] = nil end
+  if MZCache.playersByCharacterId[player.characterId] == player then MZCache.playersByCharacterId[player.characterId] = nil end
+  return true
+end
+
+function MZPlayerService.unloadPlayer(source, reason, statePrepared, preparedFlushOk, preparedFlushResult, expectedPlayer)
   local player = MZCache.playersBySource[source]
   if not player then return end
+  if expectedPlayer and player ~= expectedPlayer then return false, { code = 'session_changed' } end
+  if MZPlayerStateService.markDisconnecting then MZPlayerStateService.markDisconnecting(player) end
 
   local flushOk, flushResult = preparedFlushOk, preparedFlushResult
   if statePrepared ~= true then
@@ -379,20 +501,27 @@ function MZPlayerService.unloadPlayer(source, reason, statePrepared, preparedFlu
   end
 
   local sessionId = player.session and player.session.id or nil
+  if MZCache.playersBySource[source] ~= player then return false, { code = 'session_changed' } end
+  player.state = player.state or {}
+  player.state.loaded = false
+  local finalized, cleared = pcall(MZPlayerStateService.finalizeUnload, source, sessionId)
+  if not finalized or cleared == false then
+    print(('[mz_core][player_state][unload_retention_failed] accountId=%s characterId=%s sessionId=%s')
+      :format(tostring(player.accountId), tostring(player.characterId), tostring(sessionId)))
+    return false, { code = 'retention_failed' }
+  end
   local before = {
     state = player.state,
     session = player.session
   }
 
-  player.state = player.state or {}
-  player.state.loaded = false
   player.state.lastSeenAt = os.time()
 
   if MZPlayerStateSyncService and MZPlayerStateSyncService.clearStateBags then
     MZPlayerStateSyncService.clearStateBags(source)
   end
 
-  MZLogService.createDetailed('player', 'unloaded', {
+  local logged, logErr = pcall(MZLogService.createDetailed, 'player', 'unloaded', {
     actor = MZLogService.makeActor('player', player.citizenid, {
       source = source,
     }),
@@ -412,11 +541,11 @@ function MZPlayerService.unloadPlayer(source, reason, statePrepared, preparedFlu
       event = 'unload_player'
     }
   })
+  if not logged then print(('[mz_core][player][unload_log_failed] sessionId=%s error=%s'):format(tostring(sessionId), tostring(logErr))) end
 
-  MZCache.playersByCitizenId[player.citizenid] = nil
-  MZCache.playersByCharacterId[player.characterId] = nil
-  MZCache.playersBySource[source] = nil
-  MZPlayerStateService.finalizeUnload(source)
+  if MZCache.playersByCitizenId[player.citizenid] == player then MZCache.playersByCitizenId[player.citizenid] = nil end
+  if MZCache.playersByCharacterId[player.characterId] == player then MZCache.playersByCharacterId[player.characterId] = nil end
+  if MZCache.playersBySource[source] == player then MZCache.playersBySource[source] = nil end
   return flushOk, flushResult
 end
 

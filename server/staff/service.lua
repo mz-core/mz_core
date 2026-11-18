@@ -1,6 +1,8 @@
 MZStaffService = MZStaffService or {}
 
 local ContextCache = {}
+local CacheGeneration = 0
+local BlockedRoles = {}
 local OWNER_LEVEL = 1000000
 
 local function trim(value, maxLength)
@@ -58,15 +60,23 @@ end
 local function loadAccountContext(accountId)
   accountId = tonumber(accountId)
   if not accountId or accountId <= 0 then return nil end
-  if ContextCache[accountId] ~= nil then return ContextCache[accountId] or nil end
+  if ContextCache[accountId] ~= nil then
+    local cached = ContextCache[accountId]
+    if cached and BlockedRoles[cached.role.id] then return nil end
+    return cached or nil
+  end
+  local generation = CacheGeneration
 
   local assignment = MZStaffRepository.getAssignment(accountId)
+  if assignment and BlockedRoles[tonumber(assignment.role_id)] then return nil end
   if not assignment or not asBool(assignment.active) or not asBool(assignment.role_active) then
+    if generation ~= CacheGeneration then return nil end
     ContextCache[accountId] = false
     return nil
   end
 
   local permissions, permissionSet = permissionList(assignment.role_id)
+  if generation ~= CacheGeneration then return nil end
   local context = {
     accountId = accountId,
     contextCharacterId = tonumber(assignment.context_character_id),
@@ -86,6 +96,7 @@ local function loadAccountContext(accountId)
 end
 
 local function invalidate(accountId)
+  CacheGeneration = CacheGeneration + 1
   if accountId then ContextCache[tonumber(accountId)] = nil else ContextCache = {} end
 end
 
@@ -362,8 +373,13 @@ function MZStaffService.UpdateRole(source, code, payload)
   if level < 1 or level > 9999 or level >= actor.level then return false, 'invalid_level' end
   if not active and MZStaffRepository.countActiveAssignments(role.id) > 0 then return false, 'role_has_assignments' end
   local before = roleDto(role)
-  local ok = pcall(MZStaffRepository.updateRole, role.id, { name = name, level = level, active = active })
-  if not ok then return false, 'role_conflict' end
+  local ok, affected = pcall(MZStaffRepository.updateRole, role.id, { name = name, level = level, active = active, revision = role.revision })
+  if not ok or tonumber(affected) ~= 1 then
+    BlockedRoles[tonumber(role.id)] = true
+    CacheGeneration = CacheGeneration + 1
+    return false, 'role_conflict'
+  end
+  BlockedRoles[tonumber(role.id)] = nil
   invalidate()
   local after = roleDto(MZStaffRepository.getRoleById(role.id))
   audit(source, 'staff.role.updated', { type = 'staff_role', id = role.code }, before, after, reason)
@@ -388,8 +404,13 @@ function MZStaffService.SetRolePermissions(source, code, permissions, reason)
     selected[permission] = true
   end
   local before = roleDto(role)
-  local ok = pcall(MZStaffRepository.setRolePermissions, role.id, selected)
-  if not ok then return false, 'database_error' end
+  local ok, committed, updateErr = pcall(MZStaffRepository.setRolePermissions, role.id, selected, role.revision)
+  if not ok or committed ~= true then
+    BlockedRoles[tonumber(role.id)] = true
+    CacheGeneration = CacheGeneration + 1
+    return false, ok and (updateErr or 'database_error') or 'database_error'
+  end
+  BlockedRoles[tonumber(role.id)] = nil
   invalidate()
   local after = roleDto(MZStaffRepository.getRoleById(role.id))
   audit(source, 'staff.role.permissions_updated', { type = 'staff_role', id = role.code }, before, after, reason)

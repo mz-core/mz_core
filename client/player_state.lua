@@ -171,9 +171,12 @@ local function waitForPed(generation, snapshot)
 end
 
 local function canonicalToPhysicalHealth(canonical, pedMax)
-  local canonicalMax = tonumber(config().status and config().status.health and config().status.health.max) or 200
-  pedMax = math.max(1, math.floor(tonumber(pedMax) or canonicalMax))
-  return math.floor((canonical / canonicalMax) * pedMax + 0.5)
+  local canonicalMax = math.max(1, tonumber(config().status and config().status.health and config().status.health.max) or 200)
+  pedMax = math.max(2, math.floor(tonumber(pedMax) or canonicalMax))
+  local floor = math.floor(pedMax / 2)
+  local value = math.max(0, math.min(canonicalMax, tonumber(canonical) or 0))
+  if value == 0 then return 0 end
+  return math.min(pedMax, floor + math.max(1, math.floor((value / canonicalMax) * (pedMax - floor) + 0.5)))
 end
 
 local function downedPhysicalHealth(pedMax)
@@ -184,9 +187,10 @@ local function downedPhysicalHealth(pedMax)
 end
 
 local function physicalToCanonicalHealth(physical, pedMax)
-  local canonicalMax = tonumber(config().status and config().status.health and config().status.health.max) or 200
-  pedMax = math.max(1, math.floor(tonumber(pedMax) or canonicalMax))
-  local value = math.floor((math.max(0, physical) / pedMax) * canonicalMax + 0.5)
+  local canonicalMax = math.max(1, tonumber(config().status and config().status.health and config().status.health.max) or 200)
+  pedMax = math.max(2, math.floor(tonumber(pedMax) or canonicalMax))
+  local floor = math.floor(pedMax / 2)
+  local value = math.floor((math.max(0, (tonumber(physical) or 0) - floor) / (pedMax - floor)) * canonicalMax + 0.5)
   return math.max(0, math.min(canonicalMax, value))
 end
 
